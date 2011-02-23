@@ -11,7 +11,7 @@ except ImportError:
 
 author = 'Rick van Hattem'
 email = 'Rick.van.Hattem@Fawo.nl'
-version = '0.1'
+version = '0.2'
 desc = '''Wraps the portalocker recipe for easy usage'''
 
 setup(name='portalocker',
@@ -35,7 +35,7 @@ setup(name='portalocker',
       packages=find_packages(exclude=['ez_setup', 'examples', 'tests']),
       zip_safe=False,
       platforms=['any'],
-      test_suite = 'nose.collector',
+      test_suite='nose.collector',
       **extra
 )
 

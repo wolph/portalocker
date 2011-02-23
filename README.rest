@@ -7,7 +7,7 @@ Overview
 
 Portalocker is a library to provide an easy API to file locking.
 
-Originally created as a Python Recipe by Jonathan Feinberg
+Originally created as a Python Recipe by Jonathan Feinberg and  Lowell Alleman
 http://code.activestate.com/recipes/65203-portalocker-cross-platform-posixnt-api-for-flock-s/
 
 Examples

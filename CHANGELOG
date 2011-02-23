@@ -2,3 +2,7 @@
 
  * Initial release
 
+0.2:
+
+ * Added `Lock` class to help prevent cache race conditions
+
