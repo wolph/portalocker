@@ -6,3 +6,7 @@
 
  * Added `Lock` class to help prevent cache race conditions
 
+0.3:
+
+ * Now actually returning the file descriptor from the `Lock` class
+

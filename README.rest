@@ -13,13 +13,19 @@ http://code.activestate.com/recipes/65203-portalocker-cross-platform-posixnt-api
 Examples
 --------
 
+To make sure your cache generation scripts don't race, use the `Lock` class:
+
+>>> import portalocker
+>>> with portalocker.Lock('somefile', timeout=1) as fh:
+    print >>fh, 'writing some stuff to my cache...'
+
 To lock a file exclusively, use the `lock` method:
 
 >>> import portalocker
->>> file = open("somefile", "r+")
+>>> file = open('somefile', 'r+')
 >>> portalocker.lock(file, portalocker.LOCK_EX)
 >>> file.seek(12)
->>> file.write("foo")
+>>> file.write('foo')
 >>> file.close()
 
 There is no explicit need to unlock the file as it is automatically unlocked

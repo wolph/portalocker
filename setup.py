@@ -11,7 +11,7 @@ except ImportError:
 
 author = 'Rick van Hattem'
 email = 'Rick.van.Hattem@Fawo.nl'
-version = '0.2'
+version = '0.3'
 desc = '''Wraps the portalocker recipe for easy usage'''
 
 setup(name='portalocker',
