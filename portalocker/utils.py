@@ -83,15 +83,17 @@ class Lock(object):
 
                 # Try again
                 try:
-                    fh = self._get_lock(fh)
-
-                    # We've got the lock, now return an error if
-                    # fail_when_locked is True or break if not
+                    
+                    # We already tried to the get the lock
+                    # If fail_when_locked is true, then stop trying
                     if fail_when_locked:
-                        self._release_lock()
                         raise AlreadyLocked(*exception)
+
                     else:
+                        # We've got the lock
+                        fh = self._get_lock(fh)
                         break
+                    
                 except portalocker.LockException:
                     pass
 
