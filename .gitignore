@@ -1,3 +1,5 @@
 build/
 locked_file
 dist
+htmlcov
+*.egg-info

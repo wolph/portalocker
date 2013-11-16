@@ -11,6 +11,7 @@ extra = {}
 if sys.version_info >= (3, 0):
     extra.update(use_2to3=True)
 
+
 class PyTest(TestCommand):
     def finalize_options(self):
         TestCommand.finalize_options(self)
@@ -46,7 +47,7 @@ setup(
     packages=find_packages(exclude=['ez_setup', 'examples', 'tests']),
     zip_safe=False,
     platforms=['any'],
-    test_suite='nose.collector',
     cmdclass={'test': PyTest},
+    setup_requires=['pytest', 'pytest-flakes', 'pytest-pep8', 'pytest-cov'],
     **extra
 )
