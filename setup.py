@@ -4,7 +4,7 @@ import sys
 
 author = 'Rick van Hattem'
 email = 'Rick.van.Hattem@Fawo.nl'
-version = '0.3'
+version = '0.4'
 desc = '''Wraps the portalocker recipe for easy usage'''
 
 extra = {}
