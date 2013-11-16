@@ -48,17 +48,5 @@ setup(
     zip_safe=False,
     platforms=['any'],
     cmdclass={'test': PyTest},
-    setup_requires=[
-        'autopep8==0.9.6',
-        'cov-core==1.7',
-        'coverage==3.7',
-        'pep8==1.4.6',
-        'pyflakes==0.7.3',
-        'pytest==2.4.2',
-        'pytest-cache==1.0',
-        'pytest-cov==1.6',
-        'pytest-flakes==0.2',
-        'pytest-pep8==1.0.5',
-    ],
     **extra
 )

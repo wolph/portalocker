@@ -1,0 +1,10 @@
+autopep8
+cov-core
+coverage
+pep8
+pyflakes
+pytest
+pytest-cache
+pytest-cov
+pytest-flakes
+pytest-pep8
