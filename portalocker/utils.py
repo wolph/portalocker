@@ -11,21 +11,18 @@ __all__ = [
     'AlreadyLocked',
 ]
 
+
 class AlreadyLocked(Exception):
     pass
 
+
 class Lock(object):
+
     def __init__(
-            self,
-            filename,
-            mode='a',
-            truncate=0,
-            timeout=DEFAULT_TIMEOUT,
-            check_interval=DEFAULT_CHECK_INTERVAL,
-            fail_when_locked=True,
-        ):
+            self, filename, mode='a', truncate=0, timeout=DEFAULT_TIMEOUT,
+            check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=True):
         '''Lock manager with build-in timeout
-        
+
         filename -- filename
         mode -- the open mode, 'a' or 'ab' should be used for writing
         truncate -- use truncate to emulate 'w' mode, None is disabled, 0 is
@@ -34,7 +31,7 @@ class Lock(object):
         check_interval -- check interval while waiting
         fail_when_locked -- after the initial lock failed, return an error
             or lock the file
-        
+
         fail_when_locked is useful when multiple threads/processes can race
         when creating a file. If set to true than the system will wait till
         the lock was acquired and then return an AlreadyLocked exception.
@@ -53,7 +50,8 @@ class Lock(object):
 
         assert 'w' not in mode, 'Mode "w" clears the file before locking'
 
-    def acquire(self, timeout=None, check_interval=None, fail_when_locked=None):
+    def acquire(
+            self, timeout=None, check_interval=None, fail_when_locked=None):
         '''Acquire the locked filehandle'''
         if timeout is None:
             timeout = self.timeout
@@ -83,17 +81,17 @@ class Lock(object):
 
                 # Try again
                 try:
-                    
+
                     # We already tried to the get the lock
                     # If fail_when_locked is true, then stop trying
                     if fail_when_locked:
                         raise AlreadyLocked(*exception)
 
-                    else:
+                    else:  # pragma: no cover
                         # We've got the lock
                         fh = self._get_lock(fh)
                         break
-                    
+
                 except portalocker.LockException:
                     pass
 
@@ -114,7 +112,7 @@ class Lock(object):
     def _get_lock(self, fh):
         '''
         Try to lock the given filehandle
-        
+
         returns LockException if it fails'''
         portalocker.lock(fh, LOCK_METHOD)
         return fh
@@ -142,4 +140,3 @@ class Lock(object):
     def __exit__(self, type, value, tb):
         if self.fh:
             self.fh.close()
-

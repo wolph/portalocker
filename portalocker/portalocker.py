@@ -61,16 +61,17 @@ __all__ = [
 
 import os
 
+
 class LockException(Exception):
     # Error codes:
     LOCK_FAILED = 1
 
-if os.name == 'nt':
+if os.name == 'nt':  # pragma: no cover
     import win32con
     import win32file
     import pywintypes
     LOCK_EX = win32con.LOCKFILE_EXCLUSIVE_LOCK
-    LOCK_SH = 0 # the default
+    LOCK_SH = 0  # the default
     LOCK_NB = win32con.LOCKFILE_FAIL_IMMEDIATELY
     # is there any reason not to reuse the following structure?
     __overlapped = pywintypes.OVERLAPPED()
@@ -79,50 +80,64 @@ elif os.name == 'posix':
     LOCK_EX = fcntl.LOCK_EX
     LOCK_SH = fcntl.LOCK_SH
     LOCK_NB = fcntl.LOCK_NB
-else:
-    raise RuntimeError, 'PortaLocker only defined for nt and posix platforms'
+else:  # pragma: no cover
+    raise RuntimeError('PortaLocker only defined for nt and posix platforms')
 
-if os.name == 'nt':
-    def lock(file, flags):
-        hfile = win32file._get_osfhandle(file.fileno())
-        try:
-            win32file.LockFileEx(hfile, flags, 0, -0x10000, __overlapped)
-        except pywintypes.error, exc_value:
-            # error: (33, 'LockFileEx', 'The process cannot access the file because another process has locked a portion of the file.')
-            if exc_value[0] == 33:
-                raise LockException(LockException.LOCK_FAILED, exc_value[2])
-            else:
-                # Q:  Are there exceptions/codes we should be dealing with here?
-                raise
-    
-    def unlock(file):
-        hfile = win32file._get_osfhandle(file.fileno())
-        try:
-            win32file.UnlockFileEx(hfile, 0, -0x10000, __overlapped)
-        except pywintypes.error, exc_value:
-            if exc_value[0] == 158:
-                # error: (158, 'UnlockFileEx', 'The segment is already unlocked.')
-                # To match the 'posix' implementation, silently ignore this error
-                pass
-            else:
-                # Q:  Are there exceptions/codes we should be dealing with here?
-                raise
 
+def nt_lock(file, flags):  # pragma: no cover
+    hfile = win32file._get_osfhandle(file.fileno())
+    try:
+        win32file.LockFileEx(hfile, flags, 0, -0x10000, __overlapped)
+    except pywintypes.error, exc_value:
+        # error: (33, 'LockFileEx', 'The process cannot access the file
+        # because another process has locked a portion of the file.')
+        if exc_value[0] == 33:
+            raise LockException(LockException.LOCK_FAILED, exc_value[2])
+        else:
+            # Q:  Are there exceptions/codes we should be dealing with
+            # here?
+            raise
+
+
+def nt_unlock(file):  # pragma: no cover
+    hfile = win32file._get_osfhandle(file.fileno())
+    try:
+        win32file.UnlockFileEx(hfile, 0, -0x10000, __overlapped)
+    except pywintypes.error, exc_value:
+        if exc_value[0] == 158:
+            # error: (158, 'UnlockFileEx', 'The segment is already '
+            #         'unlocked.')
+            # To match the 'posix' implementation, silently ignore this
+            # error
+            pass
+        else:
+            # Q:  Are there exceptions/codes we should be dealing with
+            # here?
+            raise
+
+
+def posix_lock(file, flags):
+    try:
+        fcntl.flock(file.fileno(), flags)
+    except IOError, exc_value:
+        # The exception code varies on different systems so we'll catch
+        # every IO error
+        raise LockException(*exc_value)
+
+
+def posix_unlock(file):
+    fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+
+if os.name == 'nt':  # pragma: no cover
+    lock = nt_lock
+    unlock = nt_unlock
 elif os.name == 'posix':
-    def lock(file, flags):
-        try:
-            fcntl.flock(file.fileno(), flags)
-        except IOError, exc_value:
-            # The exception code varies on different systems so we'll catch
-            # every IO error
-            raise LockException(*exc_value)
-    
-    def unlock(file):
-        fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+    lock = posix_lock
+    unlock = posix_unlock
+else:  # pragma: no cover
+    raise RuntimeError('Your os %r is unsupported.' % os.name)
 
-
-
-if __name__ == '__main__':
+if __name__ == '__main__':  # pragma: no cover
     from time import time, strftime, localtime
     import sys
     import portalocker
@@ -131,7 +146,7 @@ if __name__ == '__main__':
     portalocker.lock(log, portalocker.LOCK_EX)
 
     timestamp = strftime('%m/%d/%Y %H:%M:%S\n', localtime(time()))
-    log.write( timestamp )
+    log.write(timestamp)
 
     print 'Wrote lines. Hit enter to release lock.'
     dummy = sys.stdin.readline()
