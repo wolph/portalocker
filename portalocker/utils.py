@@ -137,6 +137,6 @@ class Lock(object):
         self.fh = self.acquire()
         return self.fh
 
-    def __exit__(self, type, value, tb):
+    def __exit__(self, type_, value, tb):
         if self.fh:
             self.fh.close()

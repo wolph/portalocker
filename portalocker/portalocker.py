@@ -84,8 +84,8 @@ else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')
 
 
-def nt_lock(file, flags):  # pragma: no cover
-    hfile = win32file._get_osfhandle(file.fileno())
+def nt_lock(file_, flags):  # pragma: no cover
+    hfile = win32file._get_osfhandle(file_.fileno())
     try:
         win32file.LockFileEx(hfile, flags, 0, -0x10000, __overlapped)
     except pywintypes.error, exc_value:
@@ -99,8 +99,8 @@ def nt_lock(file, flags):  # pragma: no cover
             raise
 
 
-def nt_unlock(file):  # pragma: no cover
-    hfile = win32file._get_osfhandle(file.fileno())
+def nt_unlock(file_):  # pragma: no cover
+    hfile = win32file._get_osfhandle(file_.fileno())
     try:
         win32file.UnlockFileEx(hfile, 0, -0x10000, __overlapped)
     except pywintypes.error, exc_value:
@@ -116,17 +116,17 @@ def nt_unlock(file):  # pragma: no cover
             raise
 
 
-def posix_lock(file, flags):
+def posix_lock(file_, flags):
     try:
-        fcntl.flock(file.fileno(), flags)
+        fcntl.flock(file_.fileno(), flags)
     except IOError, exc_value:
         # The exception code varies on different systems so we'll catch
         # every IO error
         raise LockException(*exc_value)
 
 
-def posix_unlock(file):
-    fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+def posix_unlock(file_):
+    fcntl.flock(file_.fileno(), fcntl.LOCK_UN)
 
 if os.name == 'nt':  # pragma: no cover
     lock = nt_lock
@@ -136,19 +136,3 @@ elif os.name == 'posix':
     unlock = posix_unlock
 else:  # pragma: no cover
     raise RuntimeError('Your os %r is unsupported.' % os.name)
-
-if __name__ == '__main__':  # pragma: no cover
-    from time import time, strftime, localtime
-    import sys
-    import portalocker
-
-    log = open('log.txt', 'a+')
-    portalocker.lock(log, portalocker.LOCK_EX)
-
-    timestamp = strftime('%m/%d/%Y %H:%M:%S\n', localtime(time()))
-    log.write(timestamp)
-
-    print 'Wrote lines. Hit enter to release lock.'
-    dummy = sys.stdin.readline()
-
-    log.close()
