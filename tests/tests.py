@@ -5,8 +5,8 @@ import portalocker
 
 def test_exceptions():
     # Open the file 2 times
-    a = file('locked_file', 'a')
-    b = file('locked_file', 'a')
+    a = open('locked_file', 'a')
+    b = open('locked_file', 'a')
 
     # Lock exclusive non-blocking
     lock_flags = portalocker.LOCK_EX | portalocker.LOCK_NB
@@ -27,20 +27,20 @@ def test_with_timeout():
     # Open the file 2 times
     with pytest.raises(portalocker.AlreadyLocked):
         with portalocker.Lock('locked_file', timeout=0.1) as fh:
-            print >>fh, 'writing some stuff to my cache...'
+            print('writing some stuff to my cache...', file=fh)
             with portalocker.Lock('locked_file', timeout=0.1):
                 pass
-            print >>fh, 'writing more stuff to my cache...'
+            print('writing more stuff to my cache...', file=fh)
 
 
 def test_without_timeout():
     # Open the file 2 times
     with pytest.raises(portalocker.LockException):
         with portalocker.Lock('locked_file', timeout=None) as fh:
-            print >>fh, 'writing some stuff to my cache...'
+            print('writing some stuff to my cache...', file=fh)
             with portalocker.Lock('locked_file', timeout=None):
                 pass
-            print >>fh, 'writing more stuff to my cache...'
+            print('writing more stuff to my cache...', file=fh)
 
 
 def test_simple():
