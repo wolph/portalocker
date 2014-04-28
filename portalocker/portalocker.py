@@ -122,7 +122,7 @@ def posix_lock(file_, flags):
     except IOError as exc_value:
         # The exception code varies on different systems so we'll catch
         # every IO error
-        raise LockException(*exc_value)
+        raise LockException(exc_value)
 
 
 def posix_unlock(file_):
