@@ -1,4 +1,9 @@
-from __future__ import with_statement
+
+import sys
+
+if sys.version_info.major == 2 and sys.version_info.minor == 5:
+    from __future__ import with_statement
+
 import time
 from . import portalocker
 
@@ -72,7 +77,7 @@ class Lock(object):
         try:
             # Try to lock
             fh = self._get_lock(fh)
-        except portalocker.LockException, exception:
+        except portalocker.LockException as exception:
             # Try till the timeout is 0
             while timeout > 0:
                 # Wait a bit

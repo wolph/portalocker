@@ -88,7 +88,7 @@ def nt_lock(file_, flags):  # pragma: no cover
     hfile = win32file._get_osfhandle(file_.fileno())
     try:
         win32file.LockFileEx(hfile, flags, 0, -0x10000, __overlapped)
-    except pywintypes.error, exc_value:
+    except pywintypes.error as exc_value:
         # error: (33, 'LockFileEx', 'The process cannot access the file
         # because another process has locked a portion of the file.')
         if exc_value[0] == 33:
@@ -103,7 +103,7 @@ def nt_unlock(file_):  # pragma: no cover
     hfile = win32file._get_osfhandle(file_.fileno())
     try:
         win32file.UnlockFileEx(hfile, 0, -0x10000, __overlapped)
-    except pywintypes.error, exc_value:
+    except pywintypes.error as exc_value:
         if exc_value[0] == 158:
             # error: (158, 'UnlockFileEx', 'The segment is already '
             #         'unlocked.')
@@ -119,7 +119,7 @@ def nt_unlock(file_):  # pragma: no cover
 def posix_lock(file_, flags):
     try:
         fcntl.flock(file_.fileno(), flags)
-    except IOError, exc_value:
+    except IOError as exc_value:
         # The exception code varies on different systems so we'll catch
         # every IO error
         raise LockException(*exc_value)
