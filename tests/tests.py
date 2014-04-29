@@ -67,4 +67,3 @@ def test_class():
 
     with lock2:
         pass
-
