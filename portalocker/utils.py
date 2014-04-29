@@ -1,4 +1,4 @@
-from __future__ import with_statement
+
 import time
 from . import portalocker
 
@@ -55,6 +55,8 @@ class Lock(object):
         '''Acquire the locked filehandle'''
         if timeout is None:
             timeout = self.timeout
+        if timeout is None:
+            timeout = 0
 
         if check_interval is None:
             check_interval = self.check_interval
@@ -72,7 +74,7 @@ class Lock(object):
         try:
             # Try to lock
             fh = self._get_lock(fh)
-        except portalocker.LockException, exception:
+        except portalocker.LockException as exception:
             # Try till the timeout is 0
             while timeout > 0:
                 # Wait a bit
@@ -85,7 +87,7 @@ class Lock(object):
                     # We already tried to the get the lock
                     # If fail_when_locked is true, then stop trying
                     if fail_when_locked:
-                        raise AlreadyLocked(*exception)
+                        raise AlreadyLocked(exception)
 
                     else:  # pragma: no cover
                         # We've got the lock
@@ -97,7 +99,7 @@ class Lock(object):
 
             else:
                 # We got a timeout... reraising
-                raise portalocker.LockException(*exception)
+                raise portalocker.LockException(exception)
 
         # Prepare the filehandle (truncate if needed)
         fh = self._prepare_fh(fh)
