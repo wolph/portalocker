@@ -4,7 +4,7 @@ import sys
 
 author = 'Rick van Hattem'
 email = 'Rick.van.Hattem@Fawo.nl'
-version = '0.5'
+version = '0.5.1'
 desc = '''Wraps the portalocker recipe for easy usage'''
 
 extra = {}
@@ -44,7 +44,7 @@ setup(
     author_email=email,
     url='https://github.com/WoLpH/portalocker',
     license='PSF',
-    packages=find_packages(exclude=['ez_setup', 'examples', 'tests']),
+    packages=find_packages(exclude=['ez_setup', 'examples']),
     zip_safe=False,
     platforms=['any'],
     cmdclass={'test': PyTest},
