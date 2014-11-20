@@ -2,10 +2,7 @@ from setuptools import setup, find_packages
 from setuptools.command.test import test as TestCommand
 import sys
 
-author = 'Rick van Hattem'
-email = 'Rick.van.Hattem@Fawo.nl'
-version = '0.5.2'
-desc = '''Wraps the portalocker recipe for easy usage'''
+from portalocker import metadata
 
 extra = {}
 if sys.version_info >= (3, 0):
@@ -27,8 +24,8 @@ class PyTest(TestCommand):
 
 setup(
     name='portalocker',
-    version=version,
-    description=desc,
+    version=metadata.__version__,
+    description=metadata.__description__,
     long_description=open('README.rest').read(),
     classifiers=[
         'Intended Audience :: Developers',
@@ -40,9 +37,9 @@ setup(
         'Programming Language :: Python :: 3.1',
     ],
     keywords='locking, locks, with statement, windows, linux, unix',
-    author=author,
-    author_email=email,
-    url='https://github.com/WoLpH/portalocker',
+    author=metadata.__author__,
+    author_email=metadata.__email__,
+    url=metadata.__url__,
     license='PSF',
     packages=find_packages(exclude=['ez_setup', 'examples']),
     zip_safe=False,

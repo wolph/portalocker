@@ -26,6 +26,22 @@ Portalocker is a library to provide an easy API to file locking.
 Originally created as a Python Recipe by Jonathan Feinberg and  Lowell Alleman
 http://code.activestate.com/recipes/65203-portalocker-cross-platform-posixnt-api-for-flock-s/
 
+The module is currently maintained by Rick van Hattem <Wolph@wol.ph>.
+The project resides at https://github.com/WoLpH/portalocker . Bugs and feature
+requests can be submitted there. Patches are also very welcome.
+
+Links
+-----
+
+* Documentation
+    - http://portalocker.readthedocs.org/en/latest/
+* Source
+    - https://github.com/WoLpH/portalocker
+* Bug reports 
+    - https://github.com/WoLpH/portalocker/issues
+* Package homepage
+    - https://pypi.python.org/pypi/portalocker
+
 Examples
 --------
 
@@ -53,13 +69,6 @@ than you can do it like this:
 Do note that your data might still be in a buffer so it is possible that your
 data is not available until you `flush()` or `close()`.
 
-Contact
--------
-
-The module is maintaned by Rick van Hattem <Rick.van.Hattem@Fawo.nl>.
-The project resides at https://github.com/WoLpH/portalocker . Bugs and feature
-requests can be submitted there. Patches are also very welcome.
-
 Changelog
 ---------
 
@@ -69,5 +78,4 @@ License
 -------
 
 see the LICENSE file
-
 
