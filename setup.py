@@ -1,8 +1,13 @@
-from setuptools import setup, find_packages
-from setuptools.command.test import test as TestCommand
 import sys
+import setuptools
+from setuptools.command.test import test as TestCommand
 
-from portalocker import metadata
+__package_name__ = 'portalocker'
+__author__ = 'Rick van Hattem'
+__email__ = 'wolph@wol.ph'
+__version__ = '0.5.4'
+__description__ = '''Wraps the portalocker recipe for easy usage'''
+__url__ = 'https://github.com/WoLpH/portalocker'
 
 extra = {}
 if sys.version_info >= (3, 0):
@@ -16,34 +21,36 @@ class PyTest(TestCommand):
         self.test_suite = True
 
     def run_tests(self):
-        #import here, cause outside the eggs aren't loaded
+        # import here, cause outside the eggs aren't loaded
         import pytest
         errno = pytest.main(self.test_args)
         sys.exit(errno)
 
 
-setup(
-    name='portalocker',
-    version=metadata.__version__,
-    description=metadata.__description__,
-    long_description=open('README.rest').read(),
-    classifiers=[
-        'Intended Audience :: Developers',
-        'Programming Language :: Python',
-        'Programming Language :: Python :: 2.5',
-        'Programming Language :: Python :: 2.6',
-        'Programming Language :: Python :: 2.7',
-        'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.1',
-    ],
-    keywords='locking, locks, with statement, windows, linux, unix',
-    author=metadata.__author__,
-    author_email=metadata.__email__,
-    url=metadata.__url__,
-    license='PSF',
-    packages=find_packages(exclude=['ez_setup', 'examples']),
-    zip_safe=False,
-    platforms=['any'],
-    cmdclass={'test': PyTest},
-    **extra
-)
+if __name__ == '__main__':
+    setuptools.setup(
+        name=__package_name__,
+        version=__version__,
+        description=__description__,
+        long_description=open('README.rest').read(),
+        classifiers=[
+            'Intended Audience :: Developers',
+            'Programming Language :: Python',
+            'Programming Language :: Python :: 2.5',
+            'Programming Language :: Python :: 2.6',
+            'Programming Language :: Python :: 2.7',
+            'Programming Language :: Python :: 3',
+            'Programming Language :: Python :: 3.1',
+        ],
+        keywords='locking, locks, with statement, windows, linux, unix',
+        author=__author__,
+        author_email=__email__,
+        url=__url__,
+        license='PSF',
+        packages=setuptools.find_packages(exclude=['ez_setup', 'examples']),
+        zip_safe=False,
+        platforms=['any'],
+        cmdclass={'test': PyTest},
+        **extra
+    )
+
