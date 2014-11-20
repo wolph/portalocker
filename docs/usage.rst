@@ -1,3 +1,3 @@
 
-.. include :: ../README.rest
+.. include :: ../README.rst
 

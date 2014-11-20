@@ -32,7 +32,7 @@ if __name__ == '__main__':
         name=__package_name__,
         version=__version__,
         description=__description__,
-        long_description=open('README.rest').read(),
+        long_description=open('README.rst').read(),
         classifiers=[
             'Intended Audience :: Developers',
             'Programming Language :: Python',

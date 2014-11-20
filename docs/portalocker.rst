@@ -4,14 +4,6 @@ portalocker package
 Submodules
 ----------
 
-portalocker.metadata module
----------------------------
-
-.. automodule:: portalocker.metadata
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
 portalocker.portalocker module
 ------------------------------
 
