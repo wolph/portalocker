@@ -16,7 +16,7 @@ install:
 
 # command to run tests
 script:
-    - {envpython} setup.py test
+    - python setup.py test
 
 after_success:
     - coveralls
