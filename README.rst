@@ -41,6 +41,8 @@ Links
     - https://github.com/WoLpH/portalocker/issues
 * Package homepage
     - https://pypi.python.org/pypi/portalocker
+* My blog
+    - http://w.wol.ph/
 
 Examples
 --------
