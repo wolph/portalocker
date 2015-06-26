@@ -2,21 +2,17 @@
 portalocker - Cross-platform locking library
 ############################################
 
-.. image:: https://travis-ci.org/WoLpH/portalocker.png?branch=master
+.. image:: https://travis-ci.org/WoLpH/portalocker.svg?branch=master
     :alt: Test Status
     :target: https://travis-ci.org/WoLpH/portalocker
 
-.. image:: https://coveralls.io/repos/WoLpH/portalocker/badge.png?branch=master
+.. image:: https://coveralls.io/repos/WoLpH/portalocker/badge.svg?branch=master
     :alt: Coverage Status
     :target: https://coveralls.io/r/WoLpH/portalocker?branch=master
 
 .. image:: https://landscape.io/github/WoLpH/portalocker/master/landscape.png
    :target: https://landscape.io/github/WoLpH/portalocker/master
    :alt: Code Health
-
-.. image:: https://requires.io/github/WoLpH/portalocker/requirements.png?branch=master
-   :target: https://requires.io/github/WoLpH/portalocker/requirements/?branch=master
-   :alt: Requirements Status
 
 Overview
 --------
