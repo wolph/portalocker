@@ -70,6 +70,7 @@ if os.name == 'nt':  # pragma: no cover
     import win32con
     import win32file
     import pywintypes
+    import winerror
     LOCK_EX = win32con.LOCKFILE_EXCLUSIVE_LOCK
     LOCK_SH = 0  # the default
     LOCK_NB = win32con.LOCKFILE_FAIL_IMMEDIATELY
@@ -91,8 +92,8 @@ def nt_lock(file_, flags):  # pragma: no cover
     except pywintypes.error as exc_value:
         # error: (33, 'LockFileEx', 'The process cannot access the file
         # because another process has locked a portion of the file.')
-        if exc_value[0] == 33:
-            raise LockException(LockException.LOCK_FAILED, exc_value[2])
+        if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
+            raise LockException(LockException.LOCK_FAILED, exc_value.strerror)
         else:
             # Q:  Are there exceptions/codes we should be dealing with
             # here?
@@ -104,7 +105,7 @@ def nt_unlock(file_):  # pragma: no cover
     try:
         win32file.UnlockFileEx(hfile, 0, -0x10000, __overlapped)
     except pywintypes.error as exc_value:
-        if exc_value[0] == 158:
+        if exc_value.winerror == winerror.ERROR_NOT_LOCKED:
             # error: (158, 'UnlockFileEx', 'The segment is already '
             #         'unlocked.')
             # To match the 'posix' implementation, silently ignore this
