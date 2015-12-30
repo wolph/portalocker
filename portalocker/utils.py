@@ -20,7 +20,8 @@ class Lock(object):
 
     def __init__(
             self, filename, mode='a', truncate=0, timeout=DEFAULT_TIMEOUT,
-            check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=True):
+            check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=True,
+            flags=LOCK_METHOD):
         '''Lock manager with build-in timeout
 
         filename -- filename
@@ -47,6 +48,7 @@ class Lock(object):
         self.timeout = timeout
         self.check_interval = check_interval
         self.fail_when_locked = fail_when_locked
+        self.flags = flags
 
         assert 'w' not in mode, 'Mode "w" clears the file before locking'
 
@@ -116,7 +118,7 @@ class Lock(object):
         Try to lock the given filehandle
 
         returns LockException if it fails'''
-        portalocker.lock(fh, LOCK_METHOD)
+        portalocker.lock(fh, self.flags)
         return fh
 
     def _prepare_fh(self, fh, truncate=None):
