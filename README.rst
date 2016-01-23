@@ -49,7 +49,7 @@ To make sure your cache generation scripts don't race, use the `Lock` class:
 >>> with portalocker.Lock('somefile', timeout=1) as fh:
     print >>fh, 'writing some stuff to my cache...'
 
-To lock a file exclusively, use the `lock` method:
+To customize the opening and locking a manual approach is also possible:
 
 >>> import portalocker
 >>> file = open('somefile', 'r+')
