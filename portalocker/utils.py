@@ -40,6 +40,11 @@ def open_atomic(filename, binary=True):
     '''
     assert not os.path.exists(filename), '%r exists' % filename
     path, name = os.path.split(filename)
+
+    # Create the parent directory if it doesn't exist
+    if path and not os.path.isdir(path):  # pragma: no cover
+        os.makedirs(path)
+
     temp_fh = tempfile.NamedTemporaryFile(
         mode=binary and 'wb' or 'w',
         dir=path,
