@@ -12,13 +12,18 @@
 
 0.4:
 
- * Fixing a few bugs, added coveralls support, switched to py.test and added 100% test coverage.
+ * Fixing a few bugs, added coveralls support, switched to py.test and added
+   100% test coverage.
 
     - Fixing exception thrown when fail_when_locked is true
     - Fixing exception "Lock object has no attribute '_release_lock'" when
-      fail_when_locked is true due to the call to Lock._release_lock() which fails
-      because _release_lock is not defined.
+      fail_when_locked is true due to the call to Lock._release_lock() which
+      fails because _release_lock is not defined.
 
 0.5:
 
  * Python 3 support
+
+0.6:
+
+ * Added msvcrt support for Windows
