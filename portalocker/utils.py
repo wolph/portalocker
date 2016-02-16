@@ -1,5 +1,8 @@
-
+import os
 import time
+import tempfile
+import contextlib
+
 from . import portalocker
 
 DEFAULT_TIMEOUT = 5
@@ -9,11 +12,50 @@ LOCK_METHOD = portalocker.LOCK_EX | portalocker.LOCK_NB
 __all__ = [
     'Lock',
     'AlreadyLocked',
+    'open_atomic',
 ]
 
 
 class AlreadyLocked(Exception):
     pass
+
+
+@contextlib.contextmanager
+def open_atomic(filename, binary=True):
+    '''Open a file for atomic writing. Instead of locking this method allows
+    you to write the entire file and move it to the actual location. Note that
+    is still not atomic in all cases and won't work on existing files.
+
+    http://docs.python.org/library/os.html#os.rename
+
+    >>> filename = 'test_file.txt'
+    >>> if os.path.exists(filename):
+    ...     os.remove(filename)
+
+    >>> with open_atomic(filename) as fh:
+    ...     fh.write('test')
+    >>> assert os.path.exists(filename)
+    >>> os.remove(filename)
+
+    '''
+    assert not os.path.exists(filename), '%r exists' % filename
+    path, name = os.path.split(filename)
+    temp_fh = tempfile.NamedTemporaryFile(
+        mode=binary and 'wb' or 'w',
+        dir=path,
+        delete=False,
+    )
+    yield temp_fh
+    temp_fh.flush()
+    os.fsync(temp_fh.fileno())
+    temp_fh.close()
+    try:
+        os.rename(temp_fh.name, filename)
+    finally:
+        try:
+            os.remove(temp_fh.name)
+        except Exception:
+            pass
 
 
 class Lock(object):

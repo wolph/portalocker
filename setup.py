@@ -5,7 +5,7 @@ from setuptools.command.test import test as TestCommand
 __package_name__ = 'portalocker'
 __author__ = 'Rick van Hattem'
 __email__ = 'wolph@wol.ph'
-__version__ = '0.5.5'
+__version__ = '0.5.6'
 __description__ = '''Wraps the portalocker recipe for easy usage'''
 __url__ = 'https://github.com/WoLpH/portalocker'
 
@@ -15,6 +15,7 @@ if sys.version_info >= (3, 0):
 
 
 class PyTest(TestCommand):
+
     def finalize_options(self):
         TestCommand.finalize_options(self)
         self.test_args = ['tests']
