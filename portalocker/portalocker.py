@@ -49,6 +49,8 @@ Version: $Id: portalocker.py 5474 2008-05-16 20:53:50Z lowell $
 
 '''
 
+import os
+
 
 __all__ = [
     'lock',
@@ -58,8 +60,6 @@ __all__ = [
     'LOCK_NB',
     'LockException',
 ]
-
-import os
 
 
 class LockException(Exception):

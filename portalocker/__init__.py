@@ -1,5 +1,5 @@
 from .portalocker import lock, unlock, LOCK_EX, LOCK_SH, LOCK_NB, LockException
-from .utils import Lock, AlreadyLocked
+from .utils import Lock, AlreadyLocked, open_atomic
 
 __all__ = [
     'lock',
@@ -10,5 +10,6 @@ __all__ = [
     'LockException',
     'Lock',
     'AlreadyLocked',
+    'open_atomic',
 ]
 
