@@ -67,3 +67,20 @@ def test_class():
 
     with lock2:
         pass
+
+
+def test_acquire_release():
+    lock = portalocker.Lock('tests/test_file.txt')
+    lock2 = portalocker.Lock('tests/test_file.txt', fail_when_locked=False)
+
+    lock.acquire()  # acquire lock when nobody is using it
+    with pytest.raises(portalocker.LockException):
+        # another party should not be able to acquire the lock
+        lock2.acquire(timeout=0.01)
+
+        # re-acquire a held lock is a no-op
+        lock.acquire()
+
+    lock.release()  # release the lock
+    lock.release()  # second release does nothing
+
