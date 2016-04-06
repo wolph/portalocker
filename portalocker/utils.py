@@ -156,6 +156,12 @@ class Lock(object):
         self.fh = fh
         return fh
 
+    def release(self):
+        '''Releases the currently locked file handle'''
+        if self.fh:
+            self.fh.close()
+            self.fh = None
+
     def _get_fh(self):
         '''Get a new filehandle'''
         return open(self.filename, self.mode)
@@ -185,9 +191,7 @@ class Lock(object):
         return fh
 
     def __enter__(self):
-        self.fh = self.acquire()
-        return self.fh
+        return self.acquire()
 
     def __exit__(self, type_, value, tb):
-        if self.fh:
-            self.fh.close()
+        self.release()
