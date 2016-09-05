@@ -9,6 +9,9 @@ python:
     - 'pypy'
     - 'pypy3'
 
+before_install:
+    - wheel version
+
 # command to install dependencies
 install:
     - pip install -r test_requirements.txt
@@ -21,3 +24,5 @@ script:
 
 after_success:
     - coveralls
+    - python setup.py bdist_wheel
+    - ls -la dist/
