@@ -67,6 +67,7 @@ class LockException(Exception):
     LOCK_FAILED = 1
 
 if os.name == 'nt':  # pragma: no cover
+    import msvcrt
     import win32file
     import pywintypes
     import winerror
@@ -85,7 +86,7 @@ else:  # pragma: no cover
 
 
 def nt_lock(file_, flags):  # pragma: no cover
-    hfile = win32file._get_osfhandle(file_.fileno())
+    hfile = msvcrt.get_osfhandle(file_.fileno())
     try:
         win32file.LockFileEx(hfile, flags, 0, -0x10000, __overlapped)
     except pywintypes.error as exc_value:
@@ -100,7 +101,7 @@ def nt_lock(file_, flags):  # pragma: no cover
 
 
 def nt_unlock(file_):  # pragma: no cover
-    hfile = win32file._get_osfhandle(file_.fileno())
+    hfile = msvcrt.get_osfhandle(file_.fileno())
     try:
         win32file.UnlockFileEx(hfile, 0, -0x10000, __overlapped)
     except pywintypes.error as exc_value:
