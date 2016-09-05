@@ -5,3 +5,4 @@ pytest-flakes
 pytest-pep8
 Sphinx
 Pygments
+pypiwin32
