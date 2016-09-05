@@ -3,8 +3,12 @@ portalocker - Cross-platform locking library
 ############################################
 
 .. image:: https://travis-ci.org/WoLpH/portalocker.svg?branch=master
-    :alt: Test Status
+    :alt: Linux Test Status
     :target: https://travis-ci.org/WoLpH/portalocker
+    
+.. image:: https://img.shields.io/appveyor/ci/WoLpH/portalocker.svg
+    :alt: Windows Tests Status
+    :target: https://ci.appveyor.com/project/WoLpH/portalocker
 
 .. image:: https://coveralls.io/repos/WoLpH/portalocker/badge.svg?branch=master
     :alt: Coverage Status
