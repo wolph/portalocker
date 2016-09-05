@@ -67,13 +67,12 @@ class LockException(Exception):
     LOCK_FAILED = 1
 
 if os.name == 'nt':  # pragma: no cover
-    import win32con
     import win32file
     import pywintypes
     import winerror
-    LOCK_EX = win32con.LOCKFILE_EXCLUSIVE_LOCK
+    LOCK_EX = 0x00000002  # LOCKFILE_EXCLUSIVE_LOCK
     LOCK_SH = 0  # the default
-    LOCK_NB = win32con.LOCKFILE_FAIL_IMMEDIATELY
+    LOCK_NB = 0x00000001  # LOCKFILE_FAIL_IMMEDIATELY
     # is there any reason not to reuse the following structure?
     __overlapped = pywintypes.OVERLAPPED()
 elif os.name == 'posix':
