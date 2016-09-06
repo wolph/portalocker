@@ -1,4 +1,4 @@
 include CHANGELOG
-include README.rest
+include README.rst
 include LICENSE
-recursive-include tests/
+recursive-include tests *.py
