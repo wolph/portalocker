@@ -5,7 +5,7 @@ from setuptools.command.test import test as TestCommand
 __package_name__ = 'portalocker'
 __author__ = 'Rick van Hattem'
 __email__ = 'wolph@wol.ph'
-__version__ = '0.6.0'
+__version__ = '0.6.1'
 __description__ = '''Wraps the portalocker recipe for easy usage'''
 __url__ = 'https://github.com/WoLpH/portalocker'
 
