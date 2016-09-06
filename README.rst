@@ -70,10 +70,10 @@ data is not available until you `flush()` or `close()`.
 Changelog
 ---------
 
-See CHANGELOG file
+See `CHANGELOG <https://github.com/WoLpH/portalocker/blob/develop/CHANGELOG>`_ file.
 
 License
 -------
 
-see the LICENSE file
+See the `LICENSE <https://github.com/WoLpH/portalocker/blob/develop/LICENSE>`_.
 
