@@ -19,8 +19,14 @@ Overview
 
 Portalocker is a library to provide an easy API to file locking.
 
-Originally created as a Python Recipe by Jonathan Feinberg and  Lowell Alleman
-http://code.activestate.com/recipes/65203-portalocker-cross-platform-posixnt-api-for-flock-s/
+An important detail to note is that on Linux and Unix systems the locks are
+advisory by default. By specifying the `-o mand` option to the mount command it
+is possible to enable mandatory file locking on Linux. This is generally not
+recommended however. For more information about the subject:
+
+ - https://en.wikipedia.org/wiki/File_locking
+ - http://stackoverflow.com/questions/39292051/portalocker-does-not-seem-to-lock
+ - https://stackoverflow.com/questions/12062466/mandatory-file-lock-on-linux
 
 The module is currently maintained by Rick van Hattem <Wolph@wol.ph>.
 The project resides at https://github.com/WoLpH/portalocker . Bugs and feature
