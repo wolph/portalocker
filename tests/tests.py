@@ -1,5 +1,7 @@
 from __future__ import print_function
 from __future__ import with_statement
+
+import py
 import pytest
 import portalocker
 
@@ -9,7 +11,10 @@ def tmpfile(tmpdir_factory):
     tmpdir = tmpdir_factory.mktemp('temp')
     filename = tmpdir.join('tmpfile')
     yield str(filename)
-    filename.remove(ignore_errors=True)
+    try:
+        filename.remove(ignore_errors=True)
+    except py.error.EBUSY:
+        pass
 
 
 def test_exceptions(tmpfile):
