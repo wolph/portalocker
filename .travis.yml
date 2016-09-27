@@ -20,10 +20,15 @@ after_success:
 - coveralls
 - python setup.py bdist_wheel
 - ls -la dist/
+
+before_deploy:
+- python setup.py combine -o dist/portalocker_full.py
 deploy:
   provider: releases
   api_key:
     secure: xY/jF18OX/muUeSnncY3GeHpzOlPi9NGfOUM/Cl7LXCjNnqXVub2uxYiOdwGs1Z9GNqftNv4g1+th89jHVyPOvXK3DSQ0yemMMMM3ZLFdeuy/XcQyuS/32tMfFm5jBBG6sa/S8Mm6H9ShQfQcrQT4su7EzHJIAz72iUXMagKtHM=
-  file: dist/portalocker.py
+  file: dist/portalocker_full.py
+  skip_cleanup: true
   on:
     repo: WoLpH/portalocker
+    tags: true

@@ -1,3 +1,6 @@
+from __future__ import print_function
+
+import re
 import os
 import setuptools
 
@@ -19,27 +22,58 @@ else:
 
 class Combine(setuptools.Command):
     description = 'Build single combined portalocker file'
-
+    relative_import_re = re.compile(r'^from \. import (?P<name>.+)$',
+                                    re.MULTILINE)
     user_options = [
         ('output-file=', 'o', 'Path to the combined output file'),
     ]
 
     def initialize_options(self):
         self.output_file = os.path.join(
-            'dist', '%(__package_name__)s.%(__version__)s.py' % about)
+            'dist', '%(package_name)s_%(version)s.py' % dict(
+                package_name=about['__package_name__'],
+                version=about['__version__'].replace('.', '-'),
+            ))
 
     def finalize_options(self):
         pass
 
     def run(self):
         dirname = os.path.dirname(self.output_file)
-        if not os.path.isdir(dirname):
+        if dirname and not os.path.isdir(dirname):
             os.makedirs(dirname)
 
-        with open(self.output_file, 'w') as fh:
-            print('output file', self.output_file)
+        output = open(self.output_file, 'w')
+        print("'''", file=output)
+        with open('README.rst') as fh:
+            output.write(fh.read().rstrip())
+            print('', file=output)
+            print('', file=output)
 
-        print('RUNNING!!!!')
+        with open('LICENSE') as fh:
+            output.write(fh.read().rstrip())
+
+        print('', file=output)
+        print("'''", file=output)
+
+        names = set()
+        lines = []
+        for line in open('portalocker/__init__.py'):
+            match = self.relative_import_re.match(line)
+            if match:
+                names.add(match.group('name'))
+                with open('portalocker/%(name)s.py' % match.groupdict()) as fh:
+                    line = fh.read()
+                    line = self.relative_import_re.sub('', line)
+
+            lines.append(line)
+
+        import_attributes = re.compile(r'\b(%s)\.' % '|'.join(names))
+        for line in lines[:]:
+            line = import_attributes.sub('', line)
+            output.write(line)
+
+        print('Wrote combined file to %r' % self.output_file)
 
 
 if __name__ == '__main__':

@@ -1,8 +1,8 @@
 from . import __about__
+from . import constants
 from . import exceptions
 from . import portalocker
 from . import utils
-from . import constants
 
 #: The package name on Pypi
 __package_name__ = __about__.__package_name__
