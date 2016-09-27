@@ -1,4 +1,4 @@
-pytest>=2.8
+pytest>=3.0
 pytest-cache
 pytest-cov
 pytest-flakes
