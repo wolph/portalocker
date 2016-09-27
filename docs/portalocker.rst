@@ -1,30 +1,15 @@
-portalocker package
-===================
-
-Submodules
-----------
-
-portalocker.portalocker module
-------------------------------
-
-.. automodule:: portalocker.portalocker
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-portalocker.utils module
-------------------------
-
-.. automodule:: portalocker.utils
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-
-Module contents
----------------
+Portalocker
+===========
 
 .. automodule:: portalocker
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+Tests
+=====
+
+.. automodule:: tests.tests
     :members:
     :undoc-members:
     :show-inheritance:

@@ -1,13 +1,16 @@
 Welcome to portalocker's documentation!
 ========================================
 
+.. include :: ../README.rst
+
 Contents:
 
 .. toctree::
    :maxdepth: 4
 
-   usage
    portalocker
+   changelog
+   license
 
 Indices and tables
 ==================

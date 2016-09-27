@@ -14,7 +14,7 @@ if os.path.isfile(test_requirements_file):
     with open(test_requirements_file) as fh:
         tests_require = fh.read().splitlines()
 else:
-    tests_require = ['pytest']
+    tests_require = ['pytest>=3.0']
 
 
 class Combine(setuptools.Command):
