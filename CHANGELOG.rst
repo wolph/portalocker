@@ -1,8 +1,11 @@
 1.0:
 
- * Complete code refactor, splitting of code in logical classes, 100% test
-   coverage and change in API behaviour. The default behavior of the `Lock`
-   class has changed to append instead of write/truncate.
+ * Complete code refactor.
+   
+   - Splitting of code in logical classes
+   - 100% test coverage and change in API behaviour
+   - The default behavior of the `Lock` class has changed to append instead of
+     write/truncate.
 
 0.6:
 
