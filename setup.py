@@ -1,38 +1,52 @@
-import sys
+import os
 import setuptools
-from setuptools.command.test import test as TestCommand
-
-__package_name__ = 'portalocker'
-__author__ = 'Rick van Hattem'
-__email__ = 'wolph@wol.ph'
-__version__ = '0.6.1'
-__description__ = '''Wraps the portalocker recipe for easy usage'''
-__url__ = 'https://github.com/WoLpH/portalocker'
-
-extra = {}
-if sys.version_info >= (3, 0):
-    extra.update(use_2to3=True)
 
 
-class PyTest(TestCommand):
+# To prevent importing about and thereby breaking the coverage info we use this
+# exec hack
+about = {}
+with open('portalocker/__about__.py') as fp:
+    exec(fp.read(), about)
+
+
+test_requirements_file = os.path.join('tests', 'requirements.txt')
+if os.path.isfile(test_requirements_file):
+    with open(test_requirements_file) as fh:
+        tests_require = fh.read().splitlines()
+else:
+    tests_require = ['pytest']
+
+
+class Combine(setuptools.Command):
+    description = 'Build single combined portalocker file'
+
+    user_options = [
+        ('output-file=', 'o', 'Path to the combined output file'),
+    ]
+
+    def initialize_options(self):
+        self.output_file = os.path.join(
+            'dist', '%(__package_name__)s.%(__version__)s.py' % about)
 
     def finalize_options(self):
-        TestCommand.finalize_options(self)
-        self.test_args = ['tests']
-        self.test_suite = True
+        pass
 
-    def run_tests(self):
-        # import here, cause outside the eggs aren't loaded
-        import pytest
-        errno = pytest.main(self.test_args)
-        sys.exit(errno)
+    def run(self):
+        dirname = os.path.dirname(self.output_file)
+        if not os.path.isdir(dirname):
+            os.makedirs(dirname)
+
+        with open(self.output_file, 'w') as fh:
+            print('output file', self.output_file)
+
+        print('RUNNING!!!!')
 
 
 if __name__ == '__main__':
     setuptools.setup(
-        name=__package_name__,
-        version=__version__,
-        description=__description__,
+        name=about['__package_name__'],
+        version=about['__version__'],
+        description=about['__description__'],
         long_description=open('README.rst').read(),
         classifiers=[
             'Intended Audience :: Developers',
@@ -46,14 +60,19 @@ if __name__ == '__main__':
             'Programming Language :: Python :: Implementation :: PyPy',
         ],
         keywords='locking, locks, with statement, windows, linux, unix',
-        author=__author__,
-        author_email=__email__,
-        url=__url__,
+        author=about['__author__'],
+        author_email=about['__email__'],
+        url=about['__url__'],
         license='PSF',
         packages=setuptools.find_packages(exclude=['ez_setup', 'examples']),
-        zip_safe=False,
+        # zip_safe=False,
         platforms=['any'],
-        cmdclass={'test': PyTest},
-        **extra
+        cmdclass={
+            'combine': Combine,
+        },
+        setup_requires=[
+            'pytest-runner',
+        ],
+        tests_require=tests_require,
     )
 
