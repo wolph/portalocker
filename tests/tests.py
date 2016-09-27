@@ -5,7 +5,8 @@ import portalocker
 
 
 @pytest.fixture
-def tmpfile(tmpdir):
+def tmpfile(tmpdir_factory):
+    tmpdir = tmpdir_factory.mktemp('temp')
     filename = tmpdir.join('tmpfile')
     yield str(filename)
     filename.remove(ignore_errors=True)
