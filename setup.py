@@ -1,38 +1,86 @@
-import sys
+from __future__ import print_function
+
+import re
+import os
 import setuptools
-from setuptools.command.test import test as TestCommand
-
-__package_name__ = 'portalocker'
-__author__ = 'Rick van Hattem'
-__email__ = 'wolph@wol.ph'
-__version__ = '0.6.1'
-__description__ = '''Wraps the portalocker recipe for easy usage'''
-__url__ = 'https://github.com/WoLpH/portalocker'
-
-extra = {}
-if sys.version_info >= (3, 0):
-    extra.update(use_2to3=True)
 
 
-class PyTest(TestCommand):
+# To prevent importing about and thereby breaking the coverage info we use this
+# exec hack
+about = {}
+with open('portalocker/__about__.py') as fp:
+    exec(fp.read(), about)
+
+
+test_requirements_file = os.path.join('tests', 'requirements.txt')
+if os.path.isfile(test_requirements_file):
+    with open(test_requirements_file) as fh:
+        tests_require = fh.read().splitlines()
+else:
+    tests_require = ['pytest>=3.0']
+
+
+class Combine(setuptools.Command):
+    description = 'Build single combined portalocker file'
+    relative_import_re = re.compile(r'^from \. import (?P<name>.+)$',
+                                    re.MULTILINE)
+    user_options = [
+        ('output-file=', 'o', 'Path to the combined output file'),
+    ]
+
+    def initialize_options(self):
+        self.output_file = os.path.join(
+            'dist', '%(package_name)s_%(version)s.py' % dict(
+                package_name=about['__package_name__'],
+                version=about['__version__'].replace('.', '-'),
+            ))
 
     def finalize_options(self):
-        TestCommand.finalize_options(self)
-        self.test_args = ['tests']
-        self.test_suite = True
+        pass
 
-    def run_tests(self):
-        # import here, cause outside the eggs aren't loaded
-        import pytest
-        errno = pytest.main(self.test_args)
-        sys.exit(errno)
+    def run(self):
+        dirname = os.path.dirname(self.output_file)
+        if dirname and not os.path.isdir(dirname):
+            os.makedirs(dirname)
+
+        output = open(self.output_file, 'w')
+        print("'''", file=output)
+        with open('README.rst') as fh:
+            output.write(fh.read().rstrip())
+            print('', file=output)
+            print('', file=output)
+
+        with open('LICENSE') as fh:
+            output.write(fh.read().rstrip())
+
+        print('', file=output)
+        print("'''", file=output)
+
+        names = set()
+        lines = []
+        for line in open('portalocker/__init__.py'):
+            match = self.relative_import_re.match(line)
+            if match:
+                names.add(match.group('name'))
+                with open('portalocker/%(name)s.py' % match.groupdict()) as fh:
+                    line = fh.read()
+                    line = self.relative_import_re.sub('', line)
+
+            lines.append(line)
+
+        import_attributes = re.compile(r'\b(%s)\.' % '|'.join(names))
+        for line in lines[:]:
+            line = import_attributes.sub('', line)
+            output.write(line)
+
+        print('Wrote combined file to %r' % self.output_file)
 
 
 if __name__ == '__main__':
     setuptools.setup(
-        name=__package_name__,
-        version=__version__,
-        description=__description__,
+        name=about['__package_name__'],
+        version=about['__version__'],
+        description=about['__description__'],
         long_description=open('README.rst').read(),
         classifiers=[
             'Intended Audience :: Developers',
@@ -46,14 +94,19 @@ if __name__ == '__main__':
             'Programming Language :: Python :: Implementation :: PyPy',
         ],
         keywords='locking, locks, with statement, windows, linux, unix',
-        author=__author__,
-        author_email=__email__,
-        url=__url__,
+        author=about['__author__'],
+        author_email=about['__email__'],
+        url=about['__url__'],
         license='PSF',
         packages=setuptools.find_packages(exclude=['ez_setup', 'examples']),
-        zip_safe=False,
+        # zip_safe=False,
         platforms=['any'],
-        cmdclass={'test': PyTest},
-        **extra
+        cmdclass={
+            'combine': Combine,
+        },
+        setup_requires=[
+            'pytest-runner',
+        ],
+        tests_require=tests_require,
     )
 

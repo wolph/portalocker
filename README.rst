@@ -67,13 +67,16 @@ than you can do it like this:
 Do note that your data might still be in a buffer so it is possible that your
 data is not available until you `flush()` or `close()`.
 
+More examples can be found in the
+`tests <http://portalocker.readthedocs.io/en/latest/_modules/tests/tests.html>`_.
+
 Changelog
 ---------
 
-See `CHANGELOG <https://github.com/WoLpH/portalocker/blob/develop/CHANGELOG>`_ file.
+See the `changelog <http://portalocker.readthedocs.io/en/latest/changelog.html>`_ page.
 
 License
 -------
 
-See the `LICENSE <https://github.com/WoLpH/portalocker/blob/develop/LICENSE>`_.
+See the `LICENSE <https://github.com/WoLpH/portalocker/blob/develop/LICENSE>`_ file.
 

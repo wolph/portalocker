@@ -2,29 +2,26 @@ import os
 import time
 import tempfile
 import contextlib
-
+from . import exceptions
+from . import constants
 from . import portalocker
 
 DEFAULT_TIMEOUT = 5
 DEFAULT_CHECK_INTERVAL = 0.25
-LOCK_METHOD = portalocker.LOCK_EX | portalocker.LOCK_NB
+LOCK_METHOD = constants.LOCK_EX | constants.LOCK_NB
 
 __all__ = [
     'Lock',
-    'AlreadyLocked',
     'open_atomic',
 ]
-
-
-class AlreadyLocked(Exception):
-    pass
 
 
 @contextlib.contextmanager
 def open_atomic(filename, binary=True):
     '''Open a file for atomic writing. Instead of locking this method allows
     you to write the entire file and move it to the actual location. Note that
-    is still not atomic in all cases and won't work on existing files.
+    this makes the assumption that a rename is atomic on your platform which
+    is generally the case but not a guarantee.
 
     http://docs.python.org/library/os.html#os.rename
 
@@ -33,7 +30,7 @@ def open_atomic(filename, binary=True):
     ...     os.remove(filename)
 
     >>> with open_atomic(filename) as fh:
-    ...     fh.write('test')
+    ...     written = fh.write(b'test')
     >>> assert os.path.exists(filename)
     >>> os.remove(filename)
 
@@ -66,7 +63,7 @@ def open_atomic(filename, binary=True):
 class Lock(object):
 
     def __init__(
-            self, filename, mode='a', truncate=0, timeout=DEFAULT_TIMEOUT,
+            self, filename, mode='a', timeout=DEFAULT_TIMEOUT,
             check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=True,
             flags=LOCK_METHOD):
         '''Lock manager with build-in timeout
@@ -88,6 +85,12 @@ class Lock(object):
         mode will result in truncate _BEFORE_ the lock is checked.
         '''
 
+        if 'w' in mode:
+            truncate = True
+            mode = mode.replace('w', 'a')
+        else:
+            truncate = False
+
         self.fh = None
         self.filename = filename
         self.mode = mode
@@ -96,8 +99,6 @@ class Lock(object):
         self.check_interval = check_interval
         self.fail_when_locked = fail_when_locked
         self.flags = flags
-
-        assert 'w' not in mode, 'Mode "w" clears the file before locking'
 
     def acquire(
             self, timeout=None, check_interval=None, fail_when_locked=None):
@@ -123,7 +124,7 @@ class Lock(object):
         try:
             # Try to lock
             fh = self._get_lock(fh)
-        except portalocker.LockException as exception:
+        except exceptions.LockException as exception:
             # Try till the timeout is 0
             while timeout > 0:
                 # Wait a bit
@@ -136,19 +137,19 @@ class Lock(object):
                     # We already tried to the get the lock
                     # If fail_when_locked is true, then stop trying
                     if fail_when_locked:
-                        raise AlreadyLocked(exception)
+                        raise exceptions.AlreadyLocked(exception)
 
                     else:  # pragma: no cover
                         # We've got the lock
                         fh = self._get_lock(fh)
                         break
 
-                except portalocker.LockException:
+                except exceptions.LockException:
                     pass
 
             else:
                 # We got a timeout... reraising
-                raise portalocker.LockException(exception)
+                raise exceptions.LockException(exception)
 
         # Prepare the filehandle (truncate if needed)
         fh = self._prepare_fh(fh)
@@ -174,19 +175,16 @@ class Lock(object):
         portalocker.lock(fh, self.flags)
         return fh
 
-    def _prepare_fh(self, fh, truncate=None):
+    def _prepare_fh(self, fh):
         '''
         Prepare the filehandle for usage
 
         If truncate is a number, the file will be truncated to that amount of
         bytes
         '''
-        if truncate is None:
-            truncate = self.truncate
-
-        if truncate is not None:
-            fh.seek(truncate)
-            fh.truncate(truncate)
+        if self.truncate:
+            fh.seek(0)
+            fh.truncate(0)
 
         return fh
 

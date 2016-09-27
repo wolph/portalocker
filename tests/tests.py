@@ -1,13 +1,26 @@
 from __future__ import print_function
 from __future__ import with_statement
+
+import py
 import pytest
 import portalocker
 
 
-def test_exceptions():
+@pytest.fixture
+def tmpfile(tmpdir_factory):
+    tmpdir = tmpdir_factory.mktemp('temp')
+    filename = tmpdir.join('tmpfile')
+    yield str(filename)
+    try:
+        filename.remove(ignore_errors=True)
+    except py.error.EBUSY:
+        pass
+
+
+def test_exceptions(tmpfile):
     # Open the file 2 times
-    a = open('locked_file', 'a')
-    b = open('locked_file', 'a')
+    a = open(tmpfile, 'a')
+    b = open(tmpfile, 'a')
 
     # Lock exclusive non-blocking
     lock_flags = portalocker.LOCK_EX | portalocker.LOCK_NB
@@ -24,39 +37,70 @@ def test_exceptions():
     b.close()
 
 
-def test_with_timeout():
+def test_with_timeout(tmpfile):
     # Open the file 2 times
     with pytest.raises(portalocker.AlreadyLocked):
-        with portalocker.Lock('locked_file', timeout=0.1) as fh:
+        with portalocker.Lock(tmpfile, timeout=0.1) as fh:
             print('writing some stuff to my cache...', file=fh)
-            with portalocker.Lock('locked_file', timeout=0.1):
+            with portalocker.Lock(tmpfile, timeout=0.1, mode='wb'):
                 pass
             print('writing more stuff to my cache...', file=fh)
 
 
-def test_without_timeout():
+def test_without_timeout(tmpfile):
     # Open the file 2 times
     with pytest.raises(portalocker.LockException):
-        with portalocker.Lock('locked_file', timeout=None) as fh:
+        with portalocker.Lock(tmpfile, timeout=None) as fh:
             print('writing some stuff to my cache...', file=fh)
-            with portalocker.Lock('locked_file', timeout=None):
+            with portalocker.Lock(tmpfile, timeout=None, mode='w'):
                 pass
             print('writing more stuff to my cache...', file=fh)
 
 
-def test_simple():
-    fh = open('tests/test_file.txt', 'r+')
+def test_without_fail(tmpfile):
+    # Open the file 2 times
+    with pytest.raises(portalocker.LockException):
+        with portalocker.Lock(tmpfile, timeout=0.1) as fh:
+            print('writing some stuff to my cache...', file=fh)
+            lock = portalocker.Lock(tmpfile, timeout=0.1)
+            lock.acquire(check_interval=0.05, fail_when_locked=False)
+
+
+def test_simple(tmpfile):
+    with open(tmpfile, 'w') as fh:
+        fh.write('spam and eggs')
+
+    fh = open(tmpfile, 'r+')
     portalocker.lock(fh, portalocker.LOCK_EX)
-    fh.seek(12)
+
+    fh.seek(13)
     fh.write('foo')
+
+    # Make sure we didn't overwrite the original text
+    fh.seek(0)
+    assert fh.read(13) == 'spam and eggs'
+
     portalocker.unlock(fh)
     fh.close()
 
 
-def test_class():
-    lock = portalocker.Lock('tests/test_file.txt')
-    lock2 = portalocker.Lock('tests/test_file.txt', fail_when_locked=False,
-                             timeout=0.01)
+def test_truncate(tmpfile):
+    with open(tmpfile, 'w') as fh:
+        fh.write('spam and eggs')
+
+    with portalocker.Lock(tmpfile, mode='a+') as fh:
+        # Make sure we didn't overwrite the original text
+        fh.seek(0)
+        assert fh.read(13) == 'spam and eggs'
+
+    with portalocker.Lock(tmpfile, mode='w+') as fh:
+        # Make sure we truncated the file
+        assert fh.read() == ''
+
+
+def test_class(tmpfile):
+    lock = portalocker.Lock(tmpfile)
+    lock2 = portalocker.Lock(tmpfile, fail_when_locked=False, timeout=0.01)
 
     with lock:
         lock.acquire()
@@ -69,9 +113,9 @@ def test_class():
         pass
 
 
-def test_acquire_release():
-    lock = portalocker.Lock('tests/test_file.txt')
-    lock2 = portalocker.Lock('tests/test_file.txt', fail_when_locked=False)
+def test_acquire_release(tmpfile):
+    lock = portalocker.Lock(tmpfile)
+    lock2 = portalocker.Lock(tmpfile, fail_when_locked=False)
 
     lock.acquire()  # acquire lock when nobody is using it
     with pytest.raises(portalocker.LockException):

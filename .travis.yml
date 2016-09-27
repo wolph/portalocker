@@ -1,28 +1,34 @@
 sudo: false
 language: python
 python:
-    - '2.6'
-    - '2.7'
-    - '3.3'
-    - '3.4'
-    - '3.5'
-    - 'pypy'
-    - 'pypy3'
-
+- '2.6'
+- '2.7'
+- '3.3'
+- '3.4'
+- '3.5'
+- pypy
+- pypy3
 before_install:
-    - wheel version
-
-# command to install dependencies
+- wheel version
 install:
-    - pip install -r test_requirements.txt
-    - pip install -e .
-    - pip install coveralls
-
-# command to run tests
+- pip install -r tests/requirements.txt
+- pip install -e .
+- pip install coveralls
 script:
-    - python setup.py test
-
+- python setup.py test
 after_success:
-    - coveralls
-    - python setup.py bdist_wheel
-    - ls -la dist/
+- coveralls
+- python setup.py bdist_wheel
+- ls -la dist/
+
+before_deploy:
+- python setup.py combine -o dist/portalocker_full.py
+deploy:
+  provider: releases
+  api_key:
+    secure: xY/jF18OX/muUeSnncY3GeHpzOlPi9NGfOUM/Cl7LXCjNnqXVub2uxYiOdwGs1Z9GNqftNv4g1+th89jHVyPOvXK3DSQ0yemMMMM3ZLFdeuy/XcQyuS/32tMfFm5jBBG6sa/S8Mm6H9ShQfQcrQT4su7EzHJIAz72iUXMagKtHM=
+  file: dist/portalocker_full.py
+  skip_cleanup: true
+  on:
+    repo: WoLpH/portalocker
+    tags: true
