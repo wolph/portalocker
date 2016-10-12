@@ -193,3 +193,21 @@ class Lock(object):
 
     def __exit__(self, type_, value, tb):
         self.release()
+
+    def __delete__(self, instance):  # pragma: no cover
+        instance.release()
+
+
+class TemporaryFileLock(Lock):
+
+    def __init__(self, filename='.lock', timeout=DEFAULT_TIMEOUT,
+                 check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=True,
+                 flags=LOCK_METHOD):
+
+        Lock.__init__(self, filename=filename, mode='w', timeout=timeout,
+                      check_interval=check_interval,
+                      fail_when_locked=fail_when_locked, flags=flags)
+
+    def release(self):
+        Lock.release(self)
+        os.unlink(self.filename)

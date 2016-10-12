@@ -48,6 +48,7 @@ LOCK_UN = constants.LOCK_UN
 #: Locking utility class to automatically handle opening with timeouts and
 #: context wrappers
 Lock = utils.Lock
+TemporaryFileLock = utils.TemporaryFileLock
 open_atomic = utils.open_atomic
 
 __all__ = [
