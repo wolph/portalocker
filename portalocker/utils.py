@@ -1,5 +1,6 @@
 import os
 import time
+import atexit
 import tempfile
 import contextlib
 from . import exceptions
@@ -207,7 +208,9 @@ class TemporaryFileLock(Lock):
         Lock.__init__(self, filename=filename, mode='w', timeout=timeout,
                       check_interval=check_interval,
                       fail_when_locked=fail_when_locked, flags=flags)
+        atexit.register(self.release)
 
     def release(self):
         Lock.release(self)
-        os.unlink(self.filename)
+        if os.path.isfile(self.filename):  # pragma: no branch
+            os.unlink(self.filename)
