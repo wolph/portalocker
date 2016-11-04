@@ -26,7 +26,8 @@ if os.name == 'nt':  # pragma: no cover
                 # because another process has locked a portion of the file.')
                 if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
                     raise exceptions.LockException(
-                        exceptions.LockException.LOCK_FAILED, exc_value.strerror)
+                        exceptions.LockException.LOCK_FAILED,
+                        exc_value.strerror)
                 else:
                     # Q:  Are there exceptions/codes we should be dealing with
                     # here?
@@ -45,14 +46,15 @@ if os.name == 'nt':  # pragma: no cover
                     file_.seek(0)
                     # [x] check if 0 param locks entire file (not documented in
                     #     Python)
-                    # [x] just fails with "IOError: [Errno 13] Permission denied",
+                    # [x] fails with "IOError: [Errno 13] Permission denied",
                     #     but -1 seems to do the trick
                 try:
                     msvcrt.locking(file_.fileno(), mode, -1)
                 except IOError as exc_value:
                     # [ ] be more specific here
                     raise exceptions.LockException(
-                        exceptions.LockException.LOCK_FAILED, exc_value.strerror)
+                        exceptions.LockException.LOCK_FAILED,
+                        exc_value.strerror)
                 finally:
                     if savepos:
                         file_.seek(savepos)
@@ -71,21 +73,23 @@ if os.name == 'nt':  # pragma: no cover
                 if exc_value.strerror == 'Permission denied':
                     hfile = win32file._get_osfhandle(file_.fileno())
                     try:
-                        win32file.UnlockFileEx(hfile, 0, -0x10000, __overlapped)
+                        win32file.UnlockFileEx(
+                            hfile, 0, -0x10000, __overlapped)
                     except pywintypes.error as exc_value:
                         if exc_value.winerror == winerror.ERROR_NOT_LOCKED:
-                            # error: (158, 'UnlockFileEx', 'The segment is already '
-                            #         'unlocked.')
-                            # To match the 'posix' implementation, silently ignore this
-                            # error
+                            # error: (158, 'UnlockFileEx',
+                            #         'The segment is already unlocked.')
+                            # To match the 'posix' implementation, silently
+                            # ignore this error
                             pass
                         else:
-                            # Q:  Are there exceptions/codes we should be dealing with
-                            # here?
+                            # Q:  Are there exceptions/codes we should be
+                            # dealing with here?
                             raise
                 else:
                     raise exceptions.LockException(
-                        exceptions.LockException.LOCK_FAILED, exc_value.strerror)
+                        exceptions.LockException.LOCK_FAILED,
+                        exc_value.strerror)
             finally:
                 if savepos:
                     file_.seek(savepos)
@@ -109,4 +113,3 @@ elif os.name == 'posix':  # pragma: no cover
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')
-
