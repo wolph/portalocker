@@ -72,6 +72,54 @@ def test_simple(tmpfile):
     fh.close()
 
 
+def test_exlusive(tmpfile):
+    with open(tmpfile, 'w') as fh:
+        fh.write('spam and eggs')
+
+    fh = open(tmpfile, 'r')
+    portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
+
+    # Make sure we can't read the locked file
+    with pytest.raises(IOError) as excinfo:
+        with open(tmpfile, 'r') as fh2:
+            fh2.read()
+    assert excinfo.value.strerror == 'Permission denied'
+
+    # Make sure we can't write the locked file
+    with pytest.raises(IOError) as excinfo:
+        with open(tmpfile, 'w+') as fh2:
+            fh2.write('surprise and fear')
+    assert excinfo.value.strerror == 'Permission denied'
+
+    # Make sure we can explicitly unlock the file
+    portalocker.unlock(fh)
+    fh.close()
+
+
+def test_shared(tmpfile):
+    with open(tmpfile, 'w') as fh:
+        fh.write('spam and eggs')
+
+    f = open(tmpfile, 'r')
+    portalocker.lock(f, portalocker.LOCK_SH | portalocker.LOCK_NB)
+
+    # Make sure we can read the locked file
+    fh2 = open(tmpfile, 'r')
+    assert fh2.read() == 'spam and eggs'
+    fh2.close()
+
+    # Make sure we can't write the locked file
+    with pytest.raises(IOError) as excinfo:
+        fh2 = open(tmpfile, 'w+')
+        fh2.write('surprise and fear')
+        fh2.close()
+    assert excinfo.value.strerror == 'Permission denied'
+
+    # Make sure we can explicitly unlock the file
+    portalocker.unlock(f)
+    f.close()
+
+
 def test_truncate(tmpfile):
     with open(tmpfile, 'w') as fh:
         fh.write('spam and eggs')
