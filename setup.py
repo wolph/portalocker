@@ -107,6 +107,9 @@ if __name__ == '__main__':
         setup_requires=[
             'pytest-runner',
         ],
+        install_requires=[
+            'pywin32',
+        ],
         tests_require=tests_require,
     )
 
