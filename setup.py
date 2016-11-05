@@ -20,6 +20,14 @@ else:
     tests_require = ['pytest>=3.0']
 
 
+if os.name == 'nt':
+    install_requires = [
+        'pypiwin32',
+    ]
+else:
+     install_requires = []
+    
+
 class Combine(setuptools.Command):
     description = 'Build single combined portalocker file'
     relative_import_re = re.compile(r'^from \. import (?P<name>.+)$',
@@ -107,9 +115,7 @@ if __name__ == '__main__':
         setup_requires=[
             'pytest-runner',
         ],
-        install_requires=[
-            'pypiwin32',
-        ],
+        install_requires=install_requires,
         tests_require=tests_require,
     )
 
