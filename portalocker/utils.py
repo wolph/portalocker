@@ -65,7 +65,7 @@ class Lock(object):
 
     def __init__(
             self, filename, mode='a', timeout=DEFAULT_TIMEOUT,
-            check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=True,
+            check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=False,
             flags=LOCK_METHOD):
         '''Lock manager with build-in timeout
 
