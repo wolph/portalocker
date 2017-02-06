@@ -21,16 +21,23 @@ if os.name == 'nt':  # pragma: no cover
         # windows locks byte ranges, so make sure to lock from file start
         try:
             savepos = file_.tell()
-            if savepos:
-                # [ ] test exclusive lock fails on seek here
-                # [ ] test if shared lock passes this point
-                file_.seek(0)
+            file_.seek(0, os.SEEK_END)
+            if file_.tell() > 0x7fffffff:
+                raise exceptions.FileToLarge("Files larger than 2GB "
+                                             "not supported on Windows")
+            # [ ] test exclusive lock fails on seek here
+            # [ ] test if shared lock passes this point
+            file_.seek(0)
+            try:
                 # [x] check if 0 param locks entire file (not documented in
                 #     Python)
                 # [x] just fails with "IOError: [Errno 13] Permission denied",
-                #     but -1 seems to do the trick
-            try:
-                msvcrt.locking(file_.fileno(), mode, -1)
+                # [x] -1 crashes on py3.5+
+                # [x] larger than 0x7fffffff gives OverflowError
+                # [ ] writing past 2GB goes to unlocked space, should not
+                #     be a problem when only using portalocker, since it
+                #     always locks from the start
+                msvcrt.locking(file_.fileno(), mode, 0x7fffffff)
             except IOError as exc_value:
                 # [ ] be more specific here
                 raise exceptions.LockException(
@@ -48,7 +55,7 @@ if os.name == 'nt':  # pragma: no cover
             if savepos:
                 file_.seek(0)
             try:
-                msvcrt.locking(file_.fileno(), constants.LOCK_UN, -1)
+                msvcrt.locking(file_.fileno(), constants.LOCK_UN, 0x7fffffff)
             except IOError as exc_value:
                 raise exceptions.LockException(
                     exceptions.LockException.LOCK_FAILED, exc_value.strerror)
