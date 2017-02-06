@@ -7,6 +7,8 @@ from . import exceptions
 from . import constants
 from . import portalocker
 
+current_time = getattr(time, "monotonic", time.time)
+
 DEFAULT_TIMEOUT = 5
 DEFAULT_CHECK_INTERVAL = 0.25
 LOCK_METHOD = constants.LOCK_EX | constants.LOCK_NB
@@ -126,11 +128,11 @@ class Lock(object):
             # Try to lock
             fh = self._get_lock(fh)
         except exceptions.LockException as exception:
-            # Try till the timeout is 0
-            while timeout > 0:
+            # Try till the timeout has passed
+            timeoutend = current_time() + timeout
+            while timeoutend > current_time():
                 # Wait a bit
                 time.sleep(check_interval)
-                timeout -= check_interval
 
                 # Try again
                 try:

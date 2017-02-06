@@ -30,7 +30,8 @@ def test_with_timeout(tmpfile):
     with pytest.raises(portalocker.AlreadyLocked):
         with portalocker.Lock(tmpfile, timeout=0.1) as fh:
             print('writing some stuff to my cache...', file=fh)
-            with portalocker.Lock(tmpfile, timeout=0.1, mode='wb'):
+            with portalocker.Lock(tmpfile, timeout=0.1, mode='wb',
+                                  fail_when_locked=True):
                 pass
             print('writing more stuff to my cache...', file=fh)
 

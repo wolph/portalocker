@@ -9,3 +9,7 @@ class LockException(BaseLockException):
 
 class AlreadyLocked(BaseLockException):
     pass
+
+
+class FileToLarge(BaseLockException):
+    pass
