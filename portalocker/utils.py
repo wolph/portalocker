@@ -201,6 +201,40 @@ class Lock(object):
         instance.release()
 
 
+class RLock(Lock):
+    """
+    A reentrant lock, functions in a similar way to threading.RLock in that it
+    can be acquired multiple times.  When the corresponding number of release()
+    calls are made the lock will finally release the underlying file lock.
+    """
+    def __init__(
+            self, filename, mode='a', timeout=DEFAULT_TIMEOUT,
+            check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=False,
+            flags=LOCK_METHOD):
+        super(RLock, self).__init__(filename, mode, timeout, check_interval,
+                                    fail_when_locked, flags)
+        self._acquire_count = 0
+
+    def acquire(
+            self, timeout=None, check_interval=None, fail_when_locked=None):
+        if self._acquire_count >= 1:
+            fh = self.fh
+        else:
+            fh = super(RLock, self).acquire(timeout, check_interval,
+                                            fail_when_locked)
+        self._acquire_count += 1
+        return fh
+
+    def release(self):
+        if self._acquire_count == 0:
+            raise exceptions.LockException(
+                "Cannot release more times than acquired")
+
+        if self._acquire_count == 1:
+            super(RLock, self).release()
+        self._acquire_count -= 1
+
+
 class TemporaryFileLock(Lock):
 
     def __init__(self, filename='.lock', timeout=DEFAULT_TIMEOUT,
