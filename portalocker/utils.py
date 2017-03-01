@@ -83,6 +83,9 @@ class Lock(object):
         fail_when_locked is useful when multiple threads/processes can race
         when creating a file. If set to true than the system will wait till
         the lock was acquired and then return an AlreadyLocked exception.
+
+        Note that the file is opened first and locked later. So using 'w' as
+        mode will result in truncate _BEFORE_ the lock is checked.
         '''
 
         if 'w' in mode:
