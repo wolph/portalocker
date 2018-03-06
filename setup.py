@@ -2,6 +2,7 @@ from __future__ import print_function
 
 import re
 import os
+import sys
 import setuptools
 
 
@@ -12,12 +13,26 @@ with open('portalocker/__about__.py') as fp:
     exec(fp.read(), about)
 
 
-test_requirements_file = os.path.join('tests', 'requirements.txt')
-if os.path.isfile(test_requirements_file):
-    with open(test_requirements_file) as fh:
-        tests_require = fh.read().splitlines()
-else:
-    tests_require = ['pytest>=3.0']
+install_requires = []
+setup_requires = [
+    'pytest-runner',
+]
+tests_require = [
+    'flake8>=3.5.0',
+    'pytest>=3.4.0',
+    'pytest-cache>=1.0',
+    'pytest-cov>=2.5.1',
+    'pytest-flakes>=2.0.0',
+    'pytest-pep8>=1.0.6',
+    'sphinx>=1.7.1',
+]
+
+
+if sys.platform == 'win32':
+    try:
+        import pywin32
+    except ImportError:
+        install_requires.append('pypiwin32')
 
 
 class Combine(setuptools.Command):
@@ -104,9 +119,14 @@ if __name__ == '__main__':
         cmdclass={
             'combine': Combine,
         },
-        setup_requires=[
-            'pytest-runner',
-        ],
+        install_requires=install_requires,
+        setup_requires=setup_requires,
         tests_require=tests_require,
+        extras_require={
+            'docs': [
+                'sphinx>=1.7.1',
+            ],
+            'tests': tests_require,
+        },
     )
 
