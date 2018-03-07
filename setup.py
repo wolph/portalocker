@@ -4,6 +4,7 @@ import re
 import os
 import sys
 import setuptools
+from setuptools import command
 
 
 # To prevent importing about and thereby breaking the coverage info we use this
@@ -14,9 +15,7 @@ with open('portalocker/__about__.py') as fp:
 
 
 install_requires = []
-setup_requires = [
-    'pytest-runner',
-]
+setup_requires = []
 tests_require = [
     'flake8>=3.5.0',
     'pytest>=3.4.0',
@@ -33,6 +32,21 @@ if sys.platform == 'win32':
         import pywin32
     except ImportError:
         install_requires.append('pypiwin32')
+
+
+class PyTest(command.test):
+    user_options = [('pytest-args=', 'a', "Arguments to pass to pytest")]
+
+    def initialize_options(self):
+        command.test.initialize_options(self)
+        self.pytest_args = ''
+
+    def run_tests(self):
+        import shlex
+        # import here, cause outside the eggs aren't loaded
+        import pytest
+        errno = pytest.main(shlex.split(self.pytest_args))
+        sys.exit(errno)
 
 
 class Combine(setuptools.Command):
@@ -118,13 +132,14 @@ if __name__ == '__main__':
         platforms=['any'],
         cmdclass={
             'combine': Combine,
+            'test': PyTest,
         },
         install_requires=install_requires,
         setup_requires=setup_requires,
         tests_require=tests_require,
         extras_require={
             'docs': [
-                'sphinx>=1.7.1',
+                'sphinx<1.7.0',
             ],
             'tests': tests_require,
         },
