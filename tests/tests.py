@@ -1,7 +1,6 @@
 from __future__ import print_function
 from __future__ import with_statement
 
-import os
 import pytest
 import portalocker
 
@@ -163,13 +162,13 @@ def test_exlusive(tmpfile):
     portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
 
     # Make sure we can't read the locked file
-    with pytest.raises(portalocker.LockException) as excinfo:
+    with pytest.raises(portalocker.LockException):
         with open(tmpfile, 'r') as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.read()
 
     # Make sure we can't write the locked file
-    with pytest.raises(portalocker.LockException) as excinfo:
+    with pytest.raises(portalocker.LockException):
         with open(tmpfile, 'w+') as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.write('surprise and fear')
@@ -192,7 +191,7 @@ def test_shared(tmpfile):
     fh2.close()
 
     # Make sure we can't write the locked file
-    with pytest.raises(portalocker.LockException) as excinfo:
+    with pytest.raises(portalocker.LockException):
         fh2 = open(tmpfile, 'w+')
         portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
         fh2.write('surprise and fear')
