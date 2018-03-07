@@ -11,7 +11,7 @@ __author__ = __about__.__author__
 #: Current author's email address
 __email__ = __about__.__email__
 #: Version number
-__version__ = __about__.__version__
+__version__ = '1.2.0'
 #: Package description for Pypi
 __description__ = __about__.__description__
 #: Package homepage
@@ -48,6 +48,7 @@ LOCK_UN = constants.LOCK_UN
 #: Locking utility class to automatically handle opening with timeouts and
 #: context wrappers
 Lock = utils.Lock
+RLock = utils.RLock
 TemporaryFileLock = utils.TemporaryFileLock
 open_atomic = utils.open_atomic
 

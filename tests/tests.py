@@ -1,6 +1,7 @@
 from __future__ import print_function
 from __future__ import with_statement
 
+import os
 import pytest
 import portalocker
 
@@ -116,4 +117,94 @@ def test_acquire_release(tmpfile):
 
     lock.release()  # release the lock
     lock.release()  # second release does nothing
+
+
+def test_rlock_acquire_release_count(tmpfile):
+    lock = portalocker.RLock(tmpfile)
+    # Twice acquire
+    h = lock.acquire()
+    assert not h.closed
+    lock.acquire()
+    assert not h.closed
+
+    # Two release
+    lock.release()
+    assert not h.closed
+    lock.release()
+    assert h.closed
+
+
+def test_rlock_acquire_release(tmpfile):
+    lock = portalocker.RLock(tmpfile)
+    lock2 = portalocker.RLock(tmpfile, fail_when_locked=False)
+
+    lock.acquire()  # acquire lock when nobody is using it
+    with pytest.raises(portalocker.LockException):
+        # another party should not be able to acquire the lock
+        lock2.acquire(timeout=0.01)
+
+    # Now acquire again
+    lock.acquire()
+
+    lock.release()  # release the lock
+    lock.release()  # second release does nothing
+
+
+def test_release_unacquired(tmpfile):
+    with pytest.raises(portalocker.LockException):
+        portalocker.RLock(tmpfile).release()
+
+
+def test_exlusive(tmpfile):
+    with open(tmpfile, 'w') as fh:
+        fh.write('spam and eggs')
+
+    fh = open(tmpfile, 'r')
+    portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
+
+    # Make sure we can't read the locked file
+    with pytest.raises(portalocker.LockException) as excinfo:
+        with open(tmpfile, 'r') as fh2:
+            portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            fh2.read()
+
+    # Make sure we can't write the locked file
+    with pytest.raises(portalocker.LockException) as excinfo:
+        with open(tmpfile, 'w+') as fh2:
+            portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            fh2.write('surprise and fear')
+
+    if os.name == 'nt':
+        assert excinfo.args[0].value.strerror == 'Permission denied'
+
+    # Make sure we can explicitly unlock the file
+    portalocker.unlock(fh)
+    fh.close()
+
+
+def test_shared(tmpfile):
+    with open(tmpfile, 'w') as fh:
+        fh.write('spam and eggs')
+
+    f = open(tmpfile, 'r')
+    portalocker.lock(f, portalocker.LOCK_SH | portalocker.LOCK_NB)
+
+    # Make sure we can read the locked file
+    fh2 = open(tmpfile, 'r')
+    assert fh2.read() == 'spam and eggs'
+    fh2.close()
+
+    # Make sure we can't write the locked file
+    with pytest.raises(portalocker.LockException) as excinfo:
+        fh2 = open(tmpfile, 'w+')
+        portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
+        fh2.write('surprise and fear')
+        fh2.close()
+
+    if os.name == 'nt':
+        assert excinfo.args[0].value.strerror == 'Permission denied'
+
+    # Make sure we can explicitly unlock the file
+    portalocker.unlock(f)
+    f.close()
 

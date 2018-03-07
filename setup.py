@@ -2,7 +2,9 @@ from __future__ import print_function
 
 import re
 import os
+import sys
 import setuptools
+from setuptools.command.test import test as TestCommand
 
 
 # To prevent importing about and thereby breaking the coverage info we use this
@@ -12,12 +14,39 @@ with open('portalocker/__about__.py') as fp:
     exec(fp.read(), about)
 
 
-test_requirements_file = os.path.join('tests', 'requirements.txt')
-if os.path.isfile(test_requirements_file):
-    with open(test_requirements_file) as fh:
-        tests_require = fh.read().splitlines()
-else:
-    tests_require = ['pytest>=3.0']
+install_requires = []
+setup_requires = []
+tests_require = [
+    'flake8>=3.5.0',
+    'pytest>=3.4.0',
+    'pytest-cache>=1.0',
+    'pytest-cov>=2.5.1',
+    'pytest-flakes>=2.0.0',
+    'pytest-pep8>=1.0.6',
+    'sphinx>=1.7.1',
+]
+
+
+if sys.platform == 'win32':
+    try:
+        import pywin32
+    except ImportError:
+        install_requires.append('pypiwin32')
+
+
+class PyTest(TestCommand):
+    user_options = [('pytest-args=', 'a', "Arguments to pass to pytest")]
+
+    def initialize_options(self):
+        TestCommand.initialize_options(self)
+        self.pytest_args = ''
+
+    def run_tests(self):
+        import shlex
+        # import here, cause outside the eggs aren't loaded
+        import pytest
+        errno = pytest.main(shlex.split(self.pytest_args))
+        sys.exit(errno)
 
 
 class Combine(setuptools.Command):
@@ -85,11 +114,11 @@ if __name__ == '__main__':
         classifiers=[
             'Intended Audience :: Developers',
             'Programming Language :: Python',
-            'Programming Language :: Python :: 2.6',
             'Programming Language :: Python :: 2.7',
             'Programming Language :: Python :: 3.3',
             'Programming Language :: Python :: 3.4',
             'Programming Language :: Python :: 3.5',
+            'Programming Language :: Python :: 3.6',
             'Programming Language :: Python :: Implementation :: CPython',
             'Programming Language :: Python :: Implementation :: PyPy',
         ],
@@ -103,10 +132,16 @@ if __name__ == '__main__':
         platforms=['any'],
         cmdclass={
             'combine': Combine,
+            'test': PyTest,
         },
-        setup_requires=[
-            'pytest-runner',
-        ],
+        install_requires=install_requires,
+        setup_requires=setup_requires,
         tests_require=tests_require,
+        extras_require={
+            'docs': [
+                'sphinx<1.7.0',
+            ],
+            'tests': tests_require,
+        },
     )
 
