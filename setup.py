@@ -4,7 +4,7 @@ import re
 import os
 import sys
 import setuptools
-from setuptools import command
+from setuptools.command.test import test as TestCommand
 
 
 # To prevent importing about and thereby breaking the coverage info we use this
@@ -34,11 +34,11 @@ if sys.platform == 'win32':
         install_requires.append('pypiwin32')
 
 
-class PyTest(command.test):
+class PyTest(TestCommand):
     user_options = [('pytest-args=', 'a', "Arguments to pass to pytest")]
 
     def initialize_options(self):
-        command.test.initialize_options(self)
+        TestCommand.initialize_options(self)
         self.pytest_args = ''
 
     def run_tests(self):
