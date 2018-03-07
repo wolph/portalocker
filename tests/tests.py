@@ -174,9 +174,6 @@ def test_exlusive(tmpfile):
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.write('surprise and fear')
 
-    if os.name == 'nt':
-        assert excinfo.args[0].value.strerror == 'Permission denied'
-
     # Make sure we can explicitly unlock the file
     portalocker.unlock(fh)
     fh.close()
@@ -200,9 +197,6 @@ def test_shared(tmpfile):
         portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
         fh2.write('surprise and fear')
         fh2.close()
-
-    if os.name == 'nt':
-        assert excinfo.args[0].value.strerror == 'Permission denied'
 
     # Make sure we can explicitly unlock the file
     portalocker.unlock(f)
