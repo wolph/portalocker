@@ -187,6 +187,7 @@ def test_shared(tmpfile):
 
     # Make sure we can read the locked file
     fh2 = open(tmpfile, 'r')
+    portalocker.lock(fh2, portalocker.LOCK_SH | portalocker.LOCK_NB)
     assert fh2.read() == 'spam and eggs'
     fh2.close()
 
