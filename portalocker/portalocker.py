@@ -3,6 +3,13 @@ from . import exceptions
 from . import constants
 
 
+LOCKING_EXCEPTIONS = IOError,
+try:  # pragma: no cover
+    LOCKING_EXCEPTIONS += BlockingIOError,
+except NameError:  # pragma: no cover
+    pass
+
+
 if os.name == 'nt':  # pragma: no cover
     import msvcrt
 
@@ -59,7 +66,7 @@ if os.name == 'nt':  # pragma: no cover
                 file_.seek(0)
             try:
                 msvcrt.locking(file_.fileno(), constants.LOCK_UN, 0x7fffffff)
-            except IOError as exc_value:
+            except LOCKING_EXCEPTIONS as exc_value:
                 raise exceptions.LockException(
                     exceptions.LockException.LOCK_FAILED, exc_value.strerror)
             finally:
@@ -73,9 +80,10 @@ elif os.name == 'posix':  # pragma: no cover
     import fcntl
 
     def lock(file_, flags):
+        print('locking exceptions', LOCKING_EXCEPTIONS)
         try:
             fcntl.flock(file_.fileno(), flags)
-        except IOError as exc_value:
+        except LOCKING_EXCEPTIONS as exc_value:
             # The exception code varies on different systems so we'll catch
             # every IO error
             raise exceptions.LockException(exc_value)
