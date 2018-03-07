@@ -19,6 +19,8 @@ after_success:
 - coveralls
 - python setup.py bdist_wheel
 - ls -la dist/
+- pip install codecov
+- codecov
 
 before_deploy:
 - python setup.py combine -o dist/portalocker.py
