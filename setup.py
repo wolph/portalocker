@@ -27,11 +27,8 @@ tests_require = [
 ]
 
 
-if sys.platform == 'win32':
-    try:
-        import pywin32
-    except ImportError:
-        install_requires.append('pypiwin32')
+if os.name == 'nt':
+    install_requires.append('pypiwin32')
 
 
 class PyTest(TestCommand):
@@ -47,7 +44,7 @@ class PyTest(TestCommand):
         import pytest
         errno = pytest.main(shlex.split(self.pytest_args))
         sys.exit(errno)
-
+    
 
 class Combine(setuptools.Command):
     description = 'Build single combined portalocker file'

@@ -19,15 +19,15 @@ after_success:
 - coveralls
 - python setup.py bdist_wheel
 - ls -la dist/
-
+- pip install codecov
+- codecov
 before_deploy:
 - python setup.py combine -o dist/portalocker.py
 deploy:
   provider: releases
   api_key:
-    secure: xY/jF18OX/muUeSnncY3GeHpzOlPi9NGfOUM/Cl7LXCjNnqXVub2uxYiOdwGs1Z9GNqftNv4g1+th89jHVyPOvXK3DSQ0yemMMMM3ZLFdeuy/XcQyuS/32tMfFm5jBBG6sa/S8Mm6H9ShQfQcrQT4su7EzHJIAz72iUXMagKtHM=
+    secure: rqSN1zaF8/9mZYpiU1Em1txC6ZSBG2VjqmeUH7Brp9z0GcIfr8JKoPkIB5W6NyrOPXmBa+eA1nsUsrcDkyMr/q1T5pvJwZl2QtOWayAb0jjvBFv/hDK9VO2eqSADU81YzTWA+U8lRSDSTqmdgWa76LG8Hxc1m76Ns5t2KGxOO5k=
   file: dist/portalocker.py
   skip_cleanup: true
   on:
     repo: WoLpH/portalocker
-    tags: true
