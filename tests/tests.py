@@ -186,17 +186,15 @@ def test_shared(tmpfile):
     portalocker.lock(f, portalocker.LOCK_SH | portalocker.LOCK_NB)
 
     # Make sure we can read the locked file
-    fh2 = open(tmpfile, 'r')
-    portalocker.lock(fh2, portalocker.LOCK_SH | portalocker.LOCK_NB)
-    assert fh2.read() == 'spam and eggs'
-    fh2.close()
+    with open(tmpfile, 'r') as fh2:
+        portalocker.lock(fh2, portalocker.LOCK_SH | portalocker.LOCK_NB)
+        assert fh2.read() == 'spam and eggs'
 
     # Make sure we can't write the locked file
     with pytest.raises(portalocker.LockException):
-        fh2 = open(tmpfile, 'w+')
-        portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
-        fh2.write('surprise and fear')
-        fh2.close()
+        with open(tmpfile, 'w+') as fh2:
+            portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            fh2.write('surprise and fear')
 
     # Make sure we can explicitly unlock the file
     portalocker.unlock(f)
