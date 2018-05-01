@@ -18,7 +18,7 @@ init:
   - "%PYTHON%/python -c \"import struct;print( 8 * struct.calcsize(\'P\'))\""
 
 install:
-  - "%PYTHON%/Scripts/easy_install -U pip"
+  - "%PYTHON%/Scripts/easy_install -U pip setuptools"
   - "%PYTHON%/Scripts/pip install tox"
   - "%PYTHON%/Scripts/pip install wheel"
 
