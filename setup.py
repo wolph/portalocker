@@ -1,10 +1,19 @@
 from __future__ import print_function
-
 import re
 import os
 import sys
 import setuptools
 from setuptools.command.test import test as TestCommand
+from distutils.version import StrictVersion
+from setuptools import __version__ as setuptools_version
+
+
+if StrictVersion(setuptools_version) < StrictVersion('38.3.0'):
+    raise SystemExit(
+        'Your `setuptools` version is old. '
+        'Please upgrade setuptools by running `pip install -U setuptools` '
+        'and try again.'
+    )
 
 
 # To prevent importing about and thereby breaking the coverage info we use this
@@ -14,8 +23,6 @@ with open('portalocker/__about__.py') as fp:
     exec(fp.read(), about)
 
 
-install_requires = []
-setup_requires = []
 tests_require = [
     'flake8>=3.5.0',
     'pytest>=3.4.0',
@@ -25,10 +32,6 @@ tests_require = [
     'pytest-pep8>=1.0.6',
     'sphinx>=1.7.1',
 ]
-
-
-if os.name == 'nt':
-    install_requires.append('pypiwin32')
 
 
 class PyTest(TestCommand):
@@ -131,14 +134,15 @@ if __name__ == '__main__':
             'combine': Combine,
             'test': PyTest,
         },
-        install_requires=install_requires,
-        setup_requires=setup_requires,
+        install_requires=[
+            'pypiwin32; platform_system == "Windows"',
+        ],
         tests_require=tests_require,
-        extras_require={
-            'docs': [
-                'sphinx<1.7.0',
+        extras_require=dict(
+            docs=[
+                'sphinx>=1.7.1',
             ],
-            'tests': tests_require,
-        },
+            tests=tests_require,
+        ),
     )
 
