@@ -9,6 +9,7 @@ Contents:
    :maxdepth: 4
 
    portalocker
+   tests
    changelog
    license
 
