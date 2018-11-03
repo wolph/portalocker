@@ -32,6 +32,21 @@ The module is currently maintained by Rick van Hattem <Wolph@wol.ph>.
 The project resides at https://github.com/WoLpH/portalocker . Bugs and feature
 requests can be submitted there. Patches are also very welcome.
 
+Tips
+----
+
+On some networked filesystems it might be needed to force a `os.fsync()` before closing the file so it's actually written before another client reads the file. Effectively this comes down to:
+
+::
+    
+   with portalocker.Lock('some_file', 'rb+', timeout=60) as fh:
+       # do what you need to do
+       ...
+       
+       # flush and sync to filesystem
+       fh.flush()
+       os.fsync(fh.fileno())
+
 Links
 -----
 
