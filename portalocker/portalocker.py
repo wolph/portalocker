@@ -41,7 +41,8 @@ if os.name == 'nt':  # pragma: no cover
                 if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
                     raise exceptions.LockException(
                         exceptions.LockException.LOCK_FAILED,
-                        exc_value.strerror)
+                        exc_value.strerror,
+                        fh=file_)
                 else:
                     # Q:  Are there exceptions/codes we should be dealing with
                     # here?
@@ -74,13 +75,15 @@ if os.name == 'nt':  # pragma: no cover
                     # [ ] be more specific here
                     raise exceptions.LockException(
                         exceptions.LockException.LOCK_FAILED,
-                        exc_value.strerror)
+                        exc_value.strerror,
+                        fh=file_)
                 finally:
                     if savepos:
                         file_.seek(savepos)
             except IOError as exc_value:
                 raise exceptions.LockException(
-                    exceptions.LockException.LOCK_FAILED, exc_value.strerror)
+                    exceptions.LockException.LOCK_FAILED, exc_value.strerror,
+                    fh=file_)
 
     def unlock(file_):
         try:
@@ -110,13 +113,15 @@ if os.name == 'nt':  # pragma: no cover
                 else:
                     raise exceptions.LockException(
                         exceptions.LockException.LOCK_FAILED,
-                        exc_value.strerror)
+                        exc_value.strerror,
+                        fh=file_)
             finally:
                 if savepos:
                     file_.seek(savepos)
         except IOError as exc_value:
             raise exceptions.LockException(
-                exceptions.LockException.LOCK_FAILED, exc_value.strerror)
+                exceptions.LockException.LOCK_FAILED, exc_value.strerror,
+                fh=file_)
 
 elif os.name == 'posix':  # pragma: no cover
     import fcntl
@@ -133,7 +138,7 @@ elif os.name == 'posix':  # pragma: no cover
         except locking_exceptions as exc_value:
             # The exception code varies on different systems so we'll catch
             # every IO error
-            raise exceptions.LockException(exc_value)
+            raise exceptions.LockException(exc_value, fh=file_)
 
     def unlock(file_):
         fcntl.flock(file_.fileno(), constants.LOCK_UN)
