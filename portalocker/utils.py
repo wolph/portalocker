@@ -68,7 +68,7 @@ class Lock(object):
     def __init__(
             self, filename, mode='a', timeout=DEFAULT_TIMEOUT,
             check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=False,
-            flags=LOCK_METHOD):
+            flags=LOCK_METHOD, **file_open_kwargs):
         '''Lock manager with build-in timeout
 
         filename -- filename
@@ -79,6 +79,7 @@ class Lock(object):
         check_interval -- check interval while waiting
         fail_when_locked -- after the initial lock failed, return an error
             or lock the file
+        **file_open_kwargs -- The kwargs for the `open(...)` call
 
         fail_when_locked is useful when multiple threads/processes can race
         when creating a file. If set to true than the system will wait till
@@ -102,6 +103,7 @@ class Lock(object):
         self.check_interval = check_interval
         self.fail_when_locked = fail_when_locked
         self.flags = flags
+        self.file_open_kwargs = file_open_kwargs
 
     def acquire(
             self, timeout=None, check_interval=None, fail_when_locked=None):
@@ -168,7 +170,7 @@ class Lock(object):
 
     def _get_fh(self):
         '''Get a new filehandle'''
-        return open(self.filename, self.mode)
+        return open(self.filename, self.mode, **self.file_open_kwargs)
 
     def _get_lock(self, fh):
         '''
