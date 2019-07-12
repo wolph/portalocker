@@ -19,13 +19,12 @@ init:
 
 install:
   - "%PYTHON%/Scripts/easy_install -U pip"
-  - "%PYTHON%/python -m pip install --upgrade pip"
   - "%PYTHON%/Scripts/pip install -U setuptools tox wheel"
 
 build: false  # Not a C# project, build stuff at the test step instead.
 
 test_script:
-  - "%PYTHON%/Scripts/tox --sitepackages -r -e %TOX_ENV%"
+  - "%PYTHON%/Scripts/tox --force-dep=pip>10.0.0 -r -e %TOX_ENV%"
 
 after_test:
   - "%PYTHON%/python setup.py bdist_wheel"
