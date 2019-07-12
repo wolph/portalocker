@@ -25,7 +25,7 @@ install:
 build: false  # Not a C# project, build stuff at the test step instead.
 
 test_script:
-  - "%PYTHON%/Scripts/tox -r -e %TOX_ENV%"
+  - "%PYTHON%/Scripts/tox --sitepackages -r -e %TOX_ENV%"
 
 after_test:
   - "%PYTHON%/python setup.py bdist_wheel"
