@@ -10,7 +10,7 @@ before_install:
 - wheel version
 install:
 - pip install -U setuptools wheel pip
-- pip install -r tests/requirements.txt
+- pip install -r portalocker_tests/requirements.txt
 - pip install -e .
 - pip install coveralls
 script:
