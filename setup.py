@@ -127,7 +127,7 @@ if __name__ == '__main__':
         author_email=about['__email__'],
         url=about['__url__'],
         license='PSF',
-        packages=setuptools.find_packages(exclude=['ez_setup', 'examples']),
+        packages=setuptools.find_packages(exclude=['ez_setup', 'examples', 'portalocker_tests']),
         # zip_safe=False,
         platforms=['any'],
         cmdclass={
