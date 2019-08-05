@@ -1,3 +1,26 @@
+1.5:
+
+ * Moved tests to prevent collisions with other packages
+
+1.4:
+
+ * Added optional file open parameters
+
+1.3:
+
+ * Improved documentation
+ * Added file handle to locking exceptions
+
+1.2:
+
+ * Added signed releases and tags to PyPI and Git
+
+
+1.1:
+
+ * Added support for Python 3.6+
+ * Using real time to calculate timeout
+
 1.0:
 
  * Complete code refactor.
