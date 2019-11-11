@@ -135,7 +135,7 @@ if __name__ == '__main__':
             'test': PyTest,
         },
         install_requires=[
-            'pypiwin32; platform_system == "Windows"',
+            'pywin32!=226; platform_system == "Windows"',
         ],
         tests_require=tests_require,
         extras_require=dict(
