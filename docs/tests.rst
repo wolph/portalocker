@@ -4,7 +4,7 @@ tests package
 Module contents
 ---------------
 
-.. automodule:: tests.tests
+.. automodule:: portalocker_tests.tests
     :members:
     :private-members:
     :special-members:
@@ -12,12 +12,12 @@ Module contents
     :undoc-members:
     :show-inheritance:
 
-.. automodule:: tests.test_combined
+.. automodule:: portalocker_tests.test_combined
     :members:
     :undoc-members:
     :show-inheritance:
 
-.. automodule:: tests.temporary_file_lock
+.. automodule:: portalocker_tests.temporary_file_lock
     :members:
     :private-members:
     :special-members:

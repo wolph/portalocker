@@ -165,6 +165,7 @@ class Lock(object):
     def release(self):
         '''Releases the currently locked file handle'''
         if self.fh:
+            portalocker.unlock(self.fh)
             self.fh.close()
             self.fh = None
 
