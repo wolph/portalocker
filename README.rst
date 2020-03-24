@@ -35,7 +35,9 @@ requests can be submitted there. Patches are also very welcome.
 Tips
 ----
 
-On some networked filesystems it might be needed to force a `os.fsync()` before closing the file so it's actually written before another client reads the file. Effectively this comes down to:
+On some networked filesystems it might be needed to force a `os.fsync()` before
+closing the file so it's actually written before another client reads the file.
+Effectively this comes down to:
 
 ::
     
@@ -79,9 +81,10 @@ To customize the opening and locking a manual approach is also possible:
 >>> file.write('foo')
 >>> file.close()
 
-There is no explicit need to unlock the file as it is automatically unlocked
-after `file.close()`. If you still feel the need to manually unlock a file
-than you can do it like this:
+Explicitly unlocking might not be needed in all cases:
+https://github.com/AzureAD/microsoft-authentication-extensions-for-python/issues/42#issuecomment-601108266
+
+But can be done through:
 
 >>> portalocker.unlock(file)
 
