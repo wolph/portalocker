@@ -153,7 +153,7 @@ class Lock(object):
                     pass
 
             else:
-                fh.close()                
+                fh.close()
                 # We got a timeout... reraising
                 raise exceptions.LockException(exception)
 
