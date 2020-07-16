@@ -24,13 +24,10 @@ with open('portalocker/__about__.py') as fp:
 
 
 tests_require = [
-    'flake8>=3.5.0',
-    'pytest>=3.4.0',
-    'pytest-cache>=1.0',
-    'pytest-cov>=2.5.1',
-    'pytest-flakes>=2.0.0',
-    'pytest-pep8>=1.0.6',
-    'sphinx>=1.7.1',
+    'pytest>=4.6.9',
+    'pytest-cov>=2.8.1',
+    'sphinx>=1.8.5',
+    'pytest-flake8>=1.0.5',
 ]
 
 
@@ -127,7 +124,8 @@ if __name__ == '__main__':
         author_email=about['__email__'],
         url=about['__url__'],
         license='PSF',
-        packages=setuptools.find_packages(exclude=['ez_setup', 'examples', 'portalocker_tests']),
+        packages=setuptools.find_packages(exclude=[
+            'examples', 'portalocker_tests']),
         # zip_safe=False,
         platforms=['any'],
         cmdclass={
