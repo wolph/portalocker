@@ -26,6 +26,11 @@ def test_exceptions(tmpfile):
     b.close()
 
 
+def test_utils_base():
+    class Test(utils.LockBase):
+        pass
+
+
 def test_with_timeout(tmpfile):
     # Open the file 2 times
     with pytest.raises(portalocker.AlreadyLocked):

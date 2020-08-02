@@ -134,8 +134,8 @@ class Lock(object):
             fh = self._get_lock(fh)
         except exceptions.LockException as exception:
             # Try till the timeout has passed
-            timeoutend = current_time() + timeout
-            while timeoutend > current_time():
+            timeout_end = current_time() + timeout
+            while timeout_end > current_time():
                 # Wait a bit
                 time.sleep(check_interval)
 
@@ -198,22 +198,13 @@ class Lock(object):
 
         return fh
 
-    def __enter__(self):
-        return self.acquire()
-
-    def __exit__(self, type_, value, tb):
-        self.release()
-
-    def __delete__(self, instance):  # pragma: no cover
-        instance.release()
-
 
 class RLock(Lock):
-    """
+    '''
     A reentrant lock, functions in a similar way to threading.RLock in that it
     can be acquired multiple times.  When the corresponding number of release()
     calls are made the lock will finally release the underlying file lock.
-    """
+    '''
     def __init__(
             self, filename, mode='a', timeout=DEFAULT_TIMEOUT,
             check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=False,

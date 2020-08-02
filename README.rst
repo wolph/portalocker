@@ -5,7 +5,7 @@ portalocker - Cross-platform locking library
 .. image:: https://travis-ci.org/WoLpH/portalocker.svg?branch=master
     :alt: Linux Test Status
     :target: https://travis-ci.org/WoLpH/portalocker
-    
+
 .. image:: https://ci.appveyor.com/api/projects/status/mgqry98hgpy4prhh?svg=true
     :alt: Windows Tests Status
     :target: https://ci.appveyor.com/project/WoLpH/portalocker
@@ -40,11 +40,11 @@ closing the file so it's actually written before another client reads the file.
 Effectively this comes down to:
 
 ::
-    
+
    with portalocker.Lock('some_file', 'rb+', timeout=60) as fh:
        # do what you need to do
        ...
-       
+
        # flush and sync to filesystem
        fh.flush()
        os.fsync(fh.fileno())
@@ -56,7 +56,7 @@ Links
     - http://portalocker.readthedocs.org/en/latest/
 * Source
     - https://github.com/WoLpH/portalocker
-* Bug reports 
+* Bug reports
     - https://github.com/WoLpH/portalocker/issues
 * Package homepage
     - https://pypi.python.org/pypi/portalocker
@@ -70,7 +70,7 @@ To make sure your cache generation scripts don't race, use the `Lock` class:
 
 >>> import portalocker
 >>> with portalocker.Lock('somefile', timeout=1) as fh:
-    print >>fh, 'writing some stuff to my cache...'
+...     print >>fh, 'writing some stuff to my cache...'
 
 To customize the opening and locking a manual approach is also possible:
 
