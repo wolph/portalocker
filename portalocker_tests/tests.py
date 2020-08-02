@@ -3,6 +3,7 @@ from __future__ import with_statement
 
 import pytest
 import portalocker
+from portalocker import utils
 
 
 def test_exceptions(tmpfile):
@@ -23,6 +24,11 @@ def test_exceptions(tmpfile):
     # Cleanup
     a.close()
     b.close()
+
+
+def test_utils_base():
+    class Test(utils.LockBase):
+        pass
 
 
 def test_with_timeout(tmpfile):

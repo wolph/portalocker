@@ -1,6 +1,9 @@
 import os
+import abc
 import time
 import atexit
+import random
+import pathlib
 import tempfile
 import contextlib
 from . import exceptions
@@ -63,7 +66,28 @@ def open_atomic(filename, binary=True):
             pass
 
 
-class Lock(object):
+class LockBase(abc.ABC):  # pragma: no cover
+
+    @abc.abstractmethod
+    def acquire(
+            self, timeout=None, check_interval=None, fail_when_locked=None):
+        return NotImplemented
+
+    @abc.abstractmethod
+    def release(self):
+        return NotImplemented
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, type_, value, tb):
+        self.release()
+
+    def __delete__(self, instance):
+        instance.release()
+
+
+class Lock(LockBase):
 
     def __init__(
             self, filename, mode='a', timeout=DEFAULT_TIMEOUT,
@@ -131,8 +155,8 @@ class Lock(object):
             fh = self._get_lock(fh)
         except exceptions.LockException as exception:
             # Try till the timeout has passed
-            timeoutend = current_time() + timeout
-            while timeoutend > current_time():
+            timeout_end = current_time() + timeout
+            while timeout_end > current_time():
                 # Wait a bit
                 time.sleep(check_interval)
 
@@ -195,22 +219,13 @@ class Lock(object):
 
         return fh
 
-    def __enter__(self):
-        return self.acquire()
-
-    def __exit__(self, type_, value, tb):
-        self.release()
-
-    def __delete__(self, instance):  # pragma: no cover
-        instance.release()
-
 
 class RLock(Lock):
-    """
+    '''
     A reentrant lock, functions in a similar way to threading.RLock in that it
     can be acquired multiple times.  When the corresponding number of release()
     calls are made the lock will finally release the underlying file lock.
-    """
+    '''
     def __init__(
             self, filename, mode='a', timeout=DEFAULT_TIMEOUT,
             check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=False,
@@ -254,3 +269,90 @@ class TemporaryFileLock(Lock):
         Lock.release(self)
         if os.path.isfile(self.filename):  # pragma: no branch
             os.unlink(self.filename)
+
+
+class BoundedSemaphore(LockBase):
+    '''
+    Bounded semaphore to prevent too many parallel processes from running
+
+    It's also possible to specify a timeout when acquiring the lock to wait
+    for a resource to become available.  This is very similar to
+    threading.BoundedSemaphore but works across multiple processes and across
+    multiple operating systems.
+
+    >>> semaphore = BoundedSemaphore(2, directory='')
+    >>> semaphore.get_filenames()[0]
+    PosixPath('bounded_semaphore.00.lock')
+    >>> sorted(semaphore.get_random_filenames())[1]
+    PosixPath('bounded_semaphore.01.lock')
+    '''
+
+    def __init__(self, maximum: int, name: str = 'bounded_semaphore',
+                 filename_pattern: str = '{name}.{number:02d}.lock', directory:
+                 str = tempfile.gettempdir(), timeout=DEFAULT_TIMEOUT,
+                 check_interval=DEFAULT_CHECK_INTERVAL):
+        self.maximum = maximum
+        self.name = name
+        self.filename_pattern = filename_pattern
+        self.directory = directory
+        self.lock: Lock = None
+        self.timeout = timeout
+        self.check_interval = check_interval
+
+    def get_filenames(self):
+        return [self.get_filename(n) for n in range(self.maximum)]
+
+    def get_random_filenames(self):
+        filenames = self.get_filenames()
+        random.shuffle(filenames)
+        return filenames
+
+    def get_filename(self, number):
+        return pathlib.Path(self.directory) / self.filename_pattern.format(
+            name=self.name,
+            number=number,
+        )
+
+    def acquire(
+            self, timeout=None, check_interval=None):
+        assert not self.lock, 'Already locked'
+
+        if timeout is None:
+            timeout = self.timeout
+        if timeout is None:
+            timeout = 0
+
+        assert timeout < 0.2, f'timeout: {timeout} :: {self.timeout}'
+        if check_interval is None:
+            check_interval = self.check_interval
+
+        filenames = self.get_filenames()
+
+        if self.try_lock(filenames):
+            return self.lock
+
+        if not timeout:
+            raise exceptions.AlreadyLocked()
+
+        timeout_end = current_time() + timeout
+        while timeout_end > current_time():  # pragma: no branch
+            if self.try_lock(filenames):  # pragma: no branch
+                return self.lock  # pragma: no cover
+
+            time.sleep(check_interval)
+
+        raise exceptions.AlreadyLocked()
+
+    def try_lock(self, filenames):
+        for filename in filenames:
+            self.lock = Lock(filename, fail_when_locked=True)
+            try:
+                self.lock.acquire()
+                return True
+            except exceptions.AlreadyLocked:
+                pass
+
+    def release(self):  # pragma: no cover
+        self.lock.release()
+        self.lock = None
+

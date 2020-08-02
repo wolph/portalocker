@@ -49,6 +49,7 @@ LOCK_UN = constants.LOCK_UN
 #: context wrappers
 Lock = utils.Lock
 RLock = utils.RLock
+BoundedSemaphore = utils.BoundedSemaphore
 TemporaryFileLock = utils.TemporaryFileLock
 open_atomic = utils.open_atomic
 
@@ -61,7 +62,9 @@ __all__ = [
     'LOCK_UN',
     'LockException',
     'Lock',
+    'RLock',
     'AlreadyLocked',
+    'BoundedSemaphore',
     'open_atomic',
 ]
 
