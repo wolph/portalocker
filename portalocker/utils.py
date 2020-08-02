@@ -66,7 +66,28 @@ def open_atomic(filename, binary=True):
             pass
 
 
-class Lock(object):
+class LockBase(abc.ABC):  # pragma: no cover
+
+    @abc.abstractmethod
+    def acquire(
+            self, timeout=None, check_interval=None, fail_when_locked=None):
+        return NotImplemented
+
+    @abc.abstractmethod
+    def release(self):
+        return NotImplemented
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, type_, value, tb):
+        self.release()
+
+    def __delete__(self, instance):
+        instance.release()
+
+
+class Lock(LockBase):
 
     def __init__(
             self, filename, mode='a', timeout=DEFAULT_TIMEOUT,
