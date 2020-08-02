@@ -120,7 +120,7 @@ class Lock(LockBase):
             truncate = False
 
         self.fh = None
-        self.filename = filename
+        self.filename = str(filename)
         self.mode = mode
         self.truncate = truncate
         self.timeout = timeout
@@ -295,7 +295,7 @@ class BoundedSemaphore(LockBase):
         self.name = name
         self.filename_pattern = filename_pattern
         self.directory = directory
-        self.lock: Lock = None
+        self.lock = None
         self.timeout = timeout
         self.check_interval = check_interval
 
@@ -322,7 +322,6 @@ class BoundedSemaphore(LockBase):
         if timeout is None:
             timeout = 0
 
-        assert timeout < 0.2, f'timeout: {timeout} :: {self.timeout}'
         if check_interval is None:
             check_interval = self.check_interval
 

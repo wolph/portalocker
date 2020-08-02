@@ -48,10 +48,6 @@ if os.name == 'nt':  # pragma: no cover
                     # here?
                     raise
         else:
-            mode = win32con.LOCKFILE_EXCLUSIVE_LOCK
-            if flags & constants.LOCK_NB:
-                mode |= win32con.LOCKFILE_FAIL_IMMEDIATELY
-
             if flags & constants.LOCK_NB:
                 mode = msvcrt.LK_NBLCK
             else:
