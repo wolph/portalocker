@@ -120,7 +120,7 @@ class Lock(LockBase):
             truncate = False
 
         self.fh = None
-        self.filename = filename
+        self.filename = str(filename)
         self.mode = mode
         self.truncate = truncate
         self.timeout = timeout
