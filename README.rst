@@ -81,15 +81,38 @@ To customize the opening and locking a manual approach is also possible:
 >>> file.write('foo')
 >>> file.close()
 
-Explicitly unlocking might not be needed in all cases:
+Explicitly unlocking is not needed in most cases but omitting it has been known
+to cause issues:
 https://github.com/AzureAD/microsoft-authentication-extensions-for-python/issues/42#issuecomment-601108266
 
-But can be done through:
+If needed, it can be done through:
 
 >>> portalocker.unlock(file)
 
 Do note that your data might still be in a buffer so it is possible that your
 data is not available until you `flush()` or `close()`.
+
+To create a cross platform bounded semaphore across multiple processes you can
+use the `BoundedSemaphore` class which functions somewhat similar to
+`threading.BoundedSemaphore`:
+
+>>> import portalocker
+>>> n = 2
+>>> timeout = 0.1
+
+>>> semaphore_a = portalocker.BoundedSemaphore(n, timeout=timeout)
+>>> semaphore_b = portalocker.BoundedSemaphore(n, timeout=timeout)
+>>> semaphore_c = portalocker.BoundedSemaphore(n, timeout=timeout)
+
+>>> semaphore_a.acquire()
+<portalocker.utils.Lock object at ...>
+>>> semaphore_b.acquire()
+<portalocker.utils.Lock object at ...>
+>>> semaphore_c.acquire()
+Traceback (most recent call last):
+  ...
+portalocker.exceptions.AlreadyLocked
+
 
 More examples can be found in the
 `tests <http://portalocker.readthedocs.io/en/latest/_modules/tests/tests.html>`_.

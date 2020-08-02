@@ -1,6 +1,9 @@
 import os
+import abc
 import time
 import atexit
+import random
+import pathlib
 import tempfile
 import contextlib
 from . import exceptions
@@ -254,3 +257,90 @@ class TemporaryFileLock(Lock):
         Lock.release(self)
         if os.path.isfile(self.filename):  # pragma: no branch
             os.unlink(self.filename)
+
+
+class BoundedSemaphore(LockBase):
+    '''
+    Bounded semaphore to prevent too many parallel processes from running
+
+    It's also possible to specify a timeout when acquiring the lock to wait
+    for a resource to become available.  This is very similar to
+    threading.BoundedSemaphore but works across multiple processes and across
+    multiple operating systems.
+
+    >>> semaphore = BoundedSemaphore(2, directory='')
+    >>> semaphore.get_filenames()[0]
+    PosixPath('bounded_semaphore.00.lock')
+    >>> sorted(semaphore.get_random_filenames())[1]
+    PosixPath('bounded_semaphore.01.lock')
+    '''
+
+    def __init__(self, maximum: int, name: str = 'bounded_semaphore',
+                 filename_pattern: str = '{name}.{number:02d}.lock', directory:
+                 str = tempfile.gettempdir(), timeout=DEFAULT_TIMEOUT,
+                 check_interval=DEFAULT_CHECK_INTERVAL):
+        self.maximum = maximum
+        self.name = name
+        self.filename_pattern = filename_pattern
+        self.directory = directory
+        self.lock: Lock = None
+        self.timeout = timeout
+        self.check_interval = check_interval
+
+    def get_filenames(self):
+        return [self.get_filename(n) for n in range(self.maximum)]
+
+    def get_random_filenames(self):
+        filenames = self.get_filenames()
+        random.shuffle(filenames)
+        return filenames
+
+    def get_filename(self, number):
+        return pathlib.Path(self.directory) / self.filename_pattern.format(
+            name=self.name,
+            number=number,
+        )
+
+    def acquire(
+            self, timeout=None, check_interval=None):
+        assert not self.lock, 'Already locked'
+
+        if timeout is None:
+            timeout = self.timeout
+        if timeout is None:
+            timeout = 0
+
+        assert timeout < 0.2, f'timeout: {timeout} :: {self.timeout}'
+        if check_interval is None:
+            check_interval = self.check_interval
+
+        filenames = self.get_filenames()
+
+        if self.try_lock(filenames):
+            return self.lock
+
+        if not timeout:
+            raise exceptions.AlreadyLocked()
+
+        timeout_end = current_time() + timeout
+        while timeout_end > current_time():  # pragma: no branch
+            if self.try_lock(filenames):  # pragma: no branch
+                return self.lock  # pragma: no cover
+
+            time.sleep(check_interval)
+
+        raise exceptions.AlreadyLocked()
+
+    def try_lock(self, filenames):
+        for filename in filenames:
+            self.lock = Lock(filename, fail_when_locked=True)
+            try:
+                self.lock.acquire()
+                return True
+            except exceptions.AlreadyLocked:
+                pass
+
+    def release(self):  # pragma: no cover
+        self.lock.release()
+        self.lock = None
+

@@ -3,6 +3,7 @@ from __future__ import with_statement
 
 import pytest
 import portalocker
+from portalocker import utils
 
 
 def test_exceptions(tmpfile):
