@@ -8,7 +8,7 @@ python:
 - '3.8'
 # TODO: Enable when available
 # - '3.9'
-- pypy
+- pypy3
 before_install:
 - wheel version
 install:
