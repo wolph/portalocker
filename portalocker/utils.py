@@ -166,7 +166,8 @@ class Lock(LockBase):
                     # We already tried to the get the lock
                     # If fail_when_locked is true, then stop trying
                     if fail_when_locked:
-                        raise exceptions.AlreadyLocked(exception)
+                        fh.close()
+                        raise exceptions.BaseLockException(exception)
 
                     else:  # pragma: no cover
                         # We've got the lock
