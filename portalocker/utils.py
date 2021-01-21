@@ -285,10 +285,10 @@ class BoundedSemaphore(LockBase):
     multiple operating systems.
 
     >>> semaphore = BoundedSemaphore(2, directory='')
-    >>> semaphore.get_filenames()[0]
-    PosixPath('bounded_semaphore.00.lock')
-    >>> sorted(semaphore.get_random_filenames())[1]
-    PosixPath('bounded_semaphore.01.lock')
+    >>> str(semaphore.get_filenames()[0])
+    'bounded_semaphore.00.lock'
+    >>> str(sorted(semaphore.get_random_filenames())[1])
+    'bounded_semaphore.01.lock'
     '''
 
     def __init__(self, maximum: int, name: str = 'bounded_semaphore',
