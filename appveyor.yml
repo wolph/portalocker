@@ -3,32 +3,24 @@
 
 environment:
   matrix:
-    - PYTHON: "C:\\Python27"
-      TOX_ENV: "py27"
-
-    - PYTHON: "C:\\Python35"
-      TOX_ENV: "py35"
-
-    - PYTHON: "C:\\Python36"
-      TOX_ENV: "py36"
-
-
-init:
-  - "%PYTHON%/python -V"
-  - "%PYTHON%/python -c \"import struct;print( 8 * struct.calcsize(\'P\'))\""
+  - TOXENV: py27
+  - TOXENV: py35
+  - TOXENV: py36
+  - TOXENV: py37
+  - TOXENV: py38
+  - TOXENV: py39
 
 install:
-  - "%PYTHON%/Scripts/easy_install -U pip"
-  - "%PYTHON%/Scripts/pip install -U setuptools wheel"
-  - "%PYTHON%/Scripts/pip install -e .[tests]"
+  - pip install -U tox setuptools wheel
+  - pip install -Ue .[tests]
 
-build: false  # Not a C# project, build stuff at the test step instead.
+build: off # Not a C# project, build stuff at the test step instead.
 
 test_script:
-  - "%PYTHON%/python -m pytest"
+  - tox
 
 after_test:
-  - "%PYTHON%/python setup.py bdist_wheel"
+  - python setup.py sdist bdist_wheel
   - ps: "ls dist"
 
 artifacts:
