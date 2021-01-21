@@ -150,36 +150,40 @@ class Lock(LockBase):
 
         # Get a new filehandler
         fh = self._get_fh()
-        try:
-            # Try to lock
-            fh = self._get_lock(fh)
-        except exceptions.LockException as exception:
-            # Try till the timeout has passed
-            timeout_end = current_time() + timeout
-            while timeout_end > current_time():
+
+        def try_close():  # pragma: no cover
+            # Silently try to close the handle if possible, ignore all issues
+            try:
+                fh.close()
+            except Exception:
+                pass
+
+        # Try till the timeout has passed
+        timeout_end = current_time() + timeout
+        exception = None
+        while timeout_end > current_time():
+            try:
+                # Try to lock
+                fh = self._get_lock(fh)
+                break
+            except exceptions.LockException as exc:
+                # Python will automatically remove the variable from memory
+                # unless you save it in a different location
+                exception = exc
+
+                # We already tried to the get the lock
+                # If fail_when_locked is True, stop trying
+                if fail_when_locked:
+                    try_close()
+                    raise exceptions.AlreadyLocked(exception)
+
                 # Wait a bit
                 time.sleep(check_interval)
 
-                # Try again
-                try:
-
-                    # We already tried to the get the lock
-                    # If fail_when_locked is true, then stop trying
-                    if fail_when_locked:
-                        raise exceptions.AlreadyLocked(exception)
-
-                    else:  # pragma: no cover
-                        # We've got the lock
-                        fh = self._get_lock(fh)
-                        break
-
-                except exceptions.LockException:
-                    pass
-
-            else:
-                fh.close()
-                # We got a timeout... reraising
-                raise exceptions.LockException(exception)
+        else:
+            try_close()
+            # We got a timeout... reraising
+            raise exceptions.LockException(exception)
 
         # Prepare the filehandle (truncate if needed)
         fh = self._prepare_fh(fh)
