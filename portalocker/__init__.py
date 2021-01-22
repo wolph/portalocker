@@ -32,18 +32,21 @@ unlock = portalocker.unlock
 #: Place an exclusive lock.
 #: Only one process may hold an exclusive lock for a given file at a given
 #: time.
-LOCK_EX = constants.LOCK_EX
+LOCK_EX = constants.LockFlags.EXCLUSIVE
 
 #: Place a shared lock.
 #: More than one process may hold a shared lock for a given file at a given
 #: time.
-LOCK_SH = constants.LOCK_SH
+LOCK_SH = constants.LockFlags.SHARED
 
 #: Acquire the lock in a non-blocking fashion.
-LOCK_NB = constants.LOCK_NB
+LOCK_NB = constants.LockFlags.NON_BLOCKING
 
 #: Remove an existing lock held by this process.
-LOCK_UN = constants.LOCK_UN
+LOCK_UN = constants.LockFlags.UNBLOCK
+
+#: Locking flags enum
+LockFlags = constants.LockFlags
 
 #: Locking utility class to automatically handle opening with timeouts and
 #: context wrappers
@@ -60,6 +63,7 @@ __all__ = [
     'LOCK_SH',
     'LOCK_NB',
     'LOCK_UN',
+    'LockFlags',
     'LockException',
     'Lock',
     'RLock',

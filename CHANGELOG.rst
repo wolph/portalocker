@@ -1,3 +1,9 @@
+For newer changes please look at the comments for the Git tags:
+https://github.com/WoLpH/portalocker/tags
+
+For more details the commit log for the master branch could be useful:
+https://github.com/WoLpH/portalocker/commits/master
+
 1.5:
 
  * Moved tests to prevent collisions with other packages

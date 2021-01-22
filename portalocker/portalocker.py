@@ -1,8 +1,10 @@
 import os
 import sys
-from . import exceptions
-from . import constants
 
+import typing
+
+from . import constants
+from . import exceptions
 
 if os.name == 'nt':  # pragma: no cover
     import win32con
@@ -17,16 +19,16 @@ if os.name == 'nt':  # pragma: no cover
     else:
         lock_length = int(2**31 - 1)
 
-    def lock(file_, flags):
-        if flags & constants.LOCK_SH:
+    def lock(file_: typing.IO, flags: constants.LockFlags):
+        if flags & constants.LockFlags.SHARED:
             if sys.version_info.major == 2:
-                if flags & constants.LOCK_NB:
+                if flags & constants.LockFlags.NON_BLOCKING:
                     mode = win32con.LOCKFILE_FAIL_IMMEDIATELY
                 else:
                     mode = 0
 
             else:
-                if flags & constants.LOCK_NB:
+                if flags & constants.LockFlags.NON_BLOCKING:
                     mode = msvcrt.LK_NBRLCK
                 else:
                     mode = msvcrt.LK_RLCK
@@ -48,7 +50,7 @@ if os.name == 'nt':  # pragma: no cover
                     # here?
                     raise
         else:
-            if flags & constants.LOCK_NB:
+            if flags & constants.LockFlags.NON_BLOCKING:
                 mode = msvcrt.LK_NBLCK
             else:
                 mode = msvcrt.LK_LOCK
@@ -81,22 +83,25 @@ if os.name == 'nt':  # pragma: no cover
                     exceptions.LockException.LOCK_FAILED, exc_value.strerror,
                     fh=file_)
 
-    def unlock(file_):
+    def unlock(file_: typing.IO):
         try:
             savepos = file_.tell()
             if savepos:
                 file_.seek(0)
 
             try:
-                msvcrt.locking(file_.fileno(), constants.LOCK_UN, lock_length)
-            except IOError as exc_value:
-                if exc_value.strerror == 'Permission denied':
+                msvcrt.locking(file_.fileno(), constants.LockFlags.UNBLOCK,
+                               lock_length)
+            except IOError as exc:
+                exception = exc
+                if exc.strerror == 'Permission denied':
                     hfile = win32file._get_osfhandle(file_.fileno())
                     try:
                         win32file.UnlockFileEx(
                             hfile, 0, -0x10000, __overlapped)
-                    except pywintypes.error as exc_value:
-                        if exc_value.winerror == winerror.ERROR_NOT_LOCKED:
+                    except pywintypes.error as exc:
+                        exception = exc
+                        if exc.winerror == winerror.ERROR_NOT_LOCKED:
                             # error: (158, 'UnlockFileEx',
                             #         'The segment is already unlocked.')
                             # To match the 'posix' implementation, silently
@@ -109,23 +114,23 @@ if os.name == 'nt':  # pragma: no cover
                 else:
                     raise exceptions.LockException(
                         exceptions.LockException.LOCK_FAILED,
-                        exc_value.strerror,
+                        exception.strerror,
                         fh=file_)
             finally:
                 if savepos:
                     file_.seek(savepos)
-        except IOError as exc_value:
+        except IOError as exc:
             raise exceptions.LockException(
-                exceptions.LockException.LOCK_FAILED, exc_value.strerror,
+                exceptions.LockException.LOCK_FAILED, exc.strerror,
                 fh=file_)
 
 elif os.name == 'posix':  # pragma: no cover
     import fcntl
 
-    def lock(file_, flags):
+    def lock(file_: typing.IO, flags: constants.LockFlags):
         locking_exceptions = IOError,
         try:  # pragma: no cover
-            locking_exceptions += BlockingIOError,
+            locking_exceptions += BlockingIOError,  # type: ignore
         except NameError:  # pragma: no cover
             pass
 
@@ -136,8 +141,8 @@ elif os.name == 'posix':  # pragma: no cover
             # every IO error
             raise exceptions.LockException(exc_value, fh=file_)
 
-    def unlock(file_):
-        fcntl.flock(file_.fileno(), constants.LOCK_UN)
+    def unlock(file_: typing.IO, ):
+        fcntl.flock(file_.fileno(), constants.LockFlags.UNBLOCK)
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')

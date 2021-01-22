@@ -32,6 +32,18 @@ The module is currently maintained by Rick van Hattem <Wolph@wol.ph>.
 The project resides at https://github.com/WoLpH/portalocker . Bugs and feature
 requests can be submitted there. Patches are also very welcome.
 
+Python 2
+--------
+
+Python 2 was supported in versions before Portalocker 2.0. If you are still
+using
+Python 2,
+you can run this to install:
+
+::
+
+    pip install "portalocker<2"
+
 Tips
 ----
 
@@ -67,6 +79,38 @@ Examples
 --------
 
 To make sure your cache generation scripts don't race, use the `Lock` class:
+
+>>> import portalocker
+>>> with portalocker.Lock('somefile', timeout=1) as fh:
+...     print >>fh, 'writing some stuff to my cache...'
+
+To customize the opening and locking a manual approach is also possible:
+
+>>> import portalocker
+>>> file = open('somefile', 'r+')
+>>> portalocker.lock(file, portalocker.EXCLUSIVE)
+>>> file.seek(12)
+>>> file.write('foo')
+>>> file.close()
+
+Explicitly unlocking is not needed in most cases but omitting it has been known
+to cause issues:
+
+>>> import portalocker
+>>> with portalocker.Lock('somefile', timeout=1) as fh:
+...     print >>fh, 'writing some stuff to my cache...'
+
+To customize the opening and locking a manual approach is also possible:
+
+>>> import portalocker
+>>> file = open('somefile', 'r+')
+>>> portalocker.lock(file, portalocker.EXCLUSIVE)
+>>> file.seek(12)
+>>> file.write('foo')
+>>> file.close()
+
+Explicitly unlocking is not needed in most cases but omitting it has been known
+to cause issues:
 
 >>> import portalocker
 >>> with portalocker.Lock('somefile', timeout=1) as fh:
@@ -120,7 +164,11 @@ More examples can be found in the
 Changelog
 ---------
 
-See the `changelog <http://portalocker.readthedocs.io/en/latest/changelog.html>`_ page.
+Every realease has a ``git tag`` with a commit message for the tag
+explaining what was added
+and/or changed. The list of tags including the commit messages can be found
+here: https://github.com/WoLpH/portalocker/tags
+
 
 License
 -------
