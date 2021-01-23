@@ -34,6 +34,7 @@ def test_redis_lock_timeout(timeout, check_interval):
 
 
 @pytest.mark.xfail(raises=exceptions.ConnectionError)
+@pytest.mark.xfail(raises=ConnectionRefusedError)
 def test_redis_lock_context():
     channel = str(random.random())
 
