@@ -32,6 +32,35 @@ The module is currently maintained by Rick van Hattem <Wolph@wol.ph>.
 The project resides at https://github.com/WoLpH/portalocker . Bugs and feature
 requests can be submitted there. Patches are also very welcome.
 
+Redis Locks
+-----------
+
+This library now features a lock based on Redis which allows for locks across
+multiple threads, processes and even distributed locks across multiple
+computers.
+
+It is an extremely reliable Redis lock that is based on pubsub.
+
+As opposed to most Redis locking systems based on key/value pairs,
+this locking method is based on the pubsub system. The big advantage is
+that if the connection gets killed due to network issues, crashing
+processes or otherwise, it will still immediately unlock instead of
+waiting for a lock timeout.
+
+Usage is really easy:
+
+::
+
+    import portalocker
+
+    lock = portalocker.RedisLock('some_lock_channel_name')
+
+    with lock:
+        print('do something here')
+
+The API is essentially identical to the other ``Lock`` classes so in addition
+to the ``with`` statement you can also use ``lock.acquire(...)``.
+
 Python 2
 --------
 

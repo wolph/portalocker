@@ -7,6 +7,26 @@ from . import utils
 
 
 class RedisLock(utils.LockBase):
+    '''
+    An extremely reliable Redis lock based on pubsub
+
+    As opposed to most Redis locking systems based on key/value pairs,
+    this locking method is based on the pubsub system. The big advantage is
+    that if the connection gets killed due to network issues, crashing
+    processes or otherwise, it will still immediately unlock instead of
+    waiting for a lock timeout.
+
+    Args:
+        channel: the redis channel to use as locking key.
+        connection: an optional redis connection if you already have one
+        or if you need to specify the redis connection
+        timeout: timeout when trying to acquire a lock
+        check_interval: check interval while waiting
+        fail_when_locked: after the initial lock failed, return an error
+            or lock the file. This does not wait for the timeout.
+
+    '''
+
     channel: str
     timeout: float
     connection: typing.Optional[client.Redis]
