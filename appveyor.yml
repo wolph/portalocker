@@ -2,6 +2,8 @@
 # http://www.appveyor.com/docs/installed-software#python
 
 environment:
+  global:
+    PYTHON: "C:\\Python39-x64"
   matrix:
   - TOXENV: py36
   - TOXENV: py37
@@ -9,8 +11,8 @@ environment:
   - TOXENV: py39
 
 install:
-  - python3 -m pip install -U tox setuptools wheel
-  - python3 -m pip install -Ue .[tests]
+  - "%PYTHON%\\python -m pip install -U tox setuptools wheel"
+  - "%PYTHON%\\python -m pip install -Ue .[tests]"
 
 build: off # Not a C# project, build stuff at the test step instead.
 
@@ -18,7 +20,7 @@ test_script:
   - tox
 
 after_test:
-  - python3 setup.py sdist bdist_wheel
+  - "%PYTHON%\\python setup.py sdist bdist_wheel"
   - ps: "ls dist"
 
 artifacts:
