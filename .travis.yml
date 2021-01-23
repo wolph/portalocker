@@ -4,12 +4,10 @@ language: python
 services:
 - redis
 python:
-- '3.5'
 - '3.6'
 - '3.7'
 - '3.8'
-# TODO: Enable when available
-# - '3.9'
+- '3.9'
 - pypy3
 before_install:
 - wheel version

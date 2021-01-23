@@ -3,15 +3,14 @@
 
 environment:
   matrix:
-  - TOXENV: py35
   - TOXENV: py36
   - TOXENV: py37
   - TOXENV: py38
   - TOXENV: py39
 
 install:
-  - pip3 install -U tox setuptools wheel
-  - pip3 install -Ue .[tests]
+  - python3 -m pip install -U tox setuptools wheel
+  - python3 -m pip install -Ue .[tests]
 
 build: off # Not a C# project, build stuff at the test step instead.
 
