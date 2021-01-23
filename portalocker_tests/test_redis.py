@@ -8,7 +8,14 @@ import portalocker
 from portalocker import redis
 
 
-@pytest.mark.xfail(raises=exceptions.ConnectionError)
+def xfail(function):
+    # Apply both xfail decorators
+    function = pytest.mark.xfail(raises=exceptions.ConnectionError)(function)
+    function = pytest.mark.xfail(raises=ConnectionRefusedError)(function)
+    return function
+
+
+@xfail
 def test_redis_lock():
     channel = str(random.random())
 
@@ -22,6 +29,7 @@ def test_redis_lock():
 
 @pytest.mark.parametrize('timeout', [None, 0, 0.001])
 @pytest.mark.parametrize('check_interval', [None, 0, 0.0005])
+@xfail
 def test_redis_lock_timeout(timeout, check_interval):
     connection = client.Redis()
     channel = str(random.random())
@@ -33,8 +41,7 @@ def test_redis_lock_timeout(timeout, check_interval):
         lock_b.acquire(timeout=timeout, check_interval=check_interval)
 
 
-@pytest.mark.xfail(raises=exceptions.ConnectionError)
-@pytest.mark.xfail(raises=ConnectionRefusedError)
+@xfail
 def test_redis_lock_context():
     channel = str(random.random())
 
@@ -46,7 +53,7 @@ def test_redis_lock_context():
                 pass
 
 
-@pytest.mark.xfail(raises=exceptions.ConnectionError)
+@xfail
 def test_redis_relock():
     channel = str(random.random())
 
