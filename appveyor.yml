@@ -11,8 +11,8 @@ environment:
   - TOXENV: py39
 
 install:
-  - "%PYTHON%\\python -m pip install -U tox setuptools wheel"
-  - "%PYTHON%\\python -m pip install -Ue .[tests]"
+  - "%PYTHON%\\python.exe -m pip install -U tox setuptools wheel"
+  - "%PYTHON%\\python.exe -m pip install -Ue .[tests]"
 
 build: off # Not a C# project, build stuff at the test step instead.
 
@@ -20,7 +20,7 @@ test_script:
   - tox
 
 after_test:
-  - "%PYTHON%\\python setup.py sdist bdist_wheel"
+  - "%PYTHON%\\python.exe setup.py sdist bdist_wheel"
   - ps: "ls dist"
 
 artifacts:
