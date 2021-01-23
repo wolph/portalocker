@@ -1,8 +1,14 @@
 sudo: false
 dist: xenial
 language: python
+
 services:
 - redis
+
+jobs:
+  allow_failures:
+    - python: pypy3
+
 python:
 - '3.6'
 - '3.7'
