@@ -29,6 +29,7 @@ tests_require = [
     'sphinx>=3.0.3',
     'pytest-flake8>=1.0.5',
     'pytest-mypy>=0.8.0',
+    'redis',
 ]
 
 

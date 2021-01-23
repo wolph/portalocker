@@ -4,10 +4,10 @@ from . import exceptions
 from . import portalocker
 from . import utils
 
-try:
+try:  # pragma: no cover
     from .redis import RedisLock
-except ImportError:
-    RedisLock = None
+except ImportError:  # pragma: no cover
+    RedisLock = None  # type: ignore
 
 
 #: The package name on Pypi
