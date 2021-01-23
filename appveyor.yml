@@ -3,7 +3,7 @@
 
 environment:
   global:
-    PYTHON: "C:\\Python38-x64"
+    PYTHON: "C:\\Python39-x64\\python.exe"
   matrix:
   - TOXENV: py36
   - TOXENV: py37
@@ -11,16 +11,16 @@ environment:
   - TOXENV: py39
 
 install:
-  - "%PYTHON%\\python.exe -m pip install -U tox setuptools wheel"
-  - "%PYTHON%\\python.exe -m pip install -Ue .[tests]"
+  - "%PYTHON% -m pip install -U tox setuptools wheel"
+  - "%PYTHON% -m pip install -Ue .[tests]"
 
 build: off # Not a C# project, build stuff at the test step instead.
 
 test_script:
-  - tox
+  - "%PYTHON% -m pip tox"
 
 after_test:
-  - "%PYTHON%\\python.exe setup.py sdist bdist_wheel"
+  - "%PYTHON% setup.py sdist bdist_wheel"
   - ps: "ls dist"
 
 artifacts:
