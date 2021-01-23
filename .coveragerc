@@ -13,4 +13,5 @@ exclude_lines =
 [run]
 source = src
 branch = True
-
+omit =
+    portalocker/redis.py

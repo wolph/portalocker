@@ -3,17 +3,18 @@ Locking constants
 
 Lock types:
 
-- `LOCK_EX` exclusive lock
-- `LOCK_SH` shared lock
+- `EXCLUSIVE` exclusive lock
+- `SHARED` shared lock
 
 Lock flags:
 
-- `LOCK_NB` non-blocking
+- `NON_BLOCKING` non-blocking
 
 Manually unlock, only needed internally
 
-- `LOCK_UN` unlock
+- `UNBLOCK` unlock
 '''
+import enum
 import os
 
 # The actual tests will execute the code anyhow so the following code can
@@ -37,3 +38,9 @@ elif os.name == 'posix':  # pragma: no cover
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')
 
+
+class LockFlags(enum.IntFlag):
+    EXCLUSIVE = LOCK_EX  #: exclusive lock
+    SHARED = LOCK_SH  #: shared lock
+    NON_BLOCKING = LOCK_NB  #: non-blocking
+    UNBLOCK = LOCK_UN  #: unlock

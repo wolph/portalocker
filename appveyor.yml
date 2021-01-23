@@ -2,33 +2,25 @@
 # http://www.appveyor.com/docs/installed-software#python
 
 environment:
+  global:
+    PYTHON: "C:\\Python38-x64\\python.exe"
   matrix:
-    - PYTHON: "C:\\Python27"
-      TOX_ENV: "py27"
-
-    - PYTHON: "C:\\Python35"
-      TOX_ENV: "py35"
-
-    - PYTHON: "C:\\Python36"
-      TOX_ENV: "py36"
-
-
-init:
-  - "%PYTHON%/python -V"
-  - "%PYTHON%/python -c \"import struct;print( 8 * struct.calcsize(\'P\'))\""
+  - TOXENV: py36
+  - TOXENV: py37
+  - TOXENV: py38
+  - TOXENV: py39
 
 install:
-  - "%PYTHON%/Scripts/easy_install -U pip"
-  - "%PYTHON%/Scripts/pip install -U setuptools wheel"
-  - "%PYTHON%/Scripts/pip install -e .[tests]"
+  - "%PYTHON% -m pip install -U tox setuptools wheel"
+  - "%PYTHON% -m pip install -Ue .[tests]"
 
-build: false  # Not a C# project, build stuff at the test step instead.
+build: off # Not a C# project, build stuff at the test step instead.
 
 test_script:
-  - "%PYTHON%/python -m pytest"
+  - "%PYTHON% -m tox"
 
 after_test:
-  - "%PYTHON%/python setup.py bdist_wheel"
+  - "%PYTHON% setup.py sdist bdist_wheel"
   - ps: "ls dist"
 
 artifacts:

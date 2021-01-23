@@ -10,7 +10,6 @@ Contents:
 
    portalocker
    tests
-   changelog
    license
 
 Indices and tables

@@ -1,12 +1,14 @@
 from __future__ import print_function
-import re
-import os
-import sys
-import setuptools
-from setuptools.command.test import test as TestCommand
-from distutils.version import LooseVersion
-from setuptools import __version__ as setuptools_version
 
+import os
+import re
+import sys
+import typing
+from distutils.version import LooseVersion
+
+import setuptools
+from setuptools import __version__ as setuptools_version
+from setuptools.command.test import test as TestCommand
 
 if LooseVersion(setuptools_version) < LooseVersion('38.3.0'):
     raise SystemExit(
@@ -15,19 +17,19 @@ if LooseVersion(setuptools_version) < LooseVersion('38.3.0'):
         'and try again.'
     )
 
-
 # To prevent importing about and thereby breaking the coverage info we use this
 # exec hack
-about = {}
+about: typing.Dict[str, str] = {}
 with open('portalocker/__about__.py') as fp:
     exec(fp.read(), about)
 
-
 tests_require = [
-    'pytest>=4.6.9',
+    'pytest>=5.4.1',
     'pytest-cov>=2.8.1',
-    'sphinx>=1.8.5',
+    'sphinx>=3.0.3',
     'pytest-flake8>=1.0.5',
+    'pytest-mypy>=0.8.0',
+    'redis',
 ]
 
 
@@ -141,6 +143,8 @@ if __name__ == '__main__':
                 'sphinx>=1.7.1',
             ],
             tests=tests_require,
+            redis=[
+                'redis',
+            ]
         ),
     )
-
