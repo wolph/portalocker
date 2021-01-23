@@ -12,10 +12,9 @@ from . import constants
 from . import exceptions
 from . import portalocker
 
-current_time = getattr(time, "monotonic", time.time)
-
 DEFAULT_TIMEOUT = 5
 DEFAULT_CHECK_INTERVAL = 0.25
+DEFAULT_FAIL_WHEN_LOCKED = False
 LOCK_METHOD = constants.LockFlags.EXCLUSIVE | constants.LockFlags.NON_BLOCKING
 
 __all__ = [
@@ -79,12 +78,43 @@ def open_atomic(filename: Filename, binary: bool = True):
 
 
 class LockBase(abc.ABC):  # pragma: no cover
+    #: timeout when trying to acquire a lock
+    timeout: typing.Optional[float] = DEFAULT_TIMEOUT
+    #: check interval while waiting for `timeout`
+    check_interval: typing.Optional[float] = DEFAULT_CHECK_INTERVAL
+    #: skip the timeout and immediately fail if the initial lock fails
+    fail_when_locked: typing.Optional[bool] = DEFAULT_FAIL_WHEN_LOCKED
+
+    def __init__(self, timeout: typing.Optional[float] = None,
+                 check_interval: typing.Optional[float] = None,
+                 fail_when_locked: typing.Optional[bool] = None):
+        if timeout is not None:
+            self.timeout = timeout
+        if check_interval is not None:
+            self.check_interval: float = check_interval
 
     @abc.abstractmethod
     def acquire(
             self, timeout: float = None, check_interval: float = None,
             fail_when_locked: bool = None):
         return NotImplemented
+
+    def _timeout_generator(self, timeout, check_interval):
+        if timeout is None:
+            timeout = self.timeout
+
+        if timeout is None:
+            timeout = 0
+
+        if check_interval is None:
+            check_interval = self.check_interval
+
+        yield
+
+        timeout_end = time.perf_counter() + timeout
+        while timeout_end > time.perf_counter():
+            yield
+            time.sleep(check_interval)
 
     @abc.abstractmethod
     def release(self):
@@ -108,7 +138,7 @@ class Lock(LockBase):
             mode: str = 'a',
             timeout: float = DEFAULT_TIMEOUT,
             check_interval: float = DEFAULT_CHECK_INTERVAL,
-            fail_when_locked: bool = False,
+            fail_when_locked: bool = DEFAULT_FAIL_WHEN_LOCKED,
             flags: constants.LockFlags = LOCK_METHOD, **file_open_kwargs):
         '''Lock manager with build-in timeout
 
@@ -119,7 +149,7 @@ class Lock(LockBase):
         timeout -- timeout when trying to acquire a lock
         check_interval -- check interval while waiting
         fail_when_locked -- after the initial lock failed, return an error
-            or lock the file
+            or lock the file. This does not wait for the timeout.
         **file_open_kwargs -- The kwargs for the `open(...)` call
 
         fail_when_locked is useful when multiple threads/processes can race
@@ -150,13 +180,6 @@ class Lock(LockBase):
             self, timeout: float = None, check_interval: float = None,
             fail_when_locked: bool = None) -> typing.IO:
         '''Acquire the locked filehandle'''
-        if timeout is None:
-            timeout = self.timeout
-        if timeout is None:
-            timeout = 0
-
-        if check_interval is None:
-            check_interval = self.check_interval
 
         if fail_when_locked is None:
             fail_when_locked = self.fail_when_locked
@@ -176,10 +199,10 @@ class Lock(LockBase):
             except Exception:
                 pass
 
-        # Try till the timeout has passed
-        timeout_end = current_time() + timeout
         exception = None
-        while timeout_end > current_time():
+        # Try till the timeout has passed
+        for _ in self._timeout_generator(timeout, check_interval):
+            exception = None
             try:
                 # Try to lock
                 fh = self._get_lock(fh)
@@ -196,9 +219,8 @@ class Lock(LockBase):
                     raise exceptions.AlreadyLocked(exception)
 
                 # Wait a bit
-                time.sleep(check_interval)
 
-        else:
+        if exception:
             try_close()
             # We got a timeout... reraising
             raise exceptions.LockException(exception)
@@ -349,37 +371,25 @@ class BoundedSemaphore(LockBase):
             fail_when_locked: bool = None) -> typing.Optional[Lock]:
         assert not self.lock, 'Already locked'
 
-        if timeout is None:
-            timeout = self.timeout
-        if timeout is None:
-            timeout = 0
-
-        if check_interval is None:
-            check_interval = self.check_interval
-
         filenames = self.get_filenames()
+        print('filenames', filenames)
 
-        if self.try_lock(filenames):
-            return self.lock
-
-        if not timeout:
-            raise exceptions.AlreadyLocked()
-
-        timeout_end = current_time() + timeout
-        while timeout_end > current_time():  # pragma: no branch
+        for _ in self._timeout_generator(timeout, check_interval):  # pragma:
+            print('trying lock', filenames)
+            # no branch
             if self.try_lock(filenames):  # pragma: no branch
                 return self.lock  # pragma: no cover
-
-            time.sleep(check_interval)
 
         raise exceptions.AlreadyLocked()
 
     def try_lock(self, filenames: typing.Sequence[Filename]) -> bool:
         filename: Filename
         for filename in filenames:
+            print('trying lock for', filename)
             self.lock = Lock(filename, fail_when_locked=True)
             try:
                 self.lock.acquire()
+                print('locked', filename)
                 return True
             except exceptions.AlreadyLocked:
                 pass

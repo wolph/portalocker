@@ -4,6 +4,12 @@ from . import exceptions
 from . import portalocker
 from . import utils
 
+try:
+    from .redis import RedisLock
+except ImportError:
+    RedisLock = None
+
+
 #: The package name on Pypi
 __package_name__ = __about__.__package_name__
 #: Current author and maintainer, view the git history for the previous ones
@@ -32,18 +38,18 @@ unlock = portalocker.unlock
 #: Place an exclusive lock.
 #: Only one process may hold an exclusive lock for a given file at a given
 #: time.
-LOCK_EX = constants.LockFlags.EXCLUSIVE
+LOCK_EX: constants.LockFlags = constants.LockFlags.EXCLUSIVE
 
 #: Place a shared lock.
 #: More than one process may hold a shared lock for a given file at a given
 #: time.
-LOCK_SH = constants.LockFlags.SHARED
+LOCK_SH: constants.LockFlags = constants.LockFlags.SHARED
 
 #: Acquire the lock in a non-blocking fashion.
-LOCK_NB = constants.LockFlags.NON_BLOCKING
+LOCK_NB: constants.LockFlags = constants.LockFlags.NON_BLOCKING
 
 #: Remove an existing lock held by this process.
-LOCK_UN = constants.LockFlags.UNBLOCK
+LOCK_UN: constants.LockFlags = constants.LockFlags.UNBLOCK
 
 #: Locking flags enum
 LockFlags = constants.LockFlags
@@ -70,5 +76,6 @@ __all__ = [
     'AlreadyLocked',
     'BoundedSemaphore',
     'open_atomic',
+    'RedisLock',
 ]
 

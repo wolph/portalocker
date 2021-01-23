@@ -11,6 +11,7 @@ def test_bounded_semaphore(timeout, check_interval, monkeypatch):
     name = random.random()
     monkeypatch.setattr(utils, 'DEFAULT_TIMEOUT', 0.0001)
     monkeypatch.setattr(utils, 'DEFAULT_CHECK_INTERVAL', 0.0005)
+
     semaphore_a = portalocker.BoundedSemaphore(n, name=name, timeout=timeout)
     semaphore_b = portalocker.BoundedSemaphore(n, name=name, timeout=timeout)
     semaphore_c = portalocker.BoundedSemaphore(n, name=name, timeout=timeout)
