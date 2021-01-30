@@ -25,6 +25,33 @@ __all__ = [
 Filename = typing.Union[str, pathlib.Path]
 
 
+def coalesce(*args, test_value=None):
+    '''Simple coalescing function that returns the first value that is not
+    equal to the `test_value`. Or `None` if no value is valid. Usually this
+    means that the last given value is the default value.
+
+    Note that the `test_value` is compared using an identity check
+    (i.e. `value is not test_value`) so changing the `test_value` won't work
+    for all values.
+
+    >>> coalesce(None, 1)
+    1
+    >>> coalesce()
+
+    >>> coalesce(0, False, True)
+    0
+    >>> coalesce(0, False, True, test_value=0)
+    False
+
+    # This won't work because of the `is not test_value` type testing:
+    >>> coalesce([], dict(spam='eggs'), test_value=[])
+    []
+    '''
+    for arg in args:
+        if arg is not test_value:
+            return arg
+
+
 @contextlib.contextmanager
 def open_atomic(filename: Filename, binary: bool = True):
     '''Open a file for atomic writing. Instead of locking this method allows
@@ -79,19 +106,19 @@ def open_atomic(filename: Filename, binary: bool = True):
 
 class LockBase(abc.ABC):  # pragma: no cover
     #: timeout when trying to acquire a lock
-    timeout: typing.Optional[float] = DEFAULT_TIMEOUT
+    timeout: float
     #: check interval while waiting for `timeout`
-    check_interval: typing.Optional[float] = DEFAULT_CHECK_INTERVAL
+    check_interval: float
     #: skip the timeout and immediately fail if the initial lock fails
-    fail_when_locked: typing.Optional[bool] = DEFAULT_FAIL_WHEN_LOCKED
+    fail_when_locked: bool
 
     def __init__(self, timeout: typing.Optional[float] = None,
                  check_interval: typing.Optional[float] = None,
                  fail_when_locked: typing.Optional[bool] = None):
-        if timeout is not None:
-            self.timeout = timeout
-        if check_interval is not None:
-            self.check_interval: float = check_interval
+        self.timeout = coalesce(timeout, DEFAULT_TIMEOUT)
+        self.check_interval = coalesce(check_interval, DEFAULT_CHECK_INTERVAL)
+        self.fail_when_locked = coalesce(fail_when_locked,
+                                         DEFAULT_FAIL_WHEN_LOCKED)
 
     @abc.abstractmethod
     def acquire(
@@ -100,21 +127,20 @@ class LockBase(abc.ABC):  # pragma: no cover
         return NotImplemented
 
     def _timeout_generator(self, timeout, check_interval):
-        if timeout is None:
-            timeout = self.timeout
+        timeout = coalesce(timeout, self.timeout, 0.0)
+        check_interval = coalesce(check_interval, self.check_interval, 0.0)
 
-        if timeout is None:
-            timeout = 0
+        yield 0
+        i = 0
 
-        if check_interval is None:
-            check_interval = self.check_interval
+        start_time = time.perf_counter()
+        while start_time + timeout > time.perf_counter():
+            i += 1
+            yield i
 
-        yield
-
-        timeout_end = time.perf_counter() + timeout
-        while timeout_end > time.perf_counter():
-            yield
-            time.sleep(check_interval)
+            # Take low lock checks into account to stay within the interval
+            since_start_time = time.perf_counter() - start_time
+            time.sleep(max(0.001, (i * check_interval) - since_start_time))
 
     @abc.abstractmethod
     def release(self):
@@ -181,8 +207,7 @@ class Lock(LockBase):
             fail_when_locked: bool = None) -> typing.IO:
         '''Acquire the locked filehandle'''
 
-        if fail_when_locked is None:
-            fail_when_locked = self.fail_when_locked
+        fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
 
         # If we already have a filehandle, return it
         fh = self.fh
