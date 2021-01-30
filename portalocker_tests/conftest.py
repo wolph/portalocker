@@ -1,5 +1,9 @@
 import py
+import logging
 import pytest
+
+
+logger = logging.getLogger(__name__)
 
 
 @pytest.fixture
@@ -11,4 +15,3 @@ def tmpfile(tmpdir_factory):
         filename.remove(ignore_errors=True)
     except (py.error.EBUSY, py.error.ENOENT):
         pass
-
