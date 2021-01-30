@@ -193,11 +193,10 @@ More examples can be found in the
 Changelog
 ---------
 
-Every realease has a ``git tag`` with a commit message for the tag
-explaining what was added
-and/or changed. The list of tags including the commit messages can be found
-here: https://github.com/WoLpH/portalocker/tags
-
+Every release has a ``git tag`` with a commit message for the tag
+explaining what was added and/or changed. The list of tags/releases
+including the commit messages can be found here:
+https://github.com/WoLpH/portalocker/releases
 
 License
 -------
