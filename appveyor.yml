@@ -14,7 +14,7 @@ install:
   - "%PYTHON% -m pip install -U tox setuptools wheel"
   - "%PYTHON% -m pip install -Ue .[tests]"
 
-build: off # Not a C# project, build stuff at the test step instead.
+build: false  # Not a C# project, build stuff at the test step instead.
 
 test_script:
   - "%PYTHON% -m tox"

@@ -202,7 +202,6 @@ class RedisLock(utils.LockBase):
                 connection.client_kill_filter(client_.get('id'))
 
     def release(self):
-        logger.error('releasing: %r', self.thread)
         if self.thread:  # pragma: no branch
             self.thread.stop()
             self.thread.join()
