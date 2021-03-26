@@ -7,10 +7,13 @@ import random
 import tempfile
 import time
 import typing
+import logging
 
 from . import constants
 from . import exceptions
 from . import portalocker
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 5
 DEFAULT_CHECK_INTERVAL = 0.25
@@ -397,10 +400,9 @@ class BoundedSemaphore(LockBase):
         assert not self.lock, 'Already locked'
 
         filenames = self.get_filenames()
-        print('filenames', filenames)
 
-        for _ in self._timeout_generator(timeout, check_interval):  # pragma:
-            print('trying lock', filenames)
+        for n in self._timeout_generator(timeout, check_interval):  # pragma:
+            logger.debug('trying lock (attempt %d) %r', n, filenames)
             # no branch
             if self.try_lock(filenames):  # pragma: no branch
                 return self.lock  # pragma: no cover
@@ -410,11 +412,11 @@ class BoundedSemaphore(LockBase):
     def try_lock(self, filenames: typing.Sequence[Filename]) -> bool:
         filename: Filename
         for filename in filenames:
-            print('trying lock for', filename)
+            logger.debug('trying lock for %r', filename)
             self.lock = Lock(filename, fail_when_locked=True)
             try:
                 self.lock.acquire()
-                print('locked', filename)
+                logger.debug('locked %r', filename)
                 return True
             except exceptions.AlreadyLocked:
                 pass
