@@ -152,7 +152,7 @@ class RedisLock(utils.LockBase):
                         self.unavailable_timeout):  # pragma: no branch
                     continue
                 else:  # pragma: no cover
-                    subscribers = None
+                    subscribers = 0
 
             # Note: this should not be changed to an elif because the if
             # above can still end up here
