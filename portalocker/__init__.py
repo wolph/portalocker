@@ -5,7 +5,7 @@ from . import portalocker
 from . import utils
 
 try:  # pragma: no cover
-    from .redis import RedisLock
+    from .redis_lock import RedisLock
 except ImportError:  # pragma: no cover
     RedisLock = None  # type: ignore
 
