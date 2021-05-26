@@ -6,7 +6,7 @@ Submodules
 
 .. toctree::
 
-   portalocker.redis_lock
+   portalocker.redis
    portalocker.constants
    portalocker.exceptions
    portalocker.portalocker

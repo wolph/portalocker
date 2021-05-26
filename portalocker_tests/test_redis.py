@@ -8,7 +8,7 @@ from redis import client
 from redis import exceptions
 
 import portalocker
-from portalocker import redis_lock
+from portalocker import redis
 from portalocker import utils
 
 logger = logging.getLogger(__name__)
@@ -23,19 +23,19 @@ except (exceptions.ConnectionError, ConnectionRefusedError):
 def set_redis_timeouts(monkeypatch):
     monkeypatch.setattr(utils, 'DEFAULT_TIMEOUT', 0.0001)
     monkeypatch.setattr(utils, 'DEFAULT_CHECK_INTERVAL', 0.0005)
-    monkeypatch.setattr(redis_lock, 'DEFAULT_UNAVAILABLE_TIMEOUT', 0.01)
-    monkeypatch.setattr(redis_lock, 'DEFAULT_THREAD_SLEEP_TIME', 0.001)
+    monkeypatch.setattr(redis, 'DEFAULT_UNAVAILABLE_TIMEOUT', 0.01)
+    monkeypatch.setattr(redis, 'DEFAULT_THREAD_SLEEP_TIME', 0.001)
     monkeypatch.setattr(_thread, 'interrupt_main', lambda: None)
 
 
 def test_redis_lock():
     channel = str(random.random())
 
-    lock_a = redis_lock.RedisLock(channel)
+    lock_a = redis.RedisLock(channel)
     lock_a.acquire(fail_when_locked=True)
     time.sleep(0.01)
 
-    lock_b = redis_lock.RedisLock(channel)
+    lock_b = redis.RedisLock(channel)
     try:
         with pytest.raises(portalocker.AlreadyLocked):
             lock_b.acquire(fail_when_locked=True)
@@ -49,10 +49,10 @@ def test_redis_lock():
 def test_redis_lock_timeout(timeout, check_interval):
     connection = client.Redis()
     channel = str(random.random())
-    lock_a = redis_lock.RedisLock(channel)
+    lock_a = redis.RedisLock(channel)
     lock_a.acquire(timeout=timeout, check_interval=check_interval)
 
-    lock_b = redis_lock.RedisLock(channel, connection=connection)
+    lock_b = redis.RedisLock(channel, connection=connection)
     with pytest.raises(portalocker.AlreadyLocked):
         try:
             lock_b.acquire(timeout=timeout, check_interval=check_interval)
@@ -64,10 +64,10 @@ def test_redis_lock_timeout(timeout, check_interval):
 def test_redis_lock_context():
     channel = str(random.random())
 
-    lock_a = redis_lock.RedisLock(channel, fail_when_locked=True)
+    lock_a = redis.RedisLock(channel, fail_when_locked=True)
     with lock_a:
         time.sleep(0.01)
-        lock_b = redis_lock.RedisLock(channel, fail_when_locked=True)
+        lock_b = redis.RedisLock(channel, fail_when_locked=True)
         with pytest.raises(portalocker.AlreadyLocked):
             with lock_b:
                 pass
@@ -76,7 +76,7 @@ def test_redis_lock_context():
 def test_redis_relock():
     channel = str(random.random())
 
-    lock_a = redis_lock.RedisLock(channel, fail_when_locked=True)
+    lock_a = redis.RedisLock(channel, fail_when_locked=True)
     with lock_a:
         time.sleep(0.01)
         with pytest.raises(AssertionError):
