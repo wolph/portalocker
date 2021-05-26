@@ -47,6 +47,12 @@ that if the connection gets killed due to network issues, crashing
 processes or otherwise, it will still immediately unlock instead of
 waiting for a lock timeout.
 
+First make sure you have everything installed correctly:
+
+::
+
+    pip install "portalocker[redis]"
+
 Usage is really easy:
 
 ::
