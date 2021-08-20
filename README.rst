@@ -196,6 +196,13 @@ portalocker.exceptions.AlreadyLocked
 More examples can be found in the
 `tests <http://portalocker.readthedocs.io/en/latest/_modules/tests/tests.html>`_.
 
+
+Versioning
+----------
+
+This library follows `Semantic Versioning <http://semver.org/>`_.
+
+
 Changelog
 ---------
 
