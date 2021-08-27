@@ -34,7 +34,7 @@ tests_require = [
 
 
 class PyTest(TestCommand):
-    user_options = [('pytest-args=', 'a', "Arguments to pass to pytest")]
+    user_options = [('pytest-args=', 'a', 'Arguments to pass to pytest')]
 
     def initialize_options(self):
         TestCommand.initialize_options(self)
@@ -120,7 +120,7 @@ if __name__ == '__main__':
             'Programming Language :: Python :: Implementation :: CPython',
             'Programming Language :: Python :: Implementation :: PyPy',
         ],
-        python_requires=">=3.3",
+        python_requires='>=3.5',
         keywords='locking, locks, with statement, windows, linux, unix',
         author=about['__author__'],
         author_email=about['__email__'],
