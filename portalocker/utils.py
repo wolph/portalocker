@@ -28,7 +28,7 @@ __all__ = [
 Filename = typing.Union[str, pathlib.Path]
 
 
-def coalesce(*args, test_value=None):
+def coalesce(*args: typing.Any, test_value: typing.Any = None) -> typing.Any:
     '''Simple coalescing function that returns the first value that is not
     equal to the `test_value`. Or `None` if no value is valid. Usually this
     means that the last given value is the default value.
@@ -56,7 +56,8 @@ def coalesce(*args, test_value=None):
 
 
 @contextlib.contextmanager
-def open_atomic(filename: Filename, binary: bool = True):
+def open_atomic(filename: Filename, binary: bool = True) \
+        -> typing.Iterator[typing.IO]:
     '''Open a file for atomic writing. Instead of locking this method allows
     you to write the entire file and move it to the actual location. Note that
     this makes the assumption that a rename is atomic on your platform which
@@ -129,21 +130,23 @@ class LockBase(abc.ABC):  # pragma: no cover
             fail_when_locked: bool = None):
         return NotImplemented
 
-    def _timeout_generator(self, timeout, check_interval):
-        timeout = coalesce(timeout, self.timeout, 0.0)
-        check_interval = coalesce(check_interval, self.check_interval, 0.0)
+    def _timeout_generator(self, timeout: typing.Optional[float],
+                           check_interval: typing.Optional[float]) \
+            -> typing.Iterator[int]:
+        f_timeout = coalesce(timeout, self.timeout, 0.0)
+        f_check_interval = coalesce(check_interval, self.check_interval, 0.0)
 
         yield 0
         i = 0
 
         start_time = time.perf_counter()
-        while start_time + timeout > time.perf_counter():
+        while start_time + f_timeout > time.perf_counter():
             i += 1
             yield i
 
             # Take low lock checks into account to stay within the interval
             since_start_time = time.perf_counter() - start_time
-            time.sleep(max(0.001, (i * check_interval) - since_start_time))
+            time.sleep(max(0.001, (i * f_check_interval) - since_start_time))
 
     @abc.abstractmethod
     def release(self):
@@ -152,8 +155,13 @@ class LockBase(abc.ABC):  # pragma: no cover
     def __enter__(self):
         return self.acquire()
 
-    def __exit__(self, type_, value, tb):
+    def __exit__(self,
+                 exc_type: typing.Optional[typing.Type[BaseException]],
+                 exc_value: typing.Optional[BaseException],
+                 traceback: typing.Any,  # Should be typing.TracebackType
+                 ) -> typing.Optional[bool]:
         self.release()
+        return None
 
     def __delete__(self, instance):
         instance.release()

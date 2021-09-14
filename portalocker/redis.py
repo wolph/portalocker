@@ -18,7 +18,7 @@ DEFAULT_UNAVAILABLE_TIMEOUT = 1
 DEFAULT_THREAD_SLEEP_TIME = 0.1
 
 
-class PubSubWorkerThread(client.PubSubWorkerThread):
+class PubSubWorkerThread(client.PubSubWorkerThread):  # type: ignore
 
     def run(self):
         try:
