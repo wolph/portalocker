@@ -168,7 +168,7 @@ class LockBase(abc.ABC):  # pragma: no cover
 
 
 class Lock(LockBase):
-    '''Lock manager with build-in timeout
+    '''Lock manager with built-in timeout
 
     Args:
         filename: filename
