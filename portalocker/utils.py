@@ -204,7 +204,6 @@ class Lock(LockBase):
         else:
             truncate = False
 
-        print('flags:', bin(flags), bin(constants.LockFlags.NON_BLOCKING), timeout)
         if timeout is None:
             timeout = DEFAULT_TIMEOUT
         elif not (flags & constants.LockFlags.NON_BLOCKING):
@@ -227,7 +226,8 @@ class Lock(LockBase):
 
         fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
 
-        if not (self.flags & constants.LockFlags.NON_BLOCKING) and timeout is not None:
+        if not (self.flags & constants.LockFlags.NON_BLOCKING) \
+                and timeout is not None:
             warnings.warn('timeout has no effect in blocking mode')
 
         # If we already have a filehandle, return it
