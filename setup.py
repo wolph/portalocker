@@ -4,18 +4,10 @@ import os
 import re
 import sys
 import typing
-from distutils.version import LooseVersion
 
 import setuptools
 from setuptools import __version__ as setuptools_version
 from setuptools.command.test import test as TestCommand
-
-if LooseVersion(setuptools_version) < LooseVersion('38.3.0'):
-    raise SystemExit(
-        'Your `setuptools` version is old. '
-        'Please upgrade setuptools by running `pip install -U setuptools` '
-        'and try again.'
-    )
 
 # To prevent importing about and thereby breaking the coverage info we use this
 # exec hack
@@ -27,7 +19,6 @@ tests_require = [
     'pytest>=5.4.1',
     'pytest-cov>=2.8.1',
     'sphinx>=3.0.3',
-    'pytest-flake8>=1.0.5',
     'pytest-mypy>=0.8.0',
     'redis',
 ]
@@ -113,10 +104,12 @@ if __name__ == '__main__':
         classifiers=[
             'Intended Audience :: Developers',
             'Programming Language :: Python',
-            'Programming Language :: Python :: 3.3',
-            'Programming Language :: Python :: 3.4',
             'Programming Language :: Python :: 3.5',
             'Programming Language :: Python :: 3.6',
+            'Programming Language :: Python :: 3.7',
+            'Programming Language :: Python :: 3.8',
+            'Programming Language :: Python :: 3.9',
+            'Programming Language :: Python :: 3.10',
             'Programming Language :: Python :: Implementation :: CPython',
             'Programming Language :: Python :: Implementation :: PyPy',
         ],
@@ -126,7 +119,7 @@ if __name__ == '__main__':
         author_email=about['__email__'],
         url=about['__url__'],
         license='PSF',
-        package_data=dict(portalocker=['py.typed']),
+        package_data=dict(portalocker=['py.typed', 'msvcrt.pyi']),
         packages=setuptools.find_packages(exclude=[
             'examples', 'portalocker_tests']),
         # zip_safe=False,

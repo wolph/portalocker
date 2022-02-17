@@ -206,3 +206,14 @@ def test_shared(tmpfile):
     portalocker.unlock(f)
     f.close()
 
+
+def test_blocking_timeout(tmpfile):
+    flags = portalocker.LockFlags.SHARED
+
+    with pytest.warns(UserWarning):
+        with portalocker.Lock(tmpfile, timeout=5, flags=flags):
+            pass
+
+    lock = portalocker.Lock(tmpfile, flags=flags)
+    with pytest.warns(UserWarning):
+        lock.acquire(timeout=5)

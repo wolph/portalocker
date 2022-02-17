@@ -23,8 +23,8 @@ after_test:
   - "%PYTHON% setup.py sdist bdist_wheel"
   - ps: "ls dist"
 
-artifacts:
-  - path: dist\*
+# artifacts:
+#   - path: dist\*
 
 #on_success:
 #  - TODO: upload the content of dist/*.whl to a public wheelhouse
