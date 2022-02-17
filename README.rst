@@ -123,7 +123,7 @@ To customize the opening and locking a manual approach is also possible:
 
 >>> import portalocker
 >>> file = open('somefile', 'r+')
->>> portalocker.lock(file, portalocker.LOCK_EX)
+>>> portalocker.lock(file, portalocker.LockFlags.EXCLUSIVE)
 >>> file.seek(12)
 >>> file.write('foo')
 >>> file.close()
