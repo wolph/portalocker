@@ -19,7 +19,6 @@ tests_require = [
     'pytest>=5.4.1',
     'pytest-cov>=2.8.1',
     'sphinx>=3.0.3',
-    'pytest-flake8>=1.0.5',
     'pytest-mypy>=0.8.0',
     'redis',
 ]

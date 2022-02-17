@@ -1,13 +1,14 @@
 import abc
 import atexit
 import contextlib
+import logging
 import os
 import pathlib
 import random
 import tempfile
 import time
 import typing
-import logging
+import warnings
 
 from . import constants
 from . import exceptions
@@ -193,7 +194,7 @@ class Lock(LockBase):
             self,
             filename: Filename,
             mode: str = 'a',
-            timeout: float = DEFAULT_TIMEOUT,
+            timeout: float = None,
             check_interval: float = DEFAULT_CHECK_INTERVAL,
             fail_when_locked: bool = DEFAULT_FAIL_WHEN_LOCKED,
             flags: constants.LockFlags = LOCK_METHOD, **file_open_kwargs):
@@ -202,6 +203,12 @@ class Lock(LockBase):
             mode = mode.replace('w', 'a')
         else:
             truncate = False
+
+        print('flags:', bin(flags), bin(constants.LockFlags.NON_BLOCKING), timeout)
+        if timeout is None:
+            timeout = DEFAULT_TIMEOUT
+        elif not (flags & constants.LockFlags.NON_BLOCKING):
+            warnings.warn('timeout has no effect in blocking mode')
 
         self.fh: typing.Optional[typing.IO] = None
         self.filename: str = str(filename)
@@ -219,6 +226,9 @@ class Lock(LockBase):
         '''Acquire the locked filehandle'''
 
         fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
+
+        if not (self.flags & constants.LockFlags.NON_BLOCKING) and timeout is not None:
+            warnings.warn('timeout has no effect in blocking mode')
 
         # If we already have a filehandle, return it
         fh = self.fh
