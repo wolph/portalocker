@@ -123,38 +123,6 @@ To customize the opening and locking a manual approach is also possible:
 
 >>> import portalocker
 >>> file = open('somefile', 'r+')
->>> portalocker.lock(file, portalocker.EXCLUSIVE)
->>> file.seek(12)
->>> file.write('foo')
->>> file.close()
-
-Explicitly unlocking is not needed in most cases but omitting it has been known
-to cause issues:
-
->>> import portalocker
->>> with portalocker.Lock('somefile', timeout=1) as fh:
-...     print >>fh, 'writing some stuff to my cache...'
-
-To customize the opening and locking a manual approach is also possible:
-
->>> import portalocker
->>> file = open('somefile', 'r+')
->>> portalocker.lock(file, portalocker.EXCLUSIVE)
->>> file.seek(12)
->>> file.write('foo')
->>> file.close()
-
-Explicitly unlocking is not needed in most cases but omitting it has been known
-to cause issues:
-
->>> import portalocker
->>> with portalocker.Lock('somefile', timeout=1) as fh:
-...     print >>fh, 'writing some stuff to my cache...'
-
-To customize the opening and locking a manual approach is also possible:
-
->>> import portalocker
->>> file = open('somefile', 'r+')
 >>> portalocker.lock(file, portalocker.LOCK_EX)
 >>> file.seek(12)
 >>> file.write('foo')
