@@ -4,18 +4,10 @@ import os
 import re
 import sys
 import typing
-from distutils.version import LooseVersion
 
 import setuptools
 from setuptools import __version__ as setuptools_version
 from setuptools.command.test import test as TestCommand
-
-if LooseVersion(setuptools_version) < LooseVersion('38.3.0'):
-    raise SystemExit(
-        'Your `setuptools` version is old. '
-        'Please upgrade setuptools by running `pip install -U setuptools` '
-        'and try again.'
-    )
 
 # To prevent importing about and thereby breaking the coverage info we use this
 # exec hack
