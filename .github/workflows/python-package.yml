@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel
-          python -m pip install --develop ".[tests]"
+          python -m pip install -e ".[tests]"
       - name: Test with pytest
         run: python -m pytest
 
