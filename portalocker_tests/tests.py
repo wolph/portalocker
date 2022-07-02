@@ -1,6 +1,9 @@
 from __future__ import print_function
 from __future__ import with_statement
 
+import multiprocessing
+import time
+
 import pytest
 import portalocker
 from portalocker import utils
@@ -36,8 +39,10 @@ def test_with_timeout(tmpfile):
     with pytest.raises(portalocker.AlreadyLocked):
         with portalocker.Lock(tmpfile, timeout=0.1) as fh:
             print('writing some stuff to my cache...', file=fh)
-            with portalocker.Lock(tmpfile, timeout=0.1, mode='wb',
-                                  fail_when_locked=True):
+            with portalocker.Lock(
+                tmpfile, timeout=0.1, mode='wb',
+                fail_when_locked=True
+            ):
                 pass
             print('writing more stuff to my cache...', file=fh)
 
@@ -217,3 +222,40 @@ def test_blocking_timeout(tmpfile):
     lock = portalocker.Lock(tmpfile, flags=flags)
     with pytest.warns(UserWarning):
         lock.acquire(timeout=5)
+
+
+def shared_lock(filename, **kwargs):
+    with portalocker.Lock(
+        filename,
+        timeout=0.1,
+        fail_when_locked=False,
+        flags=portalocker.LockFlags.SHARED | portalocker.LockFlags.NON_BLOCKING,
+    ):
+        time.sleep(0.2)
+        return True
+
+
+def shared_lock_fail(filename, **kwargs):
+    with portalocker.Lock(
+        filename,
+        timeout=0.1,
+        fail_when_locked=True,
+        flags=portalocker.LockFlags.SHARED | portalocker.LockFlags.NON_BLOCKING,
+    ):
+        time.sleep(0.2)
+        return True
+
+
+def test_shared_processes(tmpfile):
+    # Force spawning the process so we don't accidently inherit the lock
+    # I'm not a 100% certain this will work correctly unfortunately... there
+    # is some potential for breaking other tests
+    multiprocessing.set_start_method('spawn')
+
+    with multiprocessing.Pool(processes=2) as pool:
+        for result in pool.imap_unordered(shared_lock, 3 * [tmpfile]):
+            assert result is True
+
+    with multiprocessing.Pool(processes=2) as pool:
+        for result in pool.imap_unordered(shared_lock_fail, 3 * [tmpfile]):
+            assert result is True
