@@ -3,85 +3,54 @@ import sys
 
 import typing
 
+import win32con
+import win32file
+
 from . import constants
 from . import exceptions
 
 if os.name == 'nt':  # pragma: no cover
-    import win32con
-    import win32file
     import pywintypes
     import winerror
     import msvcrt
     __overlapped = pywintypes.OVERLAPPED()
 
-    if sys.version_info.major == 2:
-        lock_length = -1
-    else:
-        lock_length = int(2**31 - 1)
-
     def lock(file_: typing.IO, flags: constants.LockFlags):
-        if flags & constants.LockFlags.SHARED:
-            if sys.version_info.major == 2:
-                if flags & constants.LockFlags.NON_BLOCKING:
-                    mode = win32con.LOCKFILE_FAIL_IMMEDIATELY
-                else:
-                    mode = 0
+        mode = 0
+        if flags & constants.LockFlags.NON_BLOCKING:
+            mode |= win32con.LOCKFILE_FAIL_IMMEDIATELY
 
-            else:
-                if flags & constants.LockFlags.NON_BLOCKING:
-                    mode = msvcrt.LK_NBRLCK
-                else:
-                    mode = msvcrt.LK_RLCK
+        if flags & constants.LockFlags.EXCLUSIVE:
+            mode |= win32con.LOCKFILE_EXCLUSIVE_LOCK
 
-            # is there any reason not to reuse the following structure?
-            hfile = win32file._get_osfhandle(file_.fileno())
-            try:
-                win32file.LockFileEx(hfile, mode, 0, -0x10000, __overlapped)
-            except pywintypes.error as exc_value:
-                # error: (33, 'LockFileEx', 'The process cannot access the file
-                # because another process has locked a portion of the file.')
-                if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
-                    raise exceptions.LockException(
-                        exceptions.LockException.LOCK_FAILED,
-                        exc_value.strerror,
-                        fh=file_)
-                else:
-                    # Q:  Are there exceptions/codes we should be dealing with
-                    # here?
-                    raise
-        else:
-            if flags & constants.LockFlags.NON_BLOCKING:
-                mode = msvcrt.LK_NBLCK
-            else:
-                mode = msvcrt.LK_LOCK
+        # Save the old position so we can go back to that position but
+        # still lock from the beginning of the file
+        savepos = file_.tell()
+        if savepos:
+            file_.seek(0)
 
-            # windows locks byte ranges, so make sure to lock from file start
-            try:
-                savepos = file_.tell()
-                if savepos:
-                    # [ ] test exclusive lock fails on seek here
-                    # [ ] test if shared lock passes this point
-                    file_.seek(0)
-                    # [x] check if 0 param locks entire file (not documented in
-                    #     Python)
-                    # [x] fails with "IOError: [Errno 13] Permission denied",
-                    #     but -1 seems to do the trick
+        os_fh = msvcrt.get_osfhandle(file_.fileno())
+        try:
+            win32file.LockFileEx(os_fh, mode, 0, -0x10000, __overlapped)
+        except pywintypes.error as exc_value:
+            # import winerror
+            # errors = {k for k, v in winerror.__dict__.items() if v == exc_value.winerror}
+            # print(errors)
 
-                try:
-                    msvcrt.locking(file_.fileno(), mode, lock_length)
-                except IOError as exc_value:
-                    # [ ] be more specific here
-                    raise exceptions.LockException(
-                        exceptions.LockException.LOCK_FAILED,
-                        exc_value.strerror,
-                        fh=file_)
-                finally:
-                    if savepos:
-                        file_.seek(savepos)
-            except IOError as exc_value:
-                raise exceptions.LockException(
-                    exceptions.LockException.LOCK_FAILED, exc_value.strerror,
+            # error: (33, 'LockFileEx', 'The process cannot access the file
+            # because another process has locked a portion of the file.')
+            if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
+                raise exceptions.AlreadyLocked(
+                    exceptions.LockException.LOCK_FAILED,
+                    exc_value.strerror,
                     fh=file_)
+            else:
+                # Q:  Are there exceptions/codes we should be dealing with
+                # here?
+                raise
+        finally:
+            if savepos:
+                file_.seek(savepos)
 
     def unlock(file_: typing.IO):
         try:
@@ -89,33 +58,22 @@ if os.name == 'nt':  # pragma: no cover
             if savepos:
                 file_.seek(0)
 
+            os_fh = msvcrt.get_osfhandle(file_.fileno())
             try:
-                msvcrt.locking(file_.fileno(), constants.LockFlags.UNBLOCK,
-                               lock_length)
-            except IOError as exc:
+                win32file.UnlockFileEx(
+                    os_fh, 0, -0x10000, __overlapped)
+            except pywintypes.error as exc:
                 exception = exc
-                if exc.strerror == 'Permission denied':
-                    hfile = win32file._get_osfhandle(file_.fileno())
-                    try:
-                        win32file.UnlockFileEx(
-                            hfile, 0, -0x10000, __overlapped)
-                    except pywintypes.error as exc:
-                        exception = exc
-                        if exc.winerror == winerror.ERROR_NOT_LOCKED:
-                            # error: (158, 'UnlockFileEx',
-                            #         'The segment is already unlocked.')
-                            # To match the 'posix' implementation, silently
-                            # ignore this error
-                            pass
-                        else:
-                            # Q:  Are there exceptions/codes we should be
-                            # dealing with here?
-                            raise
+                if exc.winerror == winerror.ERROR_NOT_LOCKED:
+                    # error: (158, 'UnlockFileEx',
+                    #         'The segment is already unlocked.')
+                    # To match the 'posix' implementation, silently
+                    # ignore this error
+                    pass
                 else:
-                    raise exceptions.LockException(
-                        exceptions.LockException.LOCK_FAILED,
-                        exception.strerror,
-                        fh=file_)
+                    # Q:  Are there exceptions/codes we should be
+                    # dealing with here?
+                    raise
             finally:
                 if savepos:
                     file_.seek(savepos)
