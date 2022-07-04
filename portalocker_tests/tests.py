@@ -1,8 +1,10 @@
 from __future__ import print_function
 from __future__ import with_statement
 
+import dataclasses
 import multiprocessing
 import time
+import typing
 
 import pytest
 import portalocker
@@ -246,16 +248,74 @@ def shared_lock_fail(filename, **kwargs):
         return True
 
 
-def test_shared_processes(tmpfile):
-    # Force spawning the process so we don't accidently inherit the lock
-    # I'm not a 100% certain this will work correctly unfortunately... there
-    # is some potential for breaking other tests
-    multiprocessing.set_start_method('spawn')
+def exclusive_lock(filename, **kwargs):
+    with portalocker.Lock(
+        filename,
+        timeout=0.1,
+        fail_when_locked=False,
+        flags=portalocker.LockFlags.EXCLUSIVE |
+              portalocker.LockFlags.NON_BLOCKING,
+    ):
+        time.sleep(0.2)
+        return True
+
+
+@dataclasses.dataclass(order=True)
+class LockResult:
+    exception_class: typing.Union[typing.Type[Exception], None] = None
+    exception_message: typing.Union[str, None] = None
+    exception_repr: typing.Union[str, None] = None
+
+
+def lock(
+    filename: str,
+    fail_when_locked: bool,
+    flags: portalocker.LockFlags
+) -> LockResult:
+    # Returns a case of True, False or FileNotFound
+    # https://thedailywtf.com/articles/what_is_truth_0x3f_
+    # But seriously, the exception properties cannot be safely pickled so we
+    # only return string representations of the exception properties
+    try:
+        with portalocker.Lock(
+            filename,
+            timeout=0.1,
+            fail_when_locked=fail_when_locked,
+            flags=flags,
+        ):
+            time.sleep(0.2)
+            return LockResult()
+
+    except Exception as exception:
+        # The exceptions cannot be pickled so we cannot return them through
+        # multiprocessing
+        return LockResult(
+            type(exception),
+            str(exception),
+            repr(exception),
+        )
+
+
+@pytest.mark.parametrize('fail_when_locked', [True, False])
+def test_shared_processes(tmpfile, fail_when_locked):
+    flags = portalocker.LockFlags.SHARED | portalocker.LockFlags.NON_BLOCKING
 
     with multiprocessing.Pool(processes=2) as pool:
-        for result in pool.imap_unordered(shared_lock, 3 * [tmpfile]):
-            assert result is True
+        args = tmpfile, fail_when_locked, flags
+        results = pool.starmap_async(lock, 3 * [args])
+
+        for result in results.get(timeout=1):
+            assert result == LockResult()
+
+
+@pytest.mark.parametrize('fail_when_locked', [True, False])
+def test_exclusive_processes(tmpfile, fail_when_locked):
+    flags = portalocker.LockFlags.EXCLUSIVE | portalocker.LockFlags.NON_BLOCKING
 
     with multiprocessing.Pool(processes=2) as pool:
-        for result in pool.imap_unordered(shared_lock_fail, 3 * [tmpfile]):
-            assert result is True
+        # filename, fail_when_locked, flags
+        args = tmpfile, fail_when_locked, flags
+        a, b = pool.starmap_async(lock, 2 * [args]).get(timeout=1)
+
+        assert a.exception_class is None
+        assert issubclass(b.exception_class, portalocker.LockException)

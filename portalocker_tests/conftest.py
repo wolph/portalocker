@@ -1,17 +1,25 @@
+import multiprocessing
+
 import py
 import logging
 import pytest
-
+import random
 
 logger = logging.getLogger(__name__)
 
 
 @pytest.fixture
-def tmpfile(tmpdir_factory):
-    tmpdir = tmpdir_factory.mktemp('temp')
-    filename = tmpdir.join('tmpfile')
+def tmpfile(tmp_path):
+    filename = tmp_path / str(random.random())
     yield str(filename)
     try:
-        filename.remove(ignore_errors=True)
-    except (py.error.EBUSY, py.error.ENOENT):
+        filename.unlink(missing_ok=True)
+    except PermissionError:
         pass
+
+
+def pytest_sessionstart(session):
+    # Force spawning the process so we don't accidently inherit locks.
+    # I'm not a 100% certain this will work correctly unfortunately... there
+    # is some potential for breaking tests
+    multiprocessing.set_start_method('spawn')
