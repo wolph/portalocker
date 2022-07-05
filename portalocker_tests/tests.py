@@ -302,9 +302,9 @@ def test_shared_processes(tmpfile, fail_when_locked):
 
     with multiprocessing.Pool(processes=2) as pool:
         args = tmpfile, fail_when_locked, flags
-        results = pool.starmap_async(lock, 3 * [args])
+        results = pool.starmap_async(lock, 2 * [args])
 
-        for result in results.get(timeout=2):
+        for result in results.get(timeout=3):
             assert result == LockResult()
 
 
@@ -315,7 +315,7 @@ def test_exclusive_processes(tmpfile, fail_when_locked):
     with multiprocessing.Pool(processes=2) as pool:
         # filename, fail_when_locked, flags
         args = tmpfile, fail_when_locked, flags
-        a, b = pool.starmap_async(lock, 2 * [args]).get(timeout=2)
+        a, b = pool.starmap_async(lock, 2 * [args]).get(timeout=3)
 
         assert not a.exception_class or not b.exception_class
         assert issubclass(
