@@ -317,5 +317,8 @@ def test_exclusive_processes(tmpfile, fail_when_locked):
         args = tmpfile, fail_when_locked, flags
         a, b = pool.starmap_async(lock, 2 * [args]).get(timeout=1)
 
-        assert a.exception_class is None
-        assert issubclass(b.exception_class, portalocker.LockException)
+        assert not a.exception_class  or not b.exception_class
+        assert issubclass(
+            a.exception_class or b.exception_class,
+            portalocker.LockException
+        )
