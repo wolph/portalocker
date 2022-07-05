@@ -1,18 +1,18 @@
 import os
-import sys
 
 import typing
 
-import win32con
-import win32file
 
 from . import constants
 from . import exceptions
 
+
 if os.name == 'nt':  # pragma: no cover
-    import pywintypes
-    import winerror
     import msvcrt
+    import pywintypes
+    import win32con
+    import win32file
+    import winerror
     __overlapped = pywintypes.OVERLAPPED()
 
     def lock(file_: typing.IO, flags: constants.LockFlags):
