@@ -2,10 +2,8 @@ import os
 
 import typing
 
-
 from . import constants
 from . import exceptions
-
 
 if os.name == 'nt':  # pragma: no cover
     import msvcrt
@@ -13,7 +11,9 @@ if os.name == 'nt':  # pragma: no cover
     import win32con
     import win32file
     import winerror
+
     __overlapped = pywintypes.OVERLAPPED()
+
 
     def lock(file_: typing.IO, flags: constants.LockFlags):
         mode = 0
@@ -33,17 +33,14 @@ if os.name == 'nt':  # pragma: no cover
         try:
             win32file.LockFileEx(os_fh, mode, 0, -0x10000, __overlapped)
         except pywintypes.error as exc_value:
-            # import winerror
-            # errors = {k for k, v in winerror.__dict__.items() if v == exc_value.winerror}
-            # print(errors)
-
             # error: (33, 'LockFileEx', 'The process cannot access the file
             # because another process has locked a portion of the file.')
             if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
                 raise exceptions.AlreadyLocked(
                     exceptions.LockException.LOCK_FAILED,
                     exc_value.strerror,
-                    fh=file_)
+                    fh=file_
+                )
             else:
                 # Q:  Are there exceptions/codes we should be dealing with
                 # here?
@@ -51,6 +48,7 @@ if os.name == 'nt':  # pragma: no cover
         finally:
             if savepos:
                 file_.seek(savepos)
+
 
     def unlock(file_: typing.IO):
         try:
@@ -61,9 +59,9 @@ if os.name == 'nt':  # pragma: no cover
             os_fh = msvcrt.get_osfhandle(file_.fileno())
             try:
                 win32file.UnlockFileEx(
-                    os_fh, 0, -0x10000, __overlapped)
+                    os_fh, 0, -0x10000, __overlapped
+                )
             except pywintypes.error as exc:
-                exception = exc
                 if exc.winerror == winerror.ERROR_NOT_LOCKED:
                     # error: (158, 'UnlockFileEx',
                     #         'The segment is already unlocked.')
@@ -80,10 +78,12 @@ if os.name == 'nt':  # pragma: no cover
         except IOError as exc:
             raise exceptions.LockException(
                 exceptions.LockException.LOCK_FAILED, exc.strerror,
-                fh=file_)
+                fh=file_
+            )
 
 elif os.name == 'posix':  # pragma: no cover
     import fcntl
+
 
     def lock(file_: typing.IO, flags: constants.LockFlags):
         locking_exceptions = IOError,
@@ -99,9 +99,9 @@ elif os.name == 'posix':  # pragma: no cover
             # every IO error
             raise exceptions.LockException(exc_value, fh=file_)
 
+
     def unlock(file_: typing.IO, ):
         fcntl.flock(file_.fileno(), constants.LockFlags.UNBLOCK)
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')
-

@@ -1,9 +1,7 @@
-import multiprocessing
-
-import py
 import logging
 import pytest
 import random
+import multiprocessing
 
 logger = logging.getLogger(__name__)
 

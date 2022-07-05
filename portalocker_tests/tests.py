@@ -9,6 +9,7 @@ import typing
 import pytest
 import portalocker
 from portalocker import utils
+from portalocker import LockFlags
 
 
 def test_exceptions(tmpfile):
@@ -215,7 +216,7 @@ def test_shared(tmpfile):
 
 
 def test_blocking_timeout(tmpfile):
-    flags = portalocker.LockFlags.SHARED
+    flags = LockFlags.SHARED
 
     with pytest.warns(UserWarning):
         with portalocker.Lock(tmpfile, timeout=5, flags=flags):
@@ -231,7 +232,7 @@ def shared_lock(filename, **kwargs):
         filename,
         timeout=0.1,
         fail_when_locked=False,
-        flags=portalocker.LockFlags.SHARED | portalocker.LockFlags.NON_BLOCKING,
+        flags=LockFlags.SHARED | LockFlags.NON_BLOCKING,
     ):
         time.sleep(0.2)
         return True
@@ -242,7 +243,7 @@ def shared_lock_fail(filename, **kwargs):
         filename,
         timeout=0.1,
         fail_when_locked=True,
-        flags=portalocker.LockFlags.SHARED | portalocker.LockFlags.NON_BLOCKING,
+        flags=LockFlags.SHARED | LockFlags.NON_BLOCKING,
     ):
         time.sleep(0.2)
         return True
@@ -253,8 +254,7 @@ def exclusive_lock(filename, **kwargs):
         filename,
         timeout=0.1,
         fail_when_locked=False,
-        flags=portalocker.LockFlags.EXCLUSIVE |
-              portalocker.LockFlags.NON_BLOCKING,
+        flags=LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING,
     ):
         time.sleep(0.2)
         return True
@@ -270,7 +270,7 @@ class LockResult:
 def lock(
     filename: str,
     fail_when_locked: bool,
-    flags: portalocker.LockFlags
+    flags: LockFlags
 ) -> LockResult:
     # Returns a case of True, False or FileNotFound
     # https://thedailywtf.com/articles/what_is_truth_0x3f_
@@ -298,7 +298,7 @@ def lock(
 
 @pytest.mark.parametrize('fail_when_locked', [True, False])
 def test_shared_processes(tmpfile, fail_when_locked):
-    flags = portalocker.LockFlags.SHARED | portalocker.LockFlags.NON_BLOCKING
+    flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
 
     with multiprocessing.Pool(processes=2) as pool:
         args = tmpfile, fail_when_locked, flags
@@ -310,14 +310,14 @@ def test_shared_processes(tmpfile, fail_when_locked):
 
 @pytest.mark.parametrize('fail_when_locked', [True, False])
 def test_exclusive_processes(tmpfile, fail_when_locked):
-    flags = portalocker.LockFlags.EXCLUSIVE | portalocker.LockFlags.NON_BLOCKING
+    flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING
 
     with multiprocessing.Pool(processes=2) as pool:
         # filename, fail_when_locked, flags
         args = tmpfile, fail_when_locked, flags
         a, b = pool.starmap_async(lock, 2 * [args]).get(timeout=1)
 
-        assert not a.exception_class  or not b.exception_class
+        assert not a.exception_class or not b.exception_class
         assert issubclass(
             a.exception_class or b.exception_class,
             portalocker.LockException
