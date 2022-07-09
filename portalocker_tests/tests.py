@@ -1,6 +1,7 @@
 from __future__ import print_function
 from __future__ import with_statement
 
+import os
 import dataclasses
 import multiprocessing
 import time
@@ -227,6 +228,7 @@ def test_blocking_timeout(tmpfile):
         lock.acquire(timeout=5)
 
 
+pytest.mark.skipif(os.name == 'nt')
 def test_nonblocking(tmpfile):
     with open(tmpfile, 'w') as fh:
         with pytest.raises(RuntimeError):
