@@ -100,8 +100,8 @@ elif os.name == 'posix':  # pragma: no cover
 
         # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled results
         # in an error
-        if ((flags & LockFlags.NON_BLOCKING) and \
-             not flags & (LockFlags.SHARED | LockFlags.EXCLUSIVE)):
+        if ((flags & LockFlags.NON_BLOCKING)
+                and not flags & (LockFlags.SHARED | LockFlags.EXCLUSIVE)):
             raise RuntimeError('When locking in non-blocking mode the SHARED '
                                'or EXCLUSIVE flag must be specified as well')
 
