@@ -19,9 +19,9 @@ class LockException(BaseLockException):
     pass
 
 
-class AlreadyLocked(BaseLockException):
+class AlreadyLocked(LockException):
     pass
 
 
-class FileToLarge(BaseLockException):
+class FileToLarge(LockException):
     pass
