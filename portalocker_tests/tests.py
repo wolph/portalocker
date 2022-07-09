@@ -227,6 +227,12 @@ def test_blocking_timeout(tmpfile):
         lock.acquire(timeout=5)
 
 
+def test_nonblocking(tmpfile):
+    with open(tmpfile, 'w') as fh:
+        with pytest.raises(RuntimeError):
+            portalocker.lock(fh, LockFlags.NON_BLOCKING)
+
+
 def shared_lock(filename, **kwargs):
     with portalocker.Lock(
         filename,
