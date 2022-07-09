@@ -228,7 +228,8 @@ def test_blocking_timeout(tmpfile):
         lock.acquire(timeout=5)
 
 
-@pytest.mark.skipif(os.name == 'nt')
+@pytest.mark.skipif(os.name == 'nt',
+                    reason='Windows uses an entirely different lockmechanism')
 def test_nonblocking(tmpfile):
     with open(tmpfile, 'w') as fh:
         with pytest.raises(RuntimeError):
