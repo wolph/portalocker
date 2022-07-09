@@ -5,6 +5,12 @@ import typing
 from . import constants
 from . import exceptions
 
+
+# Alias for readability. Due to import recursion issues we cannot do:
+# from .constants import LockFlags
+LockFlags = constants.LockFlags
+
+
 if os.name == 'nt':  # pragma: no cover
     import msvcrt
     import pywintypes
@@ -15,12 +21,12 @@ if os.name == 'nt':  # pragma: no cover
     __overlapped = pywintypes.OVERLAPPED()
 
 
-    def lock(file_: typing.IO, flags: constants.LockFlags):
+    def lock(file_: typing.IO, flags: LockFlags):
         mode = 0
-        if flags & constants.LockFlags.NON_BLOCKING:
+        if flags & LockFlags.NON_BLOCKING:
             mode |= win32con.LOCKFILE_FAIL_IMMEDIATELY
 
-        if flags & constants.LockFlags.EXCLUSIVE:
+        if flags & LockFlags.EXCLUSIVE:
             mode |= win32con.LOCKFILE_EXCLUSIVE_LOCK
 
         # Save the old position so we can go back to that position but
@@ -85,12 +91,19 @@ elif os.name == 'posix':  # pragma: no cover
     import fcntl
 
 
-    def lock(file_: typing.IO, flags: constants.LockFlags):
+    def lock(file_: typing.IO, flags: LockFlags):
         locking_exceptions = IOError,
         try:  # pragma: no cover
             locking_exceptions += BlockingIOError,  # type: ignore
         except NameError:  # pragma: no cover
             pass
+
+        # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled results
+        # in an error
+        if ((flags & LockFlags.NON_BLOCKING)
+                and not flags & (LockFlags.SHARED | LockFlags.EXCLUSIVE)):
+            raise RuntimeError('When locking in non-blocking mode the SHARED '
+                               'or EXCLUSIVE flag must be specified as well')
 
         try:
             fcntl.flock(file_.fileno(), flags)
@@ -101,7 +114,7 @@ elif os.name == 'posix':  # pragma: no cover
 
 
     def unlock(file_: typing.IO, ):
-        fcntl.flock(file_.fileno(), constants.LockFlags.UNBLOCK)
+        fcntl.flock(file_.fileno(), LockFlags.UNBLOCK)
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')

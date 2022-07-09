@@ -1,6 +1,7 @@
 from __future__ import print_function
 from __future__ import with_statement
 
+import os
 import dataclasses
 import multiprocessing
 import time
@@ -225,6 +226,14 @@ def test_blocking_timeout(tmpfile):
     lock = portalocker.Lock(tmpfile, flags=flags)
     with pytest.warns(UserWarning):
         lock.acquire(timeout=5)
+
+
+@pytest.mark.skipif(os.name == 'nt',
+                    reason='Windows uses an entirely different lockmechanism')
+def test_nonblocking(tmpfile):
+    with open(tmpfile, 'w') as fh:
+        with pytest.raises(RuntimeError):
+            portalocker.lock(fh, LockFlags.NON_BLOCKING)
 
 
 def shared_lock(filename, **kwargs):
