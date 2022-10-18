@@ -106,7 +106,7 @@ elif os.name == 'posix':  # pragma: no cover
                                'or EXCLUSIVE flag must be specified as well')
 
         try:
-            fcntl.flock(file_.fileno(), flags)
+            fcntl.flock(file_, flags)
         except locking_exceptions as exc_value:
             # The exception code varies on different systems so we'll catch
             # every IO error

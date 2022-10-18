@@ -331,3 +331,27 @@ def test_exclusive_processes(tmpfile, fail_when_locked):
             a.exception_class or b.exception_class,
             portalocker.LockException
         )
+
+
+@pytest.mark.skipif(
+    os.name == 'nt',
+    reason='Locking on Windows requires a file object',
+)
+def test_lock_fileno(tmpfile):
+    # Open the file 2 times
+    a = open(tmpfile, 'a')
+    b = open(tmpfile, 'a')
+
+    # Lock exclusive non-blocking
+    flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
+
+    # First lock file a
+    portalocker.lock(a, flags)
+
+    # Now see if we can lock using fileno()
+    portalocker.lock(b.fileno(), flags)
+
+    # Cleanup
+    a.close()
+    b.close()
+
