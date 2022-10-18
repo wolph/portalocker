@@ -35,7 +35,7 @@ if os.name == 'nt':  # pragma: no cover
         if savepos:
             file_.seek(0)
 
-        os_fh = msvcrt.get_osfhandle(file_.fileno())
+        os_fh = msvcrt.get_osfhandle(file_)
         try:
             win32file.LockFileEx(os_fh, mode, 0, -0x10000, __overlapped)
         except pywintypes.error as exc_value:
@@ -62,7 +62,7 @@ if os.name == 'nt':  # pragma: no cover
             if savepos:
                 file_.seek(0)
 
-            os_fh = msvcrt.get_osfhandle(file_.fileno())
+            os_fh = msvcrt.get_osfhandle(file_)
             try:
                 win32file.UnlockFileEx(
                     os_fh, 0, -0x10000, __overlapped
@@ -106,7 +106,7 @@ elif os.name == 'posix':  # pragma: no cover
                                'or EXCLUSIVE flag must be specified as well')
 
         try:
-            fcntl.flock(file_.fileno(), flags)
+            fcntl.flock(file_, flags)
         except locking_exceptions as exc_value:
             # The exception code varies on different systems so we'll catch
             # every IO error
