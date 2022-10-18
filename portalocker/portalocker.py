@@ -35,7 +35,7 @@ if os.name == 'nt':  # pragma: no cover
         if savepos:
             file_.seek(0)
 
-        os_fh = msvcrt.get_osfhandle(file_)
+        os_fh = msvcrt.get_osfhandle(file_.fileno())
         try:
             win32file.LockFileEx(os_fh, mode, 0, -0x10000, __overlapped)
         except pywintypes.error as exc_value:
@@ -62,7 +62,7 @@ if os.name == 'nt':  # pragma: no cover
             if savepos:
                 file_.seek(0)
 
-            os_fh = msvcrt.get_osfhandle(file_)
+            os_fh = msvcrt.get_osfhandle(file_.fileno())
             try:
                 win32file.UnlockFileEx(
                     os_fh, 0, -0x10000, __overlapped
