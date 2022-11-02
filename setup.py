@@ -101,7 +101,7 @@ if __name__ == '__main__':
         author=about['__author__'],
         author_email=about['__email__'],
         url=about['__url__'],
-        license='PSF',
+        license='BSD-3-Clause',
         package_data=dict(portalocker=['py.typed', 'msvcrt.pyi']),
         packages=setuptools.find_packages(exclude=[
             'examples', 'portalocker_tests']),
