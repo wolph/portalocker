@@ -1,6 +1,3 @@
-from __future__ import print_function
-from __future__ import with_statement
-
 import os
 import dataclasses
 import multiprocessing
@@ -173,12 +170,12 @@ def test_exlusive(tmpfile):
     with open(tmpfile, 'w') as fh:
         fh.write('spam and eggs')
 
-    fh = open(tmpfile, 'r')
+    fh = open(tmpfile)
     portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
 
     # Make sure we can't read the locked file
     with pytest.raises(portalocker.LockException):
-        with open(tmpfile, 'r') as fh2:
+        with open(tmpfile) as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.read()
 
@@ -197,11 +194,11 @@ def test_shared(tmpfile):
     with open(tmpfile, 'w') as fh:
         fh.write('spam and eggs')
 
-    f = open(tmpfile, 'r')
+    f = open(tmpfile)
     portalocker.lock(f, portalocker.LOCK_SH | portalocker.LOCK_NB)
 
     # Make sure we can read the locked file
-    with open(tmpfile, 'r') as fh2:
+    with open(tmpfile) as fh2:
         portalocker.lock(fh2, portalocker.LOCK_SH | portalocker.LOCK_NB)
         assert fh2.read() == 'spam and eggs'
 

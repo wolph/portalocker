@@ -320,8 +320,8 @@ class RLock(Lock):
             self, filename, mode='a', timeout=DEFAULT_TIMEOUT,
             check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=False,
             flags=LOCK_METHOD):
-        super(RLock, self).__init__(filename, mode, timeout, check_interval,
-                                    fail_when_locked, flags)
+        super().__init__(filename, mode, timeout, check_interval,
+                         fail_when_locked, flags)
         self._acquire_count = 0
 
     def acquire(
@@ -330,8 +330,8 @@ class RLock(Lock):
         if self._acquire_count >= 1:
             fh = self.fh
         else:
-            fh = super(RLock, self).acquire(timeout, check_interval,
-                                            fail_when_locked)
+            fh = super().acquire(timeout, check_interval,
+                                 fail_when_locked)
         self._acquire_count += 1
         assert fh
         return fh
@@ -342,7 +342,7 @@ class RLock(Lock):
                 "Cannot release more times than acquired")
 
         if self._acquire_count == 1:
-            super(RLock, self).release()
+            super().release()
         self._acquire_count -= 1
 
 
