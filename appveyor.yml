@@ -9,6 +9,8 @@ environment:
   - TOXENV: py37
   - TOXENV: py38
   - TOXENV: py39
+  - TOXENV: py310
+  - TOXENV: py311
 
 install:
   - "%PYTHON% -m pip install -U tox setuptools wheel"
