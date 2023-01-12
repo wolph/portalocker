@@ -425,7 +425,9 @@ class BoundedSemaphore(LockBase):
             if self.try_lock(filenames):  # pragma: no branch
                 return self.lock  # pragma: no cover
 
-        raise exceptions.AlreadyLocked()
+        if fail_when_locked:
+            raise exceptions.AlreadyLocked()
+        return None
 
     def try_lock(self, filenames: typing.Sequence[Filename]) -> bool:
         filename: Filename
