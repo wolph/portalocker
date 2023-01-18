@@ -386,15 +386,20 @@ class BoundedSemaphore(LockBase):
             name: str = 'bounded_semaphore',
             filename_pattern: str = '{name}.{number:02d}.lock',
             directory: str = tempfile.gettempdir(),
-            timeout=DEFAULT_TIMEOUT,
-            check_interval=DEFAULT_CHECK_INTERVAL):
+            timeout: typing.Optional[float] = DEFAULT_TIMEOUT,
+            check_interval: typing.Optional[float] = DEFAULT_CHECK_INTERVAL,
+            fail_when_locked: typing.Optional[bool] = True,
+    ):
         self.maximum = maximum
         self.name = name
         self.filename_pattern = filename_pattern
         self.directory = directory
         self.lock: typing.Optional[Lock] = None
-        self.timeout = timeout
-        self.check_interval = check_interval
+        super().__init__(
+            timeout=timeout,
+            check_interval=check_interval,
+            fail_when_locked=fail_when_locked,
+        )
 
     def get_filenames(self) -> typing.Sequence[pathlib.Path]:
         return [self.get_filename(n) for n in range(self.maximum)]
@@ -425,8 +430,10 @@ class BoundedSemaphore(LockBase):
             if self.try_lock(filenames):  # pragma: no branch
                 return self.lock  # pragma: no cover
 
+        fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
         if fail_when_locked:
             raise exceptions.AlreadyLocked()
+
         return None
 
     def try_lock(self, filenames: typing.Sequence[Filename]) -> bool:
@@ -439,7 +446,7 @@ class BoundedSemaphore(LockBase):
                 logger.debug('locked %r', filename)
                 return True
             except exceptions.AlreadyLocked:
-                pass
+                self.lock = None
 
         return False
 
