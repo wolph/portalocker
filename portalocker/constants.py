@@ -22,7 +22,7 @@ import os
 if os.name == 'nt':  # pragma: no cover
     import msvcrt
 
-	#: exclusive lock
+    #: exclusive lock
     LOCK_EX = 0x1
     #: shared lock
     LOCK_SH = 0x2
