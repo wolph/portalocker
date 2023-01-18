@@ -16,7 +16,7 @@ tests_require = [
     'pytest>=5.4.1',
     'pytest-cov>=2.8.1',
     'pytest-timeout>=2.1.0',
-    'sphinx>=3.0.3',
+    'sphinx>=6.0.0',
     'pytest-mypy>=0.8.0',
     'redis',
 ]
@@ -101,7 +101,7 @@ if __name__ == '__main__':
         author=about['__author__'],
         author_email=about['__email__'],
         url=about['__url__'],
-        license='PSF',
+        license='BSD-3-Clause',
         package_data=dict(portalocker=['py.typed', 'msvcrt.pyi']),
         packages=setuptools.find_packages(exclude=[
             'examples', 'portalocker_tests']),

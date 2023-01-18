@@ -20,3 +20,9 @@ def test_bounded_semaphore(timeout, check_interval, monkeypatch):
     semaphore_b.acquire()
     with pytest.raises(portalocker.AlreadyLocked):
         semaphore_c.acquire(check_interval=check_interval, timeout=timeout)
+
+    semaphore_c.acquire(
+        check_interval=check_interval,
+        timeout=timeout,
+        fail_when_locked=False,
+    )
