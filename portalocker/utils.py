@@ -173,9 +173,8 @@ class Lock(LockBase):
 
     Args:
         filename: filename
-        mode: the open mode, 'a' or 'ab' should be used for writing
-        truncate: use truncate to emulate 'w' mode, None is disabled, 0 is
-            truncate to 0 bytes
+        mode: the open mode, 'a' or 'ab' should be used for writing. When mode
+            contains `w` the file will be truncated to 0 bytes.
         timeout: timeout when trying to acquire a lock
         check_interval: check interval while waiting
         fail_when_locked: after the initial lock failed, return an error
