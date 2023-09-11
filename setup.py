@@ -85,7 +85,6 @@ if __name__ == '__main__':
         classifiers=[
             'Intended Audience :: Developers',
             'Programming Language :: Python',
-            'Programming Language :: Python :: 3.7',
             'Programming Language :: Python :: 3.8',
             'Programming Language :: Python :: 3.9',
             'Programming Language :: Python :: 3.10',
@@ -93,7 +92,7 @@ if __name__ == '__main__':
             'Programming Language :: Python :: Implementation :: CPython',
             'Programming Language :: Python :: Implementation :: PyPy',
         ],
-        python_requires='>=3.7',
+        python_requires='>=3.8',
         keywords='locking, locks, with statement, windows, linux, unix',
         author=about['__author__'],
         author_email=about['__email__'],

@@ -5,7 +5,6 @@ environment:
   global:
     PYTHON: "C:\\Python38-x64\\python.exe"
   matrix:
-  - TOXENV: py37
   - TOXENV: py38
   - TOXENV: py39
   - TOXENV: py310
