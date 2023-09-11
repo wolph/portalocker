@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ develop ]
 
+env:
+  FORCE_COLOR: 1
+
 jobs:
   # Run os specific tests on the slower OS X/Windows machines
   windows_osx:
