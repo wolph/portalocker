@@ -1,9 +1,10 @@
 # What Python version is installed where:
 # http://www.appveyor.com/docs/installed-software#python
 
+image:
+  - Visual Studio 2022
+
 environment:
-  global:
-    PYTHON: "C:\\Python38-x64\\python.exe"
   matrix:
   - TOXENV: py38
   - TOXENV: py39
@@ -11,20 +12,10 @@ environment:
   - TOXENV: py311
 
 install:
-  - "%PYTHON% -m pip install -U tox setuptools wheel"
-  - "%PYTHON% -m pip install -Ue .[tests]"
+  - py -m pip install -U tox setuptools wheel
+  - py -m pip install -Ue ".[tests]"
 
 build: false  # Not a C# project, build stuff at the test step instead.
 
 test_script:
-  - "%PYTHON% -m tox"
-
-after_test:
-  - "%PYTHON% setup.py sdist bdist_wheel"
-  - ps: "ls dist"
-
-# artifacts:
-#   - path: dist\*
-
-#on_success:
-#  - TODO: upload the content of dist/*.whl to a public wheelhouse
+  - py -m tox"
