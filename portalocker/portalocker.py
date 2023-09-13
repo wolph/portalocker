@@ -81,7 +81,7 @@ if os.name == 'nt':  # pragma: no cover
             finally:
                 if savepos:
                     file_.seek(savepos)
-        except IOError as exc:
+        except OSError as exc:
             raise exceptions.LockException(
                 exceptions.LockException.LOCK_FAILED, exc.strerror,
                 fh=file_

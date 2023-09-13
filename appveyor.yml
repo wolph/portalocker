@@ -5,10 +5,10 @@ environment:
   global:
     PYTHON: "C:\\Python38-x64\\python.exe"
   matrix:
-  - TOXENV: py36
-  - TOXENV: py37
   - TOXENV: py38
   - TOXENV: py39
+  - TOXENV: py310
+  - TOXENV: py311
 
 install:
   - "%PYTHON% -m pip install -U tox setuptools wheel"

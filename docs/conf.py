@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #
 # Documentation build configuration file, created by
 # sphinx-quickstart on Thu Feb 27 20:00:23 2014.
@@ -57,7 +56,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = metadata.__package_name__.replace('-', ' ').capitalize()
-copyright = u'%s,  <a href="http://wol.ph/">%s</a>' % (
+copyright = '{},  <a href="http://wol.ph/">{}</a>'.format(
     datetime.date.today().year,
     metadata.__author__,
 )
@@ -213,7 +212,7 @@ htmlhelp_basename = metadata.__package_name__ + '-doc'
 latex_documents = [(
     'index',
     '%s.tex' % metadata.__package_name__,
-    u'%s Documentation' % metadata.__package_name__.replace('-', ' ').capitalize(),
+    '%s Documentation' % metadata.__package_name__.replace('-', ' ').capitalize(),
    metadata.__author__,
    'manual',
 )]
@@ -246,7 +245,7 @@ latex_documents = [(
 man_pages = [(
     'index',
     metadata.__package_name__,
-    u'%s Documentation' % metadata.__package_name__.replace('-', ' ').capitalize(),
+    '%s Documentation' % metadata.__package_name__.replace('-', ' ').capitalize(),
     [metadata.__author__],
     1,
 )]
@@ -263,7 +262,7 @@ man_pages = [(
 texinfo_documents = [(
     'index',
     metadata.__package_name__,
-    u'%s Documentation' % metadata.__package_name__.replace('-', ' ').capitalize(),
+    '%s Documentation' % metadata.__package_name__.replace('-', ' ').capitalize(),
     metadata.__author__,
     metadata.__package_name__,
     metadata.__description__,

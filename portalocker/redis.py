@@ -100,9 +100,9 @@ class RedisLock(utils.LockBase):
         for key, value in self.DEFAULT_REDIS_KWARGS.items():
             self.redis_kwargs.setdefault(key, value)
 
-        super(RedisLock, self).__init__(timeout=timeout,
-                                        check_interval=check_interval,
-                                        fail_when_locked=fail_when_locked)
+        super().__init__(timeout=timeout,
+                         check_interval=check_interval,
+                         fail_when_locked=fail_when_locked)
 
     def get_connection(self) -> client.Redis:
         if not self.connection:

@@ -1,5 +1,3 @@
-from __future__ import print_function
-
 import os
 import re
 import typing
@@ -87,16 +85,14 @@ if __name__ == '__main__':
         classifiers=[
             'Intended Audience :: Developers',
             'Programming Language :: Python',
-            'Programming Language :: Python :: 3.5',
-            'Programming Language :: Python :: 3.6',
-            'Programming Language :: Python :: 3.7',
             'Programming Language :: Python :: 3.8',
             'Programming Language :: Python :: 3.9',
             'Programming Language :: Python :: 3.10',
+            'Programming Language :: Python :: 3.11',
             'Programming Language :: Python :: Implementation :: CPython',
             'Programming Language :: Python :: Implementation :: PyPy',
         ],
-        python_requires='>=3.5',
+        python_requires='>=3.8',
         keywords='locking, locks, with statement, windows, linux, unix',
         author=about['__author__'],
         author_email=about['__email__'],
