@@ -1,5 +1,7 @@
 import random
+
 import pytest
+
 import portalocker
 from portalocker import utils
 
@@ -8,7 +10,7 @@ from portalocker import utils
 @pytest.mark.parametrize('check_interval', [None, 0, 0.0005])
 def test_bounded_semaphore(timeout, check_interval, monkeypatch):
     n = 2
-    name = random.random()
+    name: str = str(random.random())
     monkeypatch.setattr(utils, 'DEFAULT_TIMEOUT', 0.0001)
     monkeypatch.setattr(utils, 'DEFAULT_CHECK_INTERVAL', 0.0005)
 

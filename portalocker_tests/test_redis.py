@@ -4,12 +4,10 @@ import random
 import time
 
 import pytest
-from redis import client
-from redis import exceptions
 
 import portalocker
-from portalocker import redis
-from portalocker import utils
+from portalocker import redis, utils
+from redis import client, exceptions
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +29,7 @@ def set_redis_timeouts(monkeypatch):
 def test_redis_lock():
     channel = str(random.random())
 
-    lock_a = redis.RedisLock(channel)
+    lock_a: redis.RedisLock = redis.RedisLock(channel)
     lock_a.acquire(fail_when_locked=True)
     time.sleep(0.01)
 
@@ -41,7 +39,8 @@ def test_redis_lock():
             lock_b.acquire(fail_when_locked=True)
     finally:
         lock_a.release()
-        lock_a.connection.close()
+        if lock_a.connection is not None:
+            lock_a.connection.close()
 
 
 @pytest.mark.parametrize('timeout', [None, 0, 0.001])
@@ -58,7 +57,8 @@ def test_redis_lock_timeout(timeout, check_interval):
             lock_b.acquire(timeout=timeout, check_interval=check_interval)
         finally:
             lock_a.release()
-            lock_a.connection.close()
+            if lock_a.connection is not None:
+                lock_a.connection.close()
 
 
 def test_redis_lock_context():
@@ -68,9 +68,8 @@ def test_redis_lock_context():
     with lock_a:
         time.sleep(0.01)
         lock_b = redis.RedisLock(channel, fail_when_locked=True)
-        with pytest.raises(portalocker.AlreadyLocked):
-            with lock_b:
-                pass
+        with pytest.raises(portalocker.AlreadyLocked), lock_b:
+            pass
 
 
 def test_redis_relock():

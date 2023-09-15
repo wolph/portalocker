@@ -1,4 +1,5 @@
 import os
+
 import portalocker
 
 
@@ -11,4 +12,3 @@ def test_temporary_file_lock(tmpfile):
     lock = portalocker.TemporaryFileLock(tmpfile)
     lock.acquire()
     del lock
-

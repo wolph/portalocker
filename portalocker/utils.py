@@ -10,9 +10,7 @@ import time
 import typing
 import warnings
 
-from . import constants
-from . import exceptions
-from . import portalocker
+from . import constants, exceptions, portalocker
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +49,14 @@ def coalesce(*args: typing.Any, test_value: typing.Any = None) -> typing.Any:
     >>> coalesce([], dict(spam='eggs'), test_value=[])
     []
     '''
-    for arg in args:
-        if arg is not test_value:
-            return arg
+    return next((arg for arg in args if arg is not test_value), None)
 
 
 @contextlib.contextmanager
-def open_atomic(filename: Filename, binary: bool = True) \
-        -> typing.Iterator[typing.IO]:
+def open_atomic(
+    filename: Filename,
+    binary: bool = True,
+) -> typing.Iterator[typing.IO]:
     '''Open a file for atomic writing. Instead of locking this method allows
     you to write the entire file and move it to the actual location. Note that
     this makes the assumption that a rename is atomic on your platform which
@@ -103,10 +101,8 @@ def open_atomic(filename: Filename, binary: bool = True) \
     try:
         os.rename(temp_fh.name, path)
     finally:
-        try:
+        with contextlib.suppress(Exception):
             os.remove(temp_fh.name)
-        except Exception:
-            pass
 
 
 class LockBase(abc.ABC):  # pragma: no cover
@@ -117,23 +113,33 @@ class LockBase(abc.ABC):  # pragma: no cover
     #: skip the timeout and immediately fail if the initial lock fails
     fail_when_locked: bool
 
-    def __init__(self, timeout: typing.Optional[float] = None,
-                 check_interval: typing.Optional[float] = None,
-                 fail_when_locked: typing.Optional[bool] = None):
+    def __init__(
+        self,
+        timeout: typing.Optional[float] = None,
+        check_interval: typing.Optional[float] = None,
+        fail_when_locked: typing.Optional[bool] = None,
+    ):
         self.timeout = coalesce(timeout, DEFAULT_TIMEOUT)
         self.check_interval = coalesce(check_interval, DEFAULT_CHECK_INTERVAL)
-        self.fail_when_locked = coalesce(fail_when_locked,
-                                         DEFAULT_FAIL_WHEN_LOCKED)
+        self.fail_when_locked = coalesce(
+            fail_when_locked,
+            DEFAULT_FAIL_WHEN_LOCKED,
+        )
 
     @abc.abstractmethod
     def acquire(
-            self, timeout: float = None, check_interval: float = None,
-            fail_when_locked: bool = None):
+        self,
+        timeout: typing.Optional[float] = None,
+        check_interval: typing.Optional[float] = None,
+        fail_when_locked: typing.Optional[bool] = None,
+    ):
         return NotImplemented
 
-    def _timeout_generator(self, timeout: typing.Optional[float],
-                           check_interval: typing.Optional[float]) \
-            -> typing.Iterator[int]:
+    def _timeout_generator(
+        self,
+        timeout: typing.Optional[float],
+        check_interval: typing.Optional[float],
+    ) -> typing.Iterator[int]:
         f_timeout = coalesce(timeout, self.timeout, 0.0)
         f_check_interval = coalesce(check_interval, self.check_interval, 0.0)
 
@@ -156,11 +162,12 @@ class LockBase(abc.ABC):  # pragma: no cover
     def __enter__(self):
         return self.acquire()
 
-    def __exit__(self,
-                 exc_type: typing.Optional[typing.Type[BaseException]],
-                 exc_value: typing.Optional[BaseException],
-                 traceback: typing.Any,  # Should be typing.TracebackType
-                 ) -> typing.Optional[bool]:
+    def __exit__(
+        self,
+        exc_type: typing.Optional[typing.Type[BaseException]],
+        exc_value: typing.Optional[BaseException],
+        traceback: typing.Any,  # Should be typing.TracebackType
+    ) -> typing.Optional[bool]:
         self.release()
         return None
 
@@ -190,13 +197,15 @@ class Lock(LockBase):
     '''
 
     def __init__(
-            self,
-            filename: Filename,
-            mode: str = 'a',
-            timeout: float = None,
-            check_interval: float = DEFAULT_CHECK_INTERVAL,
-            fail_when_locked: bool = DEFAULT_FAIL_WHEN_LOCKED,
-            flags: constants.LockFlags = LOCK_METHOD, **file_open_kwargs):
+        self,
+        filename: Filename,
+        mode: str = 'a',
+        timeout: typing.Optional[float] = None,
+        check_interval: float = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: bool = DEFAULT_FAIL_WHEN_LOCKED,
+        flags: constants.LockFlags = LOCK_METHOD,
+        **file_open_kwargs,
+    ):
         if 'w' in mode:
             truncate = True
             mode = mode.replace('w', 'a')
@@ -206,7 +215,10 @@ class Lock(LockBase):
         if timeout is None:
             timeout = DEFAULT_TIMEOUT
         elif not (flags & constants.LockFlags.NON_BLOCKING):
-            warnings.warn('timeout has no effect in blocking mode')
+            warnings.warn(
+                'timeout has no effect in blocking mode',
+                stacklevel=1,
+            )
 
         self.fh: typing.Optional[typing.IO] = None
         self.filename: str = str(filename)
@@ -219,18 +231,26 @@ class Lock(LockBase):
         self.file_open_kwargs = file_open_kwargs
 
     def acquire(
-            self, timeout: float = None, check_interval: float = None,
-            fail_when_locked: bool = None) -> typing.IO:
+        self,
+        timeout: typing.Optional[float] = None,
+        check_interval: typing.Optional[float] = None,
+        fail_when_locked: typing.Optional[bool] = None,
+    ) -> typing.IO:
         '''Acquire the locked filehandle'''
 
         fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
 
-        if not (self.flags & constants.LockFlags.NON_BLOCKING) \
-                and timeout is not None:
-            warnings.warn('timeout has no effect in blocking mode')
+        if (
+            not (self.flags & constants.LockFlags.NON_BLOCKING)
+            and timeout is not None
+        ):
+            warnings.warn(
+                'timeout has no effect in blocking mode',
+                stacklevel=1,
+            )
 
         # If we already have a filehandle, return it
-        fh = self.fh
+        fh: typing.Optional[typing.IO] = self.fh
         if fh:
             return fh
 
@@ -239,10 +259,9 @@ class Lock(LockBase):
 
         def try_close():  # pragma: no cover
             # Silently try to close the handle if possible, ignore all issues
-            try:
-                fh.close()
-            except Exception:
-                pass
+            if fh is not None:
+                with contextlib.suppress(Exception):
+                    fh.close()
 
         exception = None
         # Try till the timeout has passed
@@ -261,7 +280,7 @@ class Lock(LockBase):
                 # If fail_when_locked is True, stop trying
                 if fail_when_locked:
                     try_close()
-                    raise exceptions.AlreadyLocked(exception)
+                    raise exceptions.AlreadyLocked(exception) from exc
 
                 # Wait a bit
 
@@ -285,7 +304,11 @@ class Lock(LockBase):
 
     def _get_fh(self) -> typing.IO:
         '''Get a new filehandle'''
-        return open(self.filename, self.mode, **self.file_open_kwargs)
+        return open(  # noqa: SIM115
+            self.filename,
+            self.mode,
+            **self.file_open_kwargs,
+        )
 
     def _get_lock(self, fh: typing.IO) -> typing.IO:
         '''
@@ -317,21 +340,34 @@ class RLock(Lock):
     '''
 
     def __init__(
-            self, filename, mode='a', timeout=DEFAULT_TIMEOUT,
-            check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=False,
-            flags=LOCK_METHOD):
-        super().__init__(filename, mode, timeout, check_interval,
-                         fail_when_locked, flags)
+        self,
+        filename,
+        mode='a',
+        timeout=DEFAULT_TIMEOUT,
+        check_interval=DEFAULT_CHECK_INTERVAL,
+        fail_when_locked=False,
+        flags=LOCK_METHOD,
+    ):
+        super().__init__(
+            filename,
+            mode,
+            timeout,
+            check_interval,
+            fail_when_locked,
+            flags,
+        )
         self._acquire_count = 0
 
     def acquire(
-            self, timeout: float = None, check_interval: float = None,
-            fail_when_locked: bool = None) -> typing.IO:
+        self,
+        timeout: typing.Optional[float] = None,
+        check_interval: typing.Optional[float] = None,
+        fail_when_locked: typing.Optional[bool] = None,
+    ) -> typing.IO:
         if self._acquire_count >= 1:
             fh = self.fh
         else:
-            fh = super().acquire(timeout, check_interval,
-                                 fail_when_locked)
+            fh = super().acquire(timeout, check_interval, fail_when_locked)
         self._acquire_count += 1
         assert fh
         return fh
@@ -339,7 +375,8 @@ class RLock(Lock):
     def release(self):
         if self._acquire_count == 0:
             raise exceptions.LockException(
-                "Cannot release more times than acquired")
+                'Cannot release more times than acquired',
+            )
 
         if self._acquire_count == 1:
             super().release()
@@ -347,13 +384,23 @@ class RLock(Lock):
 
 
 class TemporaryFileLock(Lock):
-
-    def __init__(self, filename='.lock', timeout=DEFAULT_TIMEOUT,
-                 check_interval=DEFAULT_CHECK_INTERVAL, fail_when_locked=True,
-                 flags=LOCK_METHOD):
-        Lock.__init__(self, filename=filename, mode='w', timeout=timeout,
-                      check_interval=check_interval,
-                      fail_when_locked=fail_when_locked, flags=flags)
+    def __init__(
+        self,
+        filename='.lock',
+        timeout=DEFAULT_TIMEOUT,
+        check_interval=DEFAULT_CHECK_INTERVAL,
+        fail_when_locked=True,
+        flags=LOCK_METHOD,
+    ):
+        Lock.__init__(
+            self,
+            filename=filename,
+            mode='w',
+            timeout=timeout,
+            check_interval=check_interval,
+            fail_when_locked=fail_when_locked,
+            flags=flags,
+        )
         atexit.register(self.release)
 
     def release(self):
@@ -377,17 +424,18 @@ class BoundedSemaphore(LockBase):
     >>> str(sorted(semaphore.get_random_filenames())[1])
     'bounded_semaphore.01.lock'
     '''
+
     lock: typing.Optional[Lock]
 
     def __init__(
-            self,
-            maximum: int,
-            name: str = 'bounded_semaphore',
-            filename_pattern: str = '{name}.{number:02d}.lock',
-            directory: str = tempfile.gettempdir(),
-            timeout: typing.Optional[float] = DEFAULT_TIMEOUT,
-            check_interval: typing.Optional[float] = DEFAULT_CHECK_INTERVAL,
-            fail_when_locked: typing.Optional[bool] = True,
+        self,
+        maximum: int,
+        name: str = 'bounded_semaphore',
+        filename_pattern: str = '{name}.{number:02d}.lock',
+        directory: str = tempfile.gettempdir(),
+        timeout: typing.Optional[float] = DEFAULT_TIMEOUT,
+        check_interval: typing.Optional[float] = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: typing.Optional[bool] = True,
     ):
         self.maximum = maximum
         self.name = name
@@ -415,10 +463,11 @@ class BoundedSemaphore(LockBase):
         )
 
     def acquire(
-            self,
-            timeout: float = None,
-            check_interval: float = None,
-            fail_when_locked: bool = None) -> typing.Optional[Lock]:
+        self,
+        timeout: typing.Optional[float] = None,
+        check_interval: typing.Optional[float] = None,
+        fail_when_locked: typing.Optional[bool] = None,
+    ) -> typing.Optional[Lock]:
         assert not self.lock, 'Already locked'
 
         filenames = self.get_filenames()
@@ -429,8 +478,10 @@ class BoundedSemaphore(LockBase):
             if self.try_lock(filenames):  # pragma: no branch
                 return self.lock  # pragma: no cover
 
-        fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
-        if fail_when_locked:
+        if fail_when_locked := coalesce(
+            fail_when_locked,
+            self.fail_when_locked,
+        ):
             raise exceptions.AlreadyLocked()
 
         return None
@@ -442,13 +493,15 @@ class BoundedSemaphore(LockBase):
             self.lock = Lock(filename, fail_when_locked=True)
             try:
                 self.lock.acquire()
-                logger.debug('locked %r', filename)
-                return True
             except exceptions.AlreadyLocked:
                 self.lock = None
+            else:
+                logger.debug('locked %r', filename)
+                return True
 
         return False
 
     def release(self):  # pragma: no cover
-        self.lock.release()
-        self.lock = None
+        if self.lock is not None:
+            self.lock.release()
+            self.lock = None

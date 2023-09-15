@@ -1,0 +1,100 @@
+[build-system]
+build-backend = 'setuptools.build_meta'
+requires = ['setuptools', 'setuptools-scm', 'wheel']
+
+[project]
+name = 'portalocker'
+dynamic = ['version']
+authors = [{name = 'Rick van Hattem', email = 'wolph@wol.ph'}]
+license = {text = 'BSD-3-Clause'}
+description = 'Wraps the portalocker recipe for easy usage'
+keywords = [
+    'locking',
+    'locks',
+    'with',
+    'statement',
+    'windows',
+    'linux',
+    'unix',
+]
+readme = 'README.rst'
+classifiers = [
+    'Development Status :: 5 - Production/Stable',
+    'Development Status :: 6 - Mature',
+    'Intended Audience :: Developers',
+    'License :: OSI Approved :: BSD License',
+    'Natural Language :: English',
+    'Operating System :: MacOS :: MacOS X',
+    'Operating System :: MacOS',
+    'Operating System :: Microsoft :: MS-DOS',
+    'Operating System :: Microsoft :: Windows',
+    'Operating System :: Microsoft',
+    'Operating System :: POSIX :: BSD :: FreeBSD',
+    'Operating System :: POSIX :: BSD',
+    'Operating System :: POSIX :: Linux',
+    'Operating System :: POSIX :: SunOS/Solaris',
+    'Operating System :: POSIX',
+    'Operating System :: Unix',
+    'Programming Language :: Python :: 3 :: Only',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3.10',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+    'Programming Language :: Python :: 3.8',
+    'Programming Language :: Python :: 3.9',
+    'Programming Language :: Python :: Implementation :: CPython',
+    'Programming Language :: Python :: Implementation :: IronPython',
+    'Programming Language :: Python :: Implementation :: PyPy',
+    'Programming Language :: Python :: Implementation',
+    'Programming Language :: Python',
+    'Topic :: Education :: Testing',
+    'Topic :: Office/Business',
+    'Topic :: Other/Nonlisted Topic',
+    'Topic :: Software Development :: Libraries :: Python Modules',
+    'Topic :: Software Development :: Libraries',
+    'Topic :: System :: Monitoring',
+]
+requires-python = '>=3.8'
+dependencies = ['pywin32>=226; platform_system == "Windows"']
+
+[project.urls]
+bugs = 'https://github.com/wolph/portalocker/issues'
+documentation = 'https://portalocker.readthedocs.io/en/latest/'
+repository = 'https://github.com/wolph/portalocker/'
+
+[project.optional-dependencies]
+docs = ['sphinx>=1.7.1']
+tests = [
+    'pytest>=5.4.1',
+    'pytest-cov>=2.8.1',
+    'pytest-timeout>=2.1.0',
+    'sphinx>=6.0.0',
+    'pytest-mypy>=0.8.0',
+    'types-redis',
+    'redis',
+]
+redis = ['redis']
+
+[tool.setuptools]
+platforms = ['any']
+include-package-data = false
+
+[tool.setuptools.dynamic]
+version = { attr = 'portalocker.__about__.__version__' }
+
+[tool.setuptools.packages.find]
+exclude = ['examples','portalocker_tests']
+
+[tool.setuptools.package-data]
+portalocker = ['py.typed', 'msvcrt.pyi']
+
+[tool.black]
+line-length = 79
+skip-string-normalization = true
+
+[tool.codespell]
+skip = '*/htmlcov,./docs/_build,*.asc'
+
+[tool.pyright]
+include = ['portalocker', 'portalocker_tests']
+exclude = ['dist/*']
