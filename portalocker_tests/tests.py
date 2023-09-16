@@ -173,7 +173,8 @@ def test_exlusive(tmpfile):
 
         # Make sure we can't write the locked file
         with pytest.raises(portalocker.LockException), open(
-            tmpfile, 'w+',
+            tmpfile,
+            'w+',
         ) as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.write('surprise and fear')
@@ -196,7 +197,8 @@ def test_shared(tmpfile):
 
         # Make sure we can't write the locked file
         with pytest.raises(portalocker.LockException), open(
-            tmpfile, 'w+',
+            tmpfile,
+            'w+',
         ) as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.write('surprise and fear')

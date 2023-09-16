@@ -20,6 +20,10 @@ if os.name == 'nt':  # pragma: no cover
     __overlapped = pywintypes.OVERLAPPED()
 
     def lock(file_: typing.Union[typing.IO, int], flags: LockFlags):
+        # Windows locking does not support locking through `fh.fileno()` so
+        # we cast it to make mypy and pyright happy
+        file_ = typing.cast(typing.IO, file_)
+
         mode = 0
         if flags & LockFlags.NON_BLOCKING:
             mode |= win32con.LOCKFILE_FAIL_IMMEDIATELY
@@ -27,8 +31,6 @@ if os.name == 'nt':  # pragma: no cover
         if flags & LockFlags.EXCLUSIVE:
             mode |= win32con.LOCKFILE_EXCLUSIVE_LOCK
 
-        # Windows locking does not support locking through `fh.fileno()`
-        assert isinstance(file_, typing.IO)
         # Save the old position so we can go back to that position but
         # still lock from the beginning of the file
         savepos = file_.tell()
