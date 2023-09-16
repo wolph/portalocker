@@ -1,15 +1,13 @@
 import sys
 
+from portalocker import __main__
+
 
 def test_combined(tmpdir):
-    from distutils import dist
-    import setup
-
     output_file = tmpdir.join('combined.py')
-    combine = setup.Combine(dist.Distribution())
-    combine.output_file = str(output_file)
-    combine.run()
+    __main__.main(['combine', '--output-file', output_file.strpath])
     sys.path.append(output_file.dirname)
-    import combined
-    assert combined
+    # Combined is being generated above but linters won't understand that
+    import combined  # type: ignore
 
+    assert combined

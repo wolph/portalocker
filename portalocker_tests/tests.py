@@ -1,36 +1,26 @@
-from __future__ import print_function
-from __future__ import with_statement
-
-import os
 import dataclasses
 import multiprocessing
+import os
 import time
 import typing
 
 import pytest
+
 import portalocker
-from portalocker import utils
-from portalocker import LockFlags
+from portalocker import LockFlags, utils
 
 
 def test_exceptions(tmpfile):
-    # Open the file 2 times
-    a = open(tmpfile, 'a')
-    b = open(tmpfile, 'a')
+    with open(tmpfile, 'a') as a, open(tmpfile, 'a') as b:
+        # Lock exclusive non-blocking
+        lock_flags = portalocker.LOCK_EX | portalocker.LOCK_NB
 
-    # Lock exclusive non-blocking
-    lock_flags = portalocker.LOCK_EX | portalocker.LOCK_NB
+        # First lock file a
+        portalocker.lock(a, lock_flags)
 
-    # First lock file a
-    portalocker.lock(a, lock_flags)
-
-    # Now see if we can lock file b
-    with pytest.raises(portalocker.LockException):
-        portalocker.lock(b, lock_flags)
-
-    # Cleanup
-    a.close()
-    b.close()
+        # Now see if we can lock file b
+        with pytest.raises(portalocker.LockException):
+            portalocker.lock(b, lock_flags)
 
 
 def test_utils_base():
@@ -44,8 +34,10 @@ def test_with_timeout(tmpfile):
         with portalocker.Lock(tmpfile, timeout=0.1) as fh:
             print('writing some stuff to my cache...', file=fh)
             with portalocker.Lock(
-                tmpfile, timeout=0.1, mode='wb',
-                fail_when_locked=True
+                tmpfile,
+                timeout=0.1,
+                mode='wb',
+                fail_when_locked=True,
             ):
                 pass
             print('writing more stuff to my cache...', file=fh)
@@ -74,18 +66,17 @@ def test_simple(tmpfile):
     with open(tmpfile, 'w') as fh:
         fh.write('spam and eggs')
 
-    fh = open(tmpfile, 'r+')
-    portalocker.lock(fh, portalocker.LOCK_EX)
+    with open(tmpfile, 'r+') as fh:
+        portalocker.lock(fh, portalocker.LOCK_EX)
 
-    fh.seek(13)
-    fh.write('foo')
+        fh.seek(13)
+        fh.write('foo')
 
-    # Make sure we didn't overwrite the original text
-    fh.seek(0)
-    assert fh.read(13) == 'spam and eggs'
+        # Make sure we didn't overwrite the original text
+        fh.seek(0)
+        assert fh.read(13) == 'spam and eggs'
 
-    portalocker.unlock(fh)
-    fh.close()
+        portalocker.unlock(fh)
 
 
 def test_truncate(tmpfile):
@@ -109,9 +100,8 @@ def test_class(tmpfile):
     with lock:
         lock.acquire()
 
-        with pytest.raises(portalocker.LockException):
-            with lock2:
-                pass
+        with pytest.raises(portalocker.LockException), lock2:
+            pass
 
     with lock2:
         pass
@@ -173,47 +163,48 @@ def test_exlusive(tmpfile):
     with open(tmpfile, 'w') as fh:
         fh.write('spam and eggs')
 
-    fh = open(tmpfile, 'r')
-    portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
+    with open(tmpfile) as fh:
+        portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
 
-    # Make sure we can't read the locked file
-    with pytest.raises(portalocker.LockException):
-        with open(tmpfile, 'r') as fh2:
+        # Make sure we can't read the locked file
+        with pytest.raises(portalocker.LockException), open(tmpfile) as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.read()
 
-    # Make sure we can't write the locked file
-    with pytest.raises(portalocker.LockException):
-        with open(tmpfile, 'w+') as fh2:
+        # Make sure we can't write the locked file
+        with pytest.raises(portalocker.LockException), open(
+            tmpfile,
+            'w+',
+        ) as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.write('surprise and fear')
 
-    # Make sure we can explicitly unlock the file
-    portalocker.unlock(fh)
-    fh.close()
+        # Make sure we can explicitly unlock the file
+        portalocker.unlock(fh)
 
 
 def test_shared(tmpfile):
     with open(tmpfile, 'w') as fh:
         fh.write('spam and eggs')
 
-    f = open(tmpfile, 'r')
-    portalocker.lock(f, portalocker.LOCK_SH | portalocker.LOCK_NB)
+    with open(tmpfile) as f:
+        portalocker.lock(f, portalocker.LOCK_SH | portalocker.LOCK_NB)
 
-    # Make sure we can read the locked file
-    with open(tmpfile, 'r') as fh2:
-        portalocker.lock(fh2, portalocker.LOCK_SH | portalocker.LOCK_NB)
-        assert fh2.read() == 'spam and eggs'
+        # Make sure we can read the locked file
+        with open(tmpfile) as fh2:
+            portalocker.lock(fh2, portalocker.LOCK_SH | portalocker.LOCK_NB)
+            assert fh2.read() == 'spam and eggs'
 
-    # Make sure we can't write the locked file
-    with pytest.raises(portalocker.LockException):
-        with open(tmpfile, 'w+') as fh2:
+        # Make sure we can't write the locked file
+        with pytest.raises(portalocker.LockException), open(
+            tmpfile,
+            'w+',
+        ) as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.write('surprise and fear')
 
-    # Make sure we can explicitly unlock the file
-    portalocker.unlock(f)
-    f.close()
+        # Make sure we can explicitly unlock the file
+        portalocker.unlock(f)
 
 
 def test_blocking_timeout(tmpfile):
@@ -228,12 +219,13 @@ def test_blocking_timeout(tmpfile):
         lock.acquire(timeout=5)
 
 
-@pytest.mark.skipif(os.name == 'nt',
-                    reason='Windows uses an entirely different lockmechanism')
+@pytest.mark.skipif(
+    os.name == 'nt',
+    reason='Windows uses an entirely different lockmechanism',
+)
 def test_nonblocking(tmpfile):
-    with open(tmpfile, 'w') as fh:
-        with pytest.raises(RuntimeError):
-            portalocker.lock(fh, LockFlags.NON_BLOCKING)
+    with open(tmpfile, 'w') as fh, pytest.raises(RuntimeError):
+        portalocker.lock(fh, LockFlags.NON_BLOCKING)
 
 
 def shared_lock(filename, **kwargs):
@@ -279,7 +271,7 @@ class LockResult:
 def lock(
     filename: str,
     fail_when_locked: bool,
-    flags: LockFlags
+    flags: LockFlags,
 ) -> LockResult:
     # Returns a case of True, False or FileNotFound
     # https://thedailywtf.com/articles/what_is_truth_0x3f_
@@ -328,8 +320,8 @@ def test_exclusive_processes(tmpfile, fail_when_locked):
 
         assert not a.exception_class or not b.exception_class
         assert issubclass(
-            a.exception_class or b.exception_class,
-            portalocker.LockException
+            a.exception_class or b.exception_class,  # type: ignore
+            portalocker.LockException,
         )
 
 
@@ -338,20 +330,13 @@ def test_exclusive_processes(tmpfile, fail_when_locked):
     reason='Locking on Windows requires a file object',
 )
 def test_lock_fileno(tmpfile):
-    # Open the file 2 times
-    a = open(tmpfile, 'a')
-    b = open(tmpfile, 'a')
+    with open(tmpfile, 'a') as a:
+        with open(tmpfile, 'a') as b:
+            # Lock exclusive non-blocking
+            flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
 
-    # Lock exclusive non-blocking
-    flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
+            # First lock file a
+            portalocker.lock(a, flags)
 
-    # First lock file a
-    portalocker.lock(a, flags)
-
-    # Now see if we can lock using fileno()
-    portalocker.lock(b.fileno(), flags)
-
-    # Cleanup
-    a.close()
-    b.close()
-
+            # Now see if we can lock using fileno()
+            portalocker.lock(b.fileno(), flags)
