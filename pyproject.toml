@@ -83,7 +83,7 @@ include-package-data = false
 version = { attr = 'portalocker.__about__.__version__' }
 
 [tool.setuptools.packages.find]
-exclude = ['examples','portalocker_tests']
+exclude = ['docs','portalocker_tests']
 
 [tool.setuptools.package-data]
 portalocker = ['py.typed', 'msvcrt.pyi']
