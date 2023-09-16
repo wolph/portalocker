@@ -413,10 +413,10 @@ class BoundedSemaphore(LockBase):
     '''
     Bounded semaphore to prevent too many parallel processes from running
 
-    It's also possible to specify a timeout when acquiring the lock to wait
-    for a resource to become available.  This is very similar to
-    threading.BoundedSemaphore but works across multiple processes and across
-    multiple operating systems.
+    This method is deprecated because multiple processes that are completely
+    unrelated could end up using the same semaphore.  To prevent this,
+    use `NamedBoundedSemaphore` instead. The
+    `NamedBoundedSemaphore` is a drop-in replacement for this class.
 
     >>> semaphore = BoundedSemaphore(2, directory='')
     >>> str(semaphore.get_filenames()[0])
@@ -447,6 +447,13 @@ class BoundedSemaphore(LockBase):
             check_interval=check_interval,
             fail_when_locked=fail_when_locked,
         )
+
+        if not name or name == 'bounded_semaphore':
+            warnings.warn(
+                '`BoundedSemaphore` without an explicit `name` '
+                'argument is deprecated, use NamedBoundedSemaphore',
+                DeprecationWarning,
+            )
 
     def get_filenames(self) -> typing.Sequence[pathlib.Path]:
         return [self.get_filename(n) for n in range(self.maximum)]
@@ -505,3 +512,51 @@ class BoundedSemaphore(LockBase):
         if self.lock is not None:
             self.lock.release()
             self.lock = None
+
+
+class NamedBoundedSemaphore(BoundedSemaphore):
+    '''
+    Bounded semaphore to prevent too many parallel processes from running
+
+    It's also possible to specify a timeout when acquiring the lock to wait
+    for a resource to become available.  This is very similar to
+    `threading.BoundedSemaphore` but works across multiple processes and across
+    multiple operating systems.
+
+    Because this works across multiple processes it's important to give the
+    semaphore a name.  This name is used to create the lock files.  If you
+    don't specify a name, a random name will be generated.  This means that
+    you can't use the same semaphore in multiple processes unless you pass the
+    semaphore object to the other processes.
+
+    >>> semaphore = NamedBoundedSemaphore(2, name='test')
+    >>> str(semaphore.get_filenames()[0])
+    '...test.00.lock'
+
+    >>> semaphore = NamedBoundedSemaphore(2)
+    >>> 'bounded_semaphore' in str(semaphore.get_filenames()[0])
+    True
+
+    '''
+
+    def __init__(
+        self,
+        maximum: int,
+        name: typing.Optional[str] = None,
+        filename_pattern: str = '{name}.{number:02d}.lock',
+        directory: str = tempfile.gettempdir(),
+        timeout: typing.Optional[float] = DEFAULT_TIMEOUT,
+        check_interval: typing.Optional[float] = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: typing.Optional[bool] = True,
+    ):
+        if name is None:
+            name = 'bounded_semaphore.%d' % random.randint(0, 1000000)
+        super().__init__(
+            maximum,
+            name,
+            filename_pattern,
+            directory,
+            timeout,
+            check_interval,
+            fail_when_locked,
+        )
