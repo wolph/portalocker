@@ -453,6 +453,7 @@ class BoundedSemaphore(LockBase):
                 '`BoundedSemaphore` without an explicit `name` '
                 'argument is deprecated, use NamedBoundedSemaphore',
                 DeprecationWarning,
+                stacklevel=1,
             )
 
     def get_filenames(self) -> typing.Sequence[pathlib.Path]:
