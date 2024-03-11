@@ -88,11 +88,9 @@ if os.name == 'nt':  # pragma: no cover
 
 elif os.name == 'posix':  # pragma: no cover
     import fcntl
+    import errno
 
     def lock(file_: typing.Union[typing.IO, int], flags: LockFlags):
-        locking_exceptions = (IOError,)
-        with contextlib.suppress(NameError):
-            locking_exceptions += (BlockingIOError,)  # type: ignore
         # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled results
         # in an error
         if (flags & LockFlags.NON_BLOCKING) and not flags & (
@@ -105,10 +103,18 @@ elif os.name == 'posix':  # pragma: no cover
 
         try:
             fcntl.flock(file_, flags)
-        except locking_exceptions as exc_value:
-            # The exception code varies on different systems so we'll catch
-            # every IO error
-            raise exceptions.LockException(exc_value, fh=file_) from exc_value
+        except OSError as exc_value:
+            # Python can use one of several different exception classes to represent
+            # timeout (most likely is BlockingIOError and IOError), but these errors
+            # may also represent other failures. On some systems, `IOError is OSError`
+            # which means checking for either IOError or OSError can mask other errors.
+            # The safest check is to catch OSError (from which the others inherit)
+            # and check the errno (which should be EACCESS or EAGAIN according to the
+            # spec).
+            if exc_value.errno in (errno.EACCES, errno.EAGAIN):
+                raise exceptions.LockException(exc_value, fh=file_) from exc_value
+            else:
+                raise
 
     def unlock(file_: typing.IO):
         fcntl.flock(file_.fileno(), LockFlags.UNBLOCK)
