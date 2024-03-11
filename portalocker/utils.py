@@ -287,7 +287,7 @@ class Lock(LockBase):
         if exception:
             try_close()
             # We got a timeout... reraising
-            raise exceptions.LockException(exception)
+            raise exception
 
         # Prepare the filehandle (truncate if needed)
         fh = self._prepare_fh(fh)
