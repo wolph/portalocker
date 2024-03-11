@@ -90,6 +90,11 @@ elif os.name == 'posix':  # pragma: no cover
     import fcntl
     import errno
 
+    # The locking implementation.
+    # Expected values are either fcntl.flock() or fcntl.lockf(),
+    # but any callable that matches the syntax will be accepted.
+    LOCKER = fcntl.flock
+
     def lock(file_: typing.Union[typing.IO, int], flags: LockFlags):
         # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled results
         # in an error
@@ -102,7 +107,7 @@ elif os.name == 'posix':  # pragma: no cover
             )
 
         try:
-            fcntl.flock(file_, flags)
+            LOCKER(file_, flags)
         except OSError as exc_value:
             # Python can use one of several different exception classes to represent
             # timeout (most likely is BlockingIOError and IOError), but these errors
@@ -117,7 +122,8 @@ elif os.name == 'posix':  # pragma: no cover
                 raise
 
     def unlock(file_: typing.IO):
-        fcntl.flock(file_.fileno(), LockFlags.UNBLOCK)
+        LOCKER(file_.fileno(), LockFlags.UNBLOCK)
+
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')
