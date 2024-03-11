@@ -163,11 +163,11 @@ def test_exlusive(tmpfile):
     with open(tmpfile, 'w') as fh:
         fh.write('spam and eggs')
 
-    with open(tmpfile) as fh:
+    with open(tmpfile, "w") as fh:
         portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
 
         # Make sure we can't read the locked file
-        with pytest.raises(portalocker.LockException), open(tmpfile) as fh2:
+        with pytest.raises(portalocker.LockException), open(tmpfile, "r+") as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.read()
 
@@ -211,10 +211,10 @@ def test_blocking_timeout(tmpfile):
     flags = LockFlags.SHARED
 
     with pytest.warns(UserWarning):
-        with portalocker.Lock(tmpfile, timeout=5, flags=flags):
+        with portalocker.Lock(tmpfile, "a+", timeout=5, flags=flags):
             pass
 
-    lock = portalocker.Lock(tmpfile, flags=flags)
+    lock = portalocker.Lock(tmpfile, "a+", flags=flags)
     with pytest.warns(UserWarning):
         lock.acquire(timeout=5)
 
@@ -330,9 +330,9 @@ def test_exclusive_processes(tmpfile, fail_when_locked):
     reason='Locking on Windows requires a file object',
 )
 def test_lock_fileno(tmpfile):
-    with open(tmpfile, 'a') as a:
-        with open(tmpfile, 'a') as b:
-            # Lock exclusive non-blocking
+    with open(tmpfile, 'a+') as a:
+        with open(tmpfile, 'a+') as b:
+            # Lock shared non-blocking
             flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
 
             # First lock file a
