@@ -281,13 +281,18 @@ class Lock(LockBase):
                 if fail_when_locked:
                     try_close()
                     raise exceptions.AlreadyLocked(exception) from exc
+            except Exception as exc:
+                # Something went wrong with the locking mechanism.
+                # Wrap in a LockException and re-raise:
+                try_close()
+                raise exceptions.LockException(exc) from exc
 
-                # Wait a bit
+            # Wait a bit
 
         if exception:
             try_close()
             # We got a timeout... reraising
-            raise exceptions.LockException(exception)
+            raise exception
 
         # Prepare the filehandle (truncate if needed)
         fh = self._prepare_fh(fh)
