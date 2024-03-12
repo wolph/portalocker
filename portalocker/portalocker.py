@@ -117,8 +117,13 @@ elif os.name == 'posix':  # pragma: no cover
             # and check the errno (which should be EACCESS or EAGAIN according to the
             # spec).
             if exc_value.errno in (errno.EACCES, errno.EAGAIN):
+                # A timeout exception, wrap this so the outer code knows to try again
+                # (if it wants to).
+                # TODO: Would AlreadyLocked by a better error to raise here? Or perhaps
+                # a new exception class like TryAgain?
                 raise exceptions.LockException(exc_value, fh=file_) from exc_value
             else:
+                # Something else went wrong; don't wrap this so we stop immediately.
                 raise
 
     def unlock(file_: typing.IO):
