@@ -419,14 +419,14 @@ def test_locker_mechanism(tmpfile, locker):
         else:
             raise Exception("Update test")
         
-@pytest.mark.skipif(
-    os.name == 'nt',
-    reason='Windows has a different locking mechanism',
-)
-def test_exception(tmpfile):
+
+def test_exception(monkeypatch, tmpfile):
     """Do we stop immediately if the locking fails, even with a timeout?"""
-    # NON_BLOCKING is not allowed by itself
-    lock = portalocker.Lock(tmpfile, "w", timeout = math.inf, flags = LockFlags.NON_BLOCKING)
+    def patched_lock(*args, **kwargs):
+        raise ValueError("Test exception")
+
+    monkeypatch.setattr('portalocker.utils.portalocker.lock', patched_lock)
+    lock = portalocker.Lock(tmpfile, "w", timeout = math.inf)
 
     with pytest.raises(exceptions.LockException):
         lock.acquire()
