@@ -408,11 +408,11 @@ def test_locker_mechanism(tmpfile, locker):
     # the same file.
     with portalocker.Lock(tmpfile, "a+", flags = LockFlags.EXCLUSIVE) as a:
         # If we have flock(), we cannot get another lock on the same file.
-        if locker is 'flock':
+        if locker == 'flock':
             with pytest.raises(portalocker.LockException):
                 portalocker.Lock(tmpfile, "r+", flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING).acquire()
         
-        elif locker is 'lockf':
+        elif locker == 'lockf':
             # But on lockf, we can!
             portalocker.Lock(tmpfile, "r+", flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING).acquire()
             
