@@ -4,6 +4,8 @@ import os
 import time
 import typing
 import portalocker.portalocker
+from portalocker import exceptions
+import math
 
 import pytest
 
@@ -416,3 +418,11 @@ def test_locker_mechanism(tmpfile, locker):
             
         else:
             raise Exception("Update test")
+
+def test_exception(tmpfile):
+    """Do we stop immediately if the locking fails, even with a timeout?"""
+    # NON_BLOCKING is not allowed by itself
+    lock = portalocker.Lock(tmpfile, "w", timeout = math.inf, flags = LockFlags.NON_BLOCKING)
+
+    with pytest.raises(exceptions.LockException):
+        lock.acquire()
