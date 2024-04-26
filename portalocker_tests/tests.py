@@ -3,7 +3,6 @@ import multiprocessing
 import os
 import time
 import typing
-import fcntl
 import portalocker.portalocker
 
 import pytest
@@ -15,11 +14,25 @@ from portalocker import LockFlags, utils
 @pytest.fixture
 def locker(request):
     # Setup
-    locker = portalocker.portalocker.LOCKER
-    portalocker.portalocker.LOCKER = request.param
+    if os.name == 'posix':
+        import fcntl
+        old_locker = portalocker.portalocker.LOCKER
+        if request.param == "flock":
+            new_locker = fcntl.flock
+        
+        elif request.param == 'lockf':
+            new_locker = fcntl.lockf
+        
+        else:
+            raise ValueError("Unrecognised locking mechanism '{}'".format(request.param))
+
+        portalocker.portalocker.LOCKER = new_locker
+
     yield request.param
+
     # Teardown.
-    portalocker.portalocker.LOCKER = locker
+    if os.name == 'posix':
+        portalocker.portalocker.LOCKER = old_locker
 
 
 def test_exceptions(tmpfile):
@@ -221,9 +234,9 @@ def test_shared(tmpfile):
 @pytest.mark.parametrize(
         'locker',
         [
-            fcntl.flock,
+            'flock',
             pytest.param(
-                fcntl.lockf, marks=pytest.mark.skipif(os.name == "nt", reason = "lockf() is not available on windows"))
+                'lockf', marks=pytest.mark.skipif(os.name == "nt", reason = "lockf() is not available on windows"))
         ],
         indirect=['locker']
 )
@@ -243,7 +256,7 @@ def test_blocking_timeout(tmpfile, locker):
     os.name == 'nt',
     reason='Windows uses an entirely different lockmechanism',
 )
-@pytest.mark.parametrize('locker', [fcntl.flock, fcntl.lockf], indirect=['locker'])
+@pytest.mark.parametrize('locker', ['flock', 'lockf'], indirect=['locker'])
 def test_nonblocking(tmpfile, locker):
     with open(tmpfile, 'w') as fh, pytest.raises(RuntimeError):
         portalocker.lock(fh, LockFlags.NON_BLOCKING)
@@ -321,9 +334,9 @@ def lock(
 @pytest.mark.parametrize(
         'locker',
         [
-            fcntl.flock,
+            'flock',
             pytest.param(
-                fcntl.lockf, marks=pytest.mark.skipif(os.name == "nt", reason = "lockf() is not available on windows"))
+                'lockf', marks=pytest.mark.skipif(os.name == "nt", reason = "lockf() is not available on windows"))
         ],
         indirect=['locker']
 )
@@ -342,9 +355,9 @@ def test_shared_processes(tmpfile, fail_when_locked, locker):
 @pytest.mark.parametrize(
         'locker',
         [
-            fcntl.flock,
+            'flock',
             pytest.param(
-                fcntl.lockf, marks=pytest.mark.skipif(os.name == "nt", reason = "lockf() is not available on windows"))
+                'lockf', marks=pytest.mark.skipif(os.name == "nt", reason = "lockf() is not available on windows"))
         ],
         indirect=['locker']
 )
@@ -368,7 +381,7 @@ def test_exclusive_processes(tmpfile, fail_when_locked, locker):
     os.name == 'nt',
     reason='Locking on Windows requires a file object',
 )
-@pytest.mark.parametrize('locker', [fcntl.flock, fcntl.lockf], indirect=['locker'])
+@pytest.mark.parametrize('locker', ['flock', 'lockf'], indirect=['locker'])
 def test_lock_fileno(tmpfile, locker):
     with open(tmpfile, 'a+') as a:
         with open(tmpfile, 'a+') as b:
@@ -386,18 +399,18 @@ def test_lock_fileno(tmpfile, locker):
     os.name == 'nt',
     reason='Windows only has one locking mechanism',
 )
-@pytest.mark.parametrize('locker', [fcntl.flock, fcntl.lockf], indirect=['locker'])
+@pytest.mark.parametrize('locker', ['flock', 'lockf'], indirect=['locker'])
 def test_locker_mechanism(tmpfile, locker):
     """Can we switch the locking mechanism?"""
     # We can test for flock vs lockf based on their different behaviour re. locking
     # the same file.
     with portalocker.Lock(tmpfile, "a+", flags = LockFlags.EXCLUSIVE) as a:
         # If we have flock(), we cannot get another lock on the same file.
-        if locker is fcntl.flock:
+        if locker is 'flock':
             with pytest.raises(portalocker.LockException):
                 portalocker.Lock(tmpfile, "r+", flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING).acquire()
         
-        elif locker is fcntl.lockf:
+        elif locker is 'lockf':
             # But on lockf, we can!
             portalocker.Lock(tmpfile, "r+", flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING).acquire()
             
