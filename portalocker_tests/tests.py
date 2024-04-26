@@ -418,7 +418,11 @@ def test_locker_mechanism(tmpfile, locker):
             
         else:
             raise Exception("Update test")
-
+        
+@pytest.mark.skipif(
+    os.name == 'nt',
+    reason='Windows has a different locking mechanism',
+)
 def test_exception(tmpfile):
     """Do we stop immediately if the locking fails, even with a timeout?"""
     # NON_BLOCKING is not allowed by itself
