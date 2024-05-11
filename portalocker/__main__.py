@@ -53,6 +53,7 @@ def _read_file(path: pathlib.Path, seen_files: typing.Set[pathlib.Path]):
         if match := _RELATIVE_IMPORT_RE.match(line):
             from_ = match.group('from')
             if from_:
+                names.add(from_)
                 yield from _read_file(src_path / f'{from_}.py', seen_files)
             else:
                 for name in match.group('names').split(','):
