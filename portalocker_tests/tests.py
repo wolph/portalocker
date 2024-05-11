@@ -351,6 +351,8 @@ def test_shared_processes(tmpfile, fail_when_locked, locker):
         results = pool.starmap_async(lock, 2 * [args])
 
         for result in results.get(timeout=3):
+            if result.exception_class != None:
+                raise result.exception_class
             assert result == LockResult()
 
 
