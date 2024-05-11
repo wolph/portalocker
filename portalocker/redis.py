@@ -131,7 +131,7 @@ class RedisLock(utils.LockBase):
         timeout: typing.Optional[float] = None,
         check_interval: typing.Optional[float] = None,
         fail_when_locked: typing.Optional[bool] = None,
-    ):
+    ) -> 'RedisLock':
         timeout = utils.coalesce(timeout, self.timeout, 0.0)
         check_interval = utils.coalesce(
             check_interval,
