@@ -1,4 +1,3 @@
-import contextlib
 import os
 import typing
 
@@ -87,8 +86,8 @@ if os.name == 'nt':  # pragma: no cover
             ) from exc
 
 elif os.name == 'posix':  # pragma: no cover
-    import fcntl
     import errno
+    import fcntl
 
     # The locking implementation.
     # Expected values are either fcntl.flock() or fcntl.lockf(),
@@ -109,26 +108,35 @@ elif os.name == 'posix':  # pragma: no cover
         try:
             LOCKER(file_, flags)
         except OSError as exc_value:
-            # Python can use one of several different exception classes to represent
-            # timeout (most likely is BlockingIOError and IOError), but these errors
-            # may also represent other failures. On some systems, `IOError is OSError`
-            # which means checking for either IOError or OSError can mask other errors.
-            # The safest check is to catch OSError (from which the others inherit)
-            # and check the errno (which should be EACCESS or EAGAIN according to the
-            # spec).
+            # Python can use one of several different exception classes to
+            # represent timeout (most likely is BlockingIOError and IOError),
+            # but these errors may also represent other failures. On some
+            # systems, `IOError is OSError` which means checking for either
+            # IOError or OSError can mask other errors.
+            # The safest check is to catch OSError (from which the others
+            # inherit) and check the errno (which should be EACCESS or EAGAIN
+            # according to the spec).
             if exc_value.errno in (errno.EACCES, errno.EAGAIN):
-                # A timeout exception, wrap this so the outer code knows to try again
-                # (if it wants to).
-                # TODO: Would AlreadyLocked by a better error to raise here? Or perhaps
-                # a new exception class like TryAgain?
-                raise exceptions.LockException(exc_value, fh=file_) from exc_value
+                # A timeout exception, wrap this so the outer code knows to try
+                # again (if it wants to).
+                raise exceptions.AlreadyLocked(
+                    exc_value, fh=file_,
+                ) from exc_value
             else:
-                # Something else went wrong; don't wrap this so we stop immediately.
-                raise
+                # Something else went wrong; don't wrap this so we stop
+                # immediately.
+                raise exceptions.LockException(
+                    exc_value, fh=file_,
+                ) from exc_value
+        except EOFError as exc_value:
+            # On NFS filesystems, flock can raise an EOFError
+            raise exceptions.LockException(
+                exc_value,
+                fh=file_,
+            ) from exc_value
 
     def unlock(file_: typing.IO):
         LOCKER(file_.fileno(), LockFlags.UNBLOCK)
-
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')

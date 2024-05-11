@@ -6,6 +6,9 @@ target-version = 'py38'
 src = ['portalocker']
 exclude = ['docs']
 
+line-length = 80
+
+[lint]
 ignore = [
     'A001', # Variable {name} is shadowing a Python builtin
     'A002', # Argument {name} is shadowing a Python builtin
@@ -25,7 +28,6 @@ ignore = [
     'FA100', # Missing `from __future__ import annotations`, but uses `typing.Optional`
 ]
 
-line-length = 80
 select = [
     'A', # flake8-builtins
     'ASYNC', # flake8 async checker
@@ -59,19 +61,19 @@ select = [
     'UP', # pyupgrade
 ]
 
-[per-file-ignores]
+[lint.per-file-ignores]
 'portalocker_tests/tests.py' = ['SIM115', 'SIM117']
 
-[pydocstyle]
+[lint.pydocstyle]
 convention = 'google'
 ignore-decorators = ['typing.overload']
 
-[isort]
+[lint.isort]
 case-sensitive = true
 combine-as-imports = true
 force-wrap-aliases = true
 
-[flake8-quotes]
+[lint.flake8-quotes]
 docstring-quotes = 'single'
 inline-quotes = 'single'
 multiline-quotes = 'single'

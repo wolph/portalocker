@@ -132,8 +132,7 @@ class LockBase(abc.ABC):  # pragma: no cover
         timeout: typing.Optional[float] = None,
         check_interval: typing.Optional[float] = None,
         fail_when_locked: typing.Optional[bool] = None,
-    ) -> typing.Union['LockBase', typing.IO[typing.AnyStr]]:
-        ...
+    ) -> typing.Union['LockBase', typing.IO[typing.AnyStr]]: ...
 
     def _timeout_generator(
         self,
@@ -156,11 +155,9 @@ class LockBase(abc.ABC):  # pragma: no cover
             time.sleep(max(0.001, (i * f_check_interval) - since_start_time))
 
     @abc.abstractmethod
-    def release(self):
-        ...
+    def release(self): ...
 
-
-    def __enter__(self):
+    def __enter__(self) -> typing.Union['LockBase', typing.IO[typing.AnyStr]]:
         return self.acquire()
 
     def __exit__(
@@ -236,7 +233,7 @@ class Lock(LockBase):
         timeout: typing.Optional[float] = None,
         check_interval: typing.Optional[float] = None,
         fail_when_locked: typing.Optional[bool] = None,
-    ) -> typing.IO:
+    ) -> typing.IO[typing.AnyStr]:
         '''Acquire the locked filehandle'''
 
         fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
@@ -300,6 +297,9 @@ class Lock(LockBase):
 
         self.fh = fh
         return fh
+
+    def __enter__(self) -> typing.IO[typing.AnyStr]:
+        return self.acquire()
 
     def release(self):
         '''Releases the currently locked file handle'''

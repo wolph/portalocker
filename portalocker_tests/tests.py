@@ -1,16 +1,15 @@
 import dataclasses
+import math
 import multiprocessing
 import os
 import time
 import typing
-import portalocker.portalocker
-from portalocker import exceptions
-import math
 
 import pytest
 
 import portalocker
-from portalocker import LockFlags, utils
+import portalocker.portalocker
+from portalocker import LockFlags, exceptions, utils
 
 
 @pytest.fixture
@@ -18,15 +17,18 @@ def locker(request):
     # Setup
     if os.name == 'posix':
         import fcntl
+
         old_locker = portalocker.portalocker.LOCKER
-        if request.param == "flock":
+        if request.param == 'flock':
             new_locker = fcntl.flock
-        
+
         elif request.param == 'lockf':
             new_locker = fcntl.lockf
-        
+
         else:
-            raise ValueError("Unrecognised locking mechanism '{}'".format(request.param))
+            raise ValueError(
+                f'Unrecognised locking mechanism {request.param!r}',
+            )
 
         portalocker.portalocker.LOCKER = new_locker
 
@@ -187,16 +189,19 @@ def test_release_unacquired(tmpfile):
 
 
 def test_exlusive(tmpfile):
+    text_0 = 'spam and eggs'
     with open(tmpfile, 'w') as fh:
-        fh.write('spam and eggs')
+        fh.write(text_0)
 
-    with open(tmpfile, "w") as fh:
+    with open(tmpfile) as fh:
         portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
 
         # Make sure we can't read the locked file
-        with pytest.raises(portalocker.LockException), open(tmpfile, "r+") as fh2:
+        with pytest.raises(portalocker.LockException), open(
+            tmpfile, 'r+',
+        ) as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
-            fh2.read()
+            assert fh2.read() == text_0
 
         # Make sure we can't write the locked file
         with pytest.raises(portalocker.LockException), open(
@@ -233,23 +238,28 @@ def test_shared(tmpfile):
         # Make sure we can explicitly unlock the file
         portalocker.unlock(f)
 
+
 @pytest.mark.parametrize(
-        'locker',
-        [
-            'flock',
-            pytest.param(
-                'lockf', marks=pytest.mark.skipif(os.name == "nt", reason = "lockf() is not available on windows"))
-        ],
-        indirect=['locker']
+    'locker',
+    [
+        'flock',
+        pytest.param(
+            'lockf',
+            marks=pytest.mark.skipif(
+                os.name == 'nt', reason='lockf() is not available on windows',
+            ),
+        ),
+    ],
+    indirect=['locker'],
 )
 def test_blocking_timeout(tmpfile, locker):
     flags = LockFlags.SHARED
 
     with pytest.warns(UserWarning):
-        with portalocker.Lock(tmpfile, "a+", timeout=5, flags=flags):
+        with portalocker.Lock(tmpfile, 'a+', timeout=5, flags=flags):
             pass
 
-    lock = portalocker.Lock(tmpfile, "a+", flags=flags)
+    lock = portalocker.Lock(tmpfile, 'a+', flags=flags)
     with pytest.warns(UserWarning):
         lock.acquire(timeout=5)
 
@@ -334,13 +344,17 @@ def lock(
 
 
 @pytest.mark.parametrize(
-        'locker',
-        [
-            'flock',
-            pytest.param(
-                'lockf', marks=pytest.mark.skipif(os.name == "nt", reason = "lockf() is not available on windows"))
-        ],
-        indirect=['locker']
+    'locker',
+    [
+        'flock',
+        pytest.param(
+            'lockf',
+            marks=pytest.mark.skipif(
+                os.name == 'nt', reason='lockf() is not available on windows',
+            ),
+        ),
+    ],
+    indirect=['locker'],
 )
 @pytest.mark.parametrize('fail_when_locked', [True, False])
 def test_shared_processes(tmpfile, fail_when_locked, locker):
@@ -351,19 +365,23 @@ def test_shared_processes(tmpfile, fail_when_locked, locker):
         results = pool.starmap_async(lock, 2 * [args])
 
         for result in results.get(timeout=3):
-            if result.exception_class != None:
+            if result.exception_class is not None:
                 raise result.exception_class
             assert result == LockResult()
 
 
 @pytest.mark.parametrize(
-        'locker',
-        [
-            'flock',
-            pytest.param(
-                'lockf', marks=pytest.mark.skipif(os.name == "nt", reason = "lockf() is not available on windows"))
-        ],
-        indirect=['locker']
+    'locker',
+    [
+        'flock',
+        pytest.param(
+            'lockf',
+            marks=pytest.mark.skipif(
+                os.name == 'nt', reason='lockf() is not available on windows',
+            ),
+        ),
+    ],
+    indirect=['locker'],
 )
 @pytest.mark.parametrize('fail_when_locked', [True, False])
 def test_exclusive_processes(tmpfile, fail_when_locked, locker):
@@ -405,30 +423,39 @@ def test_lock_fileno(tmpfile, locker):
 )
 @pytest.mark.parametrize('locker', ['flock', 'lockf'], indirect=['locker'])
 def test_locker_mechanism(tmpfile, locker):
-    """Can we switch the locking mechanism?"""
-    # We can test for flock vs lockf based on their different behaviour re. locking
-    # the same file.
-    with portalocker.Lock(tmpfile, "a+", flags = LockFlags.EXCLUSIVE) as a:
+    '''Can we switch the locking mechanism?'''
+    # We can test for flock vs lockf based on their different behaviour re.
+    # locking the same file.
+    with portalocker.Lock(tmpfile, 'a+', flags=LockFlags.EXCLUSIVE):
         # If we have flock(), we cannot get another lock on the same file.
         if locker == 'flock':
             with pytest.raises(portalocker.LockException):
-                portalocker.Lock(tmpfile, "r+", flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING).acquire()
-        
+                portalocker.Lock(
+                    tmpfile,
+                    'r+',
+                    flags=LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING,
+                ).acquire()
+
         elif locker == 'lockf':
             # But on lockf, we can!
-            portalocker.Lock(tmpfile, "r+", flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING).acquire()
-            
+            portalocker.Lock(
+                tmpfile,
+                'r+',
+                flags=LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING,
+            ).acquire()
+
         else:
-            raise Exception("Update test")
-        
+            raise RuntimeError('Update test')
+
 
 def test_exception(monkeypatch, tmpfile):
-    """Do we stop immediately if the locking fails, even with a timeout?"""
+    '''Do we stop immediately if the locking fails, even with a timeout?'''
+
     def patched_lock(*args, **kwargs):
-        raise ValueError("Test exception")
+        raise ValueError('Test exception')
 
     monkeypatch.setattr('portalocker.utils.portalocker.lock', patched_lock)
-    lock = portalocker.Lock(tmpfile, "w", timeout = math.inf)
+    lock = portalocker.Lock(tmpfile, 'w', timeout=math.inf)
 
     with pytest.raises(exceptions.LockException):
         lock.acquire()

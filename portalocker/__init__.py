@@ -1,4 +1,5 @@
-from . import __about__, constants, exceptions, portalocker, utils
+from . import __about__, constants, exceptions, portalocker
+from .utils import BoundedSemaphore, Lock, RLock, TemporaryFileLock, open_atomic
 
 try:  # pragma: no cover
     from .redis import RedisLock
@@ -52,11 +53,6 @@ LockFlags = constants.LockFlags
 
 #: Locking utility class to automatically handle opening with timeouts and
 #: context wrappers
-Lock = utils.Lock
-RLock = utils.RLock
-BoundedSemaphore = utils.BoundedSemaphore
-TemporaryFileLock = utils.TemporaryFileLock
-open_atomic = utils.open_atomic
 
 __all__ = [
     'lock',
@@ -71,6 +67,7 @@ __all__ = [
     'RLock',
     'AlreadyLocked',
     'BoundedSemaphore',
+    'TemporaryFileLock',
     'open_atomic',
     'RedisLock',
 ]

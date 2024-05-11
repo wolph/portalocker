@@ -9,7 +9,7 @@ src_path = base_path / 'portalocker'
 dist_path = base_path / 'dist'
 _default_output_path = base_path / 'dist' / 'portalocker.py'
 
-_RELATIVE_IMPORT_RE = re.compile(r'^from \. import (?P<names>.+)$')
+_RELATIVE_IMPORT_RE = re.compile(r'^from \.(?P<from>.*?) import (?P<names>.+)$')
 _USELESS_ASSIGNMENT_RE = re.compile(r'^(?P<name>\w+) = \1\n$')
 
 _TEXT_TEMPLATE = """'''
@@ -50,10 +50,14 @@ def _read_file(path, seen_files):
     seen_files.add(path)
     for line in path.open():
         if match := _RELATIVE_IMPORT_RE.match(line):
-            for name in match.group('names').split(','):
-                name = name.strip()
-                names.add(name)
-                yield from _read_file(src_path / f'{name}.py', seen_files)
+            from_ = match.group('from')
+            if from_:
+                yield from _read_file(src_path / f'{from_}.py', seen_files)
+            else:
+                for name in match.group('names').split(','):
+                    name = name.strip()
+                    names.add(name)
+                    yield from _read_file(src_path / f'{name}.py', seen_files)
         else:
             yield _clean_line(line, names)
 
