@@ -126,7 +126,7 @@ class RedisLock(utils.LockBase):
     def client_name(self):
         return f'{self.channel}-lock'
 
-    def acquire(
+    def acquire(  # type: ignore[override]
         self,
         timeout: typing.Optional[float] = None,
         check_interval: typing.Optional[float] = None,

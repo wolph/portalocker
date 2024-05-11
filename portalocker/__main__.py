@@ -3,6 +3,7 @@ import logging
 import os
 import pathlib
 import re
+import typing
 
 base_path = pathlib.Path(__file__).parent.parent
 src_path = base_path / 'portalocker'
@@ -42,7 +43,7 @@ def main(argv=None):
     args.func(args)
 
 
-def _read_file(path, seen_files):
+def _read_file(path: pathlib.Path, seen_files: typing.Set[pathlib.Path]):
     if path in seen_files:
         return
 
@@ -83,7 +84,7 @@ def combine(args):
         _TEXT_TEMPLATE.format((base_path / 'LICENSE').read_text()),
     )
 
-    seen_files = set()
+    seen_files: typing.Set[pathlib.Path] = set()
     for line in _read_file(src_path / '__init__.py', seen_files):
         output_file.write(line)
 

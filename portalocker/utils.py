@@ -132,7 +132,7 @@ class LockBase(abc.ABC):  # pragma: no cover
         timeout: typing.Optional[float] = None,
         check_interval: typing.Optional[float] = None,
         fail_when_locked: typing.Optional[bool] = None,
-    ) -> typing.Union['LockBase', typing.IO[typing.AnyStr]]: ...
+    ) -> typing.IO[typing.AnyStr]: ...
 
     def _timeout_generator(
         self,
@@ -157,7 +157,7 @@ class LockBase(abc.ABC):  # pragma: no cover
     @abc.abstractmethod
     def release(self): ...
 
-    def __enter__(self) -> typing.Union['LockBase', typing.IO[typing.AnyStr]]:
+    def __enter__(self) -> typing.IO[typing.AnyStr]:
         return self.acquire()
 
     def __exit__(
@@ -476,7 +476,7 @@ class BoundedSemaphore(LockBase):
             number=number,
         )
 
-    def acquire(  # type: ignore[reportGeneralTypeIssues]
+    def acquire(  # type: ignore[override]
         self,
         timeout: typing.Optional[float] = None,
         check_interval: typing.Optional[float] = None,
