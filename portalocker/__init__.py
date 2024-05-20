@@ -1,5 +1,11 @@
 from . import __about__, constants, exceptions, portalocker
-from .utils import BoundedSemaphore, Lock, RLock, TemporaryFileLock, open_atomic
+from .utils import (
+    BoundedSemaphore,
+    Lock,
+    RLock,
+    TemporaryFileLock,
+    open_atomic,
+)
 
 try:  # pragma: no cover
     from .redis import RedisLock

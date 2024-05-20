@@ -120,13 +120,15 @@ elif os.name == 'posix':  # pragma: no cover
                 # A timeout exception, wrap this so the outer code knows to try
                 # again (if it wants to).
                 raise exceptions.AlreadyLocked(
-                    exc_value, fh=file_,
+                    exc_value,
+                    fh=file_,
                 ) from exc_value
             else:
                 # Something else went wrong; don't wrap this so we stop
                 # immediately.
                 raise exceptions.LockException(
-                    exc_value, fh=file_,
+                    exc_value,
+                    fh=file_,
                 ) from exc_value
         except EOFError as exc_value:
             # On NFS filesystems, flock can raise an EOFError

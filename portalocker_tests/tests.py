@@ -198,7 +198,8 @@ def test_exlusive(tmpfile):
 
         # Make sure we can't read the locked file
         with pytest.raises(portalocker.LockException), open(
-            tmpfile, 'r+',
+            tmpfile,
+            'r+',
         ) as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             assert fh2.read() == text_0
@@ -246,7 +247,8 @@ def test_shared(tmpfile):
         pytest.param(
             'lockf',
             marks=pytest.mark.skipif(
-                os.name == 'nt', reason='lockf() is not available on windows',
+                os.name == 'nt',
+                reason='lockf() is not available on windows',
             ),
         ),
     ],
@@ -350,7 +352,8 @@ def lock(
         pytest.param(
             'lockf',
             marks=pytest.mark.skipif(
-                os.name == 'nt', reason='lockf() is not available on windows',
+                os.name == 'nt',
+                reason='lockf() is not available on windows',
             ),
         ),
     ],
@@ -377,7 +380,8 @@ def test_shared_processes(tmpfile, fail_when_locked, locker):
         pytest.param(
             'lockf',
             marks=pytest.mark.skipif(
-                os.name == 'nt', reason='lockf() is not available on windows',
+                os.name == 'nt',
+                reason='lockf() is not available on windows',
             ),
         ),
     ],

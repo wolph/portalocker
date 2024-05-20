@@ -10,7 +10,10 @@ src_path = base_path / 'portalocker'
 dist_path = base_path / 'dist'
 _default_output_path = base_path / 'dist' / 'portalocker.py'
 
-_RELATIVE_IMPORT_RE = re.compile(r'^from \.(?P<from>.*?) import (?P<names>.+)$')
+_NAMES_RE = re.compile(r'(?P<names>[^()]+)$')
+_RELATIVE_IMPORT_RE = re.compile(
+    r'^from \.(?P<from>.*?) import (?P<paren>\(?)(?P<names>[^()]+)$'
+)
 _USELESS_ASSIGNMENT_RE = re.compile(r'^(?P<name>\w+) = \1\n$')
 
 _TEXT_TEMPLATE = """'''
@@ -29,7 +32,7 @@ def main(argv=None):
     combine_parser = subparsers.add_parser(
         'combine',
         help='Combine all Python files into a single unified `portalocker.py` '
-        'file for easy distribution',
+             'file for easy distribution',
     )
     combine_parser.add_argument(
         '--output-file',
@@ -49,9 +52,24 @@ def _read_file(path: pathlib.Path, seen_files: typing.Set[pathlib.Path]):
 
     names = set()
     seen_files.add(path)
+    paren = False
+    from_ = None
     for line in path.open():
-        if match := _RELATIVE_IMPORT_RE.match(line):
-            from_ = match.group('from')
+        if paren:
+            if ')' in line:
+                line = line.split(')', 1)[1]
+                paren = False
+                continue
+
+            match = _NAMES_RE.match(line)
+        else:
+            match = _RELATIVE_IMPORT_RE.match(line)
+
+        if match:
+            if not paren:
+                paren = bool(match.group('paren'))
+                from_ = match.group('from')
+
             if from_:
                 names.add(from_)
                 yield from _read_file(src_path / f'{from_}.py', seen_files)
