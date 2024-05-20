@@ -12,7 +12,7 @@ _default_output_path = base_path / 'dist' / 'portalocker.py'
 
 _NAMES_RE = re.compile(r'(?P<names>[^()]+)$')
 _RELATIVE_IMPORT_RE = re.compile(
-    r'^from \.(?P<from>.*?) import (?P<paren>\(?)(?P<names>[^()]+)$'
+    r'^from \.(?P<from>.*?) import (?P<paren>\(?)(?P<names>[^()]+)$',
 )
 _USELESS_ASSIGNMENT_RE = re.compile(r'^(?P<name>\w+) = \1\n$')
 
