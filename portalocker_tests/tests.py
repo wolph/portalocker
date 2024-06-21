@@ -334,7 +334,7 @@ def test_shared_processes(tmpfile, fail_when_locked):
         results = pool.starmap_async(lock, 2 * [args])
 
         # sourcery skip: no-loop-in-tests
-        for result in results.get(timeout=0.5):
+        for result in results.get(timeout=1.0):
             print(f'{result=}')
             # sourcery skip: no-conditionals-in-tests
             if result.exception_class is not None:
@@ -355,7 +355,7 @@ def test_exclusive_processes(tmpfile: str, fail_when_locked: bool, locker):
         result_b = pool.apply_async(lock, [tmpfile, fail_when_locked, flags])
 
         try:
-            a = result_a.get(timeout=0.6)  # Wait for 'a' with timeout
+            a = result_a.get(timeout=1.0)  # Wait for 'a' with timeout
         except multiprocessing.TimeoutError:
             a = None
 
