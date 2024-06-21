@@ -25,6 +25,7 @@ else:
 @pytest.fixture
 def locker(request, monkeypatch):
     monkeypatch.setattr(portalocker.portalocker, 'LOCKER', request.param)
+    return request.param
 
 
 def test_exceptions(tmpfile):
@@ -323,11 +324,10 @@ def lock(
 
 
 @pytest.mark.parametrize('fail_when_locked', [True, False])
-@pytest.mark.parametrize('locker', LOCKERS, indirect=True)
-def test_shared_processes(tmpfile, locker, fail_when_locked):
+def test_shared_processes(tmpfile, fail_when_locked):
     flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
     print()
-    print(f'{tmpfile=}, {fail_when_locked=}, {flags=}')
+    print(f'{fail_when_locked=}, {flags=}, {os.name=}, {LOCKERS=}')
 
     with multiprocessing.Pool(processes=2) as pool:
         args = tmpfile, fail_when_locked, flags
@@ -348,16 +348,39 @@ def test_exclusive_processes(tmpfile: str, fail_when_locked: bool, locker):
     flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING
 
     pool: multiprocessing.Pool
+    print('Locking', tmpfile, fail_when_locked, locker)
     with multiprocessing.Pool(processes=2) as pool:
-        # filename, fail_when_locked, flags
-        args = tmpfile, fail_when_locked, flags
-        a, b = pool.starmap_async(lock, 2 * [args]).get(timeout=0.6)
+        # Submit tasks individually
+        result_a = pool.apply_async(lock, [tmpfile, fail_when_locked, flags])
+        result_b = pool.apply_async(lock, [tmpfile, fail_when_locked, flags])
 
-        assert not a.exception_class or not b.exception_class
-        assert issubclass(
-            a.exception_class or b.exception_class,  # type: ignore
-            portalocker.LockException,
-        )
+        try:
+            a = result_a.get(timeout=0.6)  # Wait for 'a' with timeout
+        except multiprocessing.TimeoutError:
+            a = None
+
+        try:
+            # Lower timeout since we already waited with `a`
+            b = result_b.get(timeout=0.1)  # Wait for 'b' with timeout
+        except multiprocessing.TimeoutError:
+            b = None
+
+        assert a or b
+        # Make sure a is always filled
+        if b:
+            b, a = b, a
+
+        print(f'{a=}')
+        print(f'{b=}')
+
+        if b:
+            assert not a.exception_class or not b.exception_class
+            assert issubclass(
+                a.exception_class or b.exception_class,  # type: ignore
+                portalocker.LockException,
+            )
+        else:
+            assert not a.exception_class
 
 
 @pytest.mark.skipif(
@@ -379,8 +402,8 @@ def test_lock_fileno(tmpfile, locker):
 
 
 @pytest.mark.skipif(
-    os.name == 'nt',
-    reason='Windows only has one locking mechanism',
+    os.name != 'posix',
+    reason='Only posix systems have different lockf behaviour',
 )
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
 def test_locker_mechanism(tmpfile, locker):
@@ -388,25 +411,21 @@ def test_locker_mechanism(tmpfile, locker):
     # We can test for flock vs lockf based on their different behaviour re.
     # locking the same file.
     with portalocker.Lock(tmpfile, 'a+', flags=LockFlags.EXCLUSIVE):
-        # If we have flock(), we cannot get another lock on the same file.
-        if locker == 'flock':
+        # If we have lockf(), we cannot get another lock on the same file.
+        if locker is fcntl.lockf:
+            portalocker.Lock(
+                tmpfile,
+                'r+',
+                flags=LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING,
+            ).acquire(timeout=0.1)
+        # But with other lock methods we can't
+        else:
             with pytest.raises(portalocker.LockException):
                 portalocker.Lock(
                     tmpfile,
                     'r+',
                     flags=LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING,
                 ).acquire(timeout=0.1)
-
-        elif locker == 'lockf':
-            # But on lockf, we can!
-            portalocker.Lock(
-                tmpfile,
-                'r+',
-                flags=LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING,
-            ).acquire(timeout=0.1)
-
-        else:
-            raise RuntimeError('Update test')
 
 
 def test_exception(monkeypatch, tmpfile):

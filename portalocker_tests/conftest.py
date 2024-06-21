@@ -10,7 +10,7 @@ from portalocker import utils
 logger = logging.getLogger(__name__)
 
 
-@pytest.fixture
+@pytest.fixture(scope='function')
 def tmpfile(tmp_path):
     filename = tmp_path / str(random.random())[2:]
     yield str(filename)
