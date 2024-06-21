@@ -9,7 +9,7 @@ import pytest
 
 import portalocker
 import portalocker.portalocker
-from portalocker import exceptions, LockFlags, utils
+from portalocker import LockFlags, exceptions, utils
 
 if os.name == 'posix':
     import fcntl

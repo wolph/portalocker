@@ -62,7 +62,7 @@ select = [
 ]
 
 [lint.per-file-ignores]
-'portalocker_tests/tests.py' = ['SIM115', 'SIM117']
+'portalocker_tests/tests.py' = ['SIM115', 'SIM117', 'T201']
 
 [lint.pydocstyle]
 convention = 'google'
