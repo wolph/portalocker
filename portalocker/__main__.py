@@ -32,7 +32,7 @@ def main(argv=None):
     combine_parser = subparsers.add_parser(
         'combine',
         help='Combine all Python files into a single unified `portalocker.py` '
-             'file for easy distribution',
+        'file for easy distribution',
     )
     combine_parser.add_argument(
         '--output-file',

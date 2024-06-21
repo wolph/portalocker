@@ -19,7 +19,7 @@ if os.name == 'posix':
         fcntl.lockf,
     ]
 else:
-    LOCKERS = [None]
+    LOCKERS = [None]  # type: ignore
 
 
 @pytest.fixture
@@ -52,10 +52,10 @@ def test_with_timeout(tmpfile):
         with portalocker.Lock(tmpfile, timeout=0.1) as fh:
             print('writing some stuff to my cache...', file=fh)
             with portalocker.Lock(
-                    tmpfile,
-                    timeout=0.1,
-                    mode='wb',
-                    fail_when_locked=True,
+                tmpfile,
+                timeout=0.1,
+                mode='wb',
+                fail_when_locked=True,
             ):
                 pass
             print('writing more stuff to my cache...', file=fh)
@@ -187,16 +187,16 @@ def test_exlusive(tmpfile):
 
         # Make sure we can't read the locked file
         with pytest.raises(portalocker.LockException), open(
-                tmpfile,
-                'r+',
+            tmpfile,
+            'r+',
         ) as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             assert fh2.read() == text_0
 
         # Make sure we can't write the locked file
         with pytest.raises(portalocker.LockException), open(
-                tmpfile,
-                'w+',
+            tmpfile,
+            'w+',
         ) as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.write('surprise and fear')
@@ -219,8 +219,8 @@ def test_shared(tmpfile):
 
         # Make sure we can't write the locked file
         with pytest.raises(portalocker.LockException), open(
-                tmpfile,
-                'w+',
+            tmpfile,
+            'w+',
         ) as fh2:
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.write('surprise and fear')
@@ -254,10 +254,10 @@ def test_nonblocking(tmpfile, locker):
 
 def shared_lock(filename, **kwargs):
     with portalocker.Lock(
-            filename,
-            timeout=0.1,
-            fail_when_locked=False,
-            flags=LockFlags.SHARED | LockFlags.NON_BLOCKING,
+        filename,
+        timeout=0.1,
+        fail_when_locked=False,
+        flags=LockFlags.SHARED | LockFlags.NON_BLOCKING,
     ):
         time.sleep(0.2)
         return True
@@ -265,10 +265,10 @@ def shared_lock(filename, **kwargs):
 
 def shared_lock_fail(filename, **kwargs):
     with portalocker.Lock(
-            filename,
-            timeout=0.1,
-            fail_when_locked=True,
-            flags=LockFlags.SHARED | LockFlags.NON_BLOCKING,
+        filename,
+        timeout=0.1,
+        fail_when_locked=True,
+        flags=LockFlags.SHARED | LockFlags.NON_BLOCKING,
     ):
         time.sleep(0.2)
         return True
@@ -276,10 +276,10 @@ def shared_lock_fail(filename, **kwargs):
 
 def exclusive_lock(filename, **kwargs):
     with portalocker.Lock(
-            filename,
-            timeout=0.1,
-            fail_when_locked=False,
-            flags=LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING,
+        filename,
+        timeout=0.1,
+        fail_when_locked=False,
+        flags=LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING,
     ):
         time.sleep(0.2)
         return True
@@ -293,11 +293,11 @@ class LockResult:
 
 
 def lock(
-        filename: str,
-        fail_when_locked: bool,
-        flags: LockFlags,
-        timeout=0.1,
-        keep_locked=0.05,
+    filename: str,
+    fail_when_locked: bool,
+    flags: LockFlags,
+    timeout=0.1,
+    keep_locked=0.05,
 ) -> LockResult:
     # Returns a case of True, False or FileNotFound
     # https://thedailywtf.com/articles/what_is_truth_0x3f_
@@ -305,10 +305,10 @@ def lock(
     # only return string representations of the exception properties
     try:
         with portalocker.Lock(
-                filename,
-                timeout=timeout,
-                fail_when_locked=fail_when_locked,
-                flags=flags,
+            filename,
+            timeout=timeout,
+            fail_when_locked=fail_when_locked,
+            flags=flags,
         ):
             time.sleep(keep_locked)
             return LockResult()
