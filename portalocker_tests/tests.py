@@ -347,7 +347,6 @@ def test_shared_processes(tmpfile, fail_when_locked):
 def test_exclusive_processes(tmpfile: str, fail_when_locked: bool, locker):
     flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING
 
-    pool: multiprocessing.Pool
     print('Locking', tmpfile, fail_when_locked, locker)
     with multiprocessing.Pool(processes=2) as pool:
         # Submit tasks individually
@@ -373,7 +372,13 @@ def test_exclusive_processes(tmpfile: str, fail_when_locked: bool, locker):
         print(f'{a=}')
         print(f'{b=}')
 
+        # make pyright happy
+        assert a is not None
+
         if b:
+            # make pyright happy
+            assert b is not None
+
             assert not a.exception_class or not b.exception_class
             assert issubclass(
                 a.exception_class or b.exception_class,  # type: ignore
