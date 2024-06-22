@@ -10,6 +10,7 @@ exclude_lines =
     raise NotImplementedError
     if 0:
     if __name__ == .__main__.:
+    typing.Protocol
 
 omit =
     portalocker/redis.py
