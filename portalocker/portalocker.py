@@ -8,6 +8,14 @@ from . import constants, exceptions
 LockFlags = constants.LockFlags
 
 
+class HasFileno(typing.Protocol):
+    def fileno(self) -> int: ...
+
+
+LOCKER: typing.Optional[typing.Callable[
+    [typing.Union[int, HasFileno], int], typing.Any]] = None
+
+
 if os.name == 'nt':  # pragma: no cover
     import msvcrt
 
@@ -95,8 +103,9 @@ elif os.name == 'posix':  # pragma: no cover
     LOCKER = fcntl.flock
 
     def lock(file_: typing.Union[typing.IO, int], flags: LockFlags):
-        # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled results
-        # in an error
+        assert LOCKER is not None, 'We need a locing function in `LOCKER` '
+        # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled
+        # results in an error
         if (flags & LockFlags.NON_BLOCKING) and not flags & (
             LockFlags.SHARED | LockFlags.EXCLUSIVE
         ):
@@ -138,6 +147,7 @@ elif os.name == 'posix':  # pragma: no cover
             ) from exc_value
 
     def unlock(file_: typing.IO):
+        assert LOCKER is not None, 'We need a locing function in `LOCKER` '
         LOCKER(file_.fileno(), LockFlags.UNBLOCK)
 
 else:  # pragma: no cover
