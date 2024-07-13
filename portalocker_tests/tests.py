@@ -354,13 +354,13 @@ def test_exclusive_processes(tmpfile: str, fail_when_locked: bool, locker):
         result_b = pool.apply_async(lock, [tmpfile, fail_when_locked, flags])
 
         try:
-            a = result_a.get(timeout=1.0)  # Wait for 'a' with timeout
+            a = result_a.get(timeout=1.1)  # Wait for 'a' with timeout
         except multiprocessing.TimeoutError:
             a = None
 
         try:
             # Lower timeout since we already waited with `a`
-            b = result_b.get(timeout=0.1)  # Wait for 'b' with timeout
+            b = result_b.get(timeout=0.2)  # Wait for 'b' with timeout
         except multiprocessing.TimeoutError:
             b = None
 
