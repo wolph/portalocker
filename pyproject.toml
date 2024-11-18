@@ -98,3 +98,4 @@ skip = '*/htmlcov,./docs/_build,*.asc'
 [tool.pyright]
 include = ['portalocker', 'portalocker_tests']
 exclude = ['dist/*']
+strict = ['portalocker']

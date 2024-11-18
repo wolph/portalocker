@@ -46,7 +46,7 @@ def test_redis_lock():
 @pytest.mark.parametrize('timeout', [None, 0, 0.001])
 @pytest.mark.parametrize('check_interval', [None, 0, 0.0005])
 def test_redis_lock_timeout(timeout, check_interval):
-    connection = client.Redis()
+    connection: client.Redis[str] = client.Redis(decode_responses=True)
     channel = str(random.random())
     lock_a = redis.RedisLock(channel)
     lock_a.acquire(timeout=timeout, check_interval=check_interval)

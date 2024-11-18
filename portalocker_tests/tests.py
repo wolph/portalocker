@@ -412,7 +412,7 @@ def test_lock_fileno(tmpfile, locker):
 )
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
 def test_locker_mechanism(tmpfile, locker):
-    '''Can we switch the locking mechanism?'''
+    """Can we switch the locking mechanism?"""
     # We can test for flock vs lockf based on their different behaviour re.
     # locking the same file.
     with portalocker.Lock(tmpfile, 'a+', flags=LockFlags.EXCLUSIVE):
@@ -434,7 +434,7 @@ def test_locker_mechanism(tmpfile, locker):
 
 
 def test_exception(monkeypatch, tmpfile):
-    '''Do we stop immediately if the locking fails, even with a timeout?'''
+    """Do we stop immediately if the locking fails, even with a timeout?"""
 
     def patched_lock(*args, **kwargs):
         raise ValueError('Test exception')

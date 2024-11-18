@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import os
 import typing
 
-from . import constants, exceptions
+from . import constants, exceptions, types
 
 # Alias for readability. Due to import recursion issues we cannot do:
 # from .constants import LockFlags
@@ -12,9 +14,9 @@ class HasFileno(typing.Protocol):
     def fileno(self) -> int: ...
 
 
-LOCKER: typing.Optional[typing.Callable[
-    [typing.Union[int, HasFileno], int], typing.Any]] = None
-
+LOCKER: typing.Optional[
+    typing.Callable[[typing.Union[int, HasFileno], int], typing.Any]
+] = None
 
 if os.name == 'nt':  # pragma: no cover
     import msvcrt
@@ -100,9 +102,9 @@ elif os.name == 'posix':  # pragma: no cover
     # The locking implementation.
     # Expected values are either fcntl.flock() or fcntl.lockf(),
     # but any callable that matches the syntax will be accepted.
-    LOCKER = fcntl.flock
+    LOCKER = fcntl.flock  # pyright: ignore[reportConstantRedefinition]
 
-    def lock(file_: typing.Union[typing.IO, int], flags: LockFlags):
+    def lock(file: int | types.IO, flags: LockFlags):
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
         # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled
         # results in an error
@@ -115,7 +117,7 @@ elif os.name == 'posix':  # pragma: no cover
             )
 
         try:
-            LOCKER(file_, flags)
+            LOCKER(file, flags)
         except OSError as exc_value:
             # Python can use one of several different exception classes to
             # represent timeout (most likely is BlockingIOError and IOError),
@@ -130,25 +132,25 @@ elif os.name == 'posix':  # pragma: no cover
                 # again (if it wants to).
                 raise exceptions.AlreadyLocked(
                     exc_value,
-                    fh=file_,
+                    fh=file,
                 ) from exc_value
             else:
                 # Something else went wrong; don't wrap this so we stop
                 # immediately.
                 raise exceptions.LockException(
                     exc_value,
-                    fh=file_,
+                    fh=file,
                 ) from exc_value
         except EOFError as exc_value:
             # On NFS filesystems, flock can raise an EOFError
             raise exceptions.LockException(
                 exc_value,
-                fh=file_,
+                fh=file,
             ) from exc_value
 
-    def unlock(file_: typing.IO):
+    def unlock(file: types.IO):
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
-        LOCKER(file_.fileno(), LockFlags.UNBLOCK)
+        LOCKER(file.fileno(), LockFlags.UNBLOCK)
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')

@@ -27,6 +27,6 @@ def pytest_sessionstart(session):
 
 @pytest.fixture(autouse=True)
 def reduce_timeouts(monkeypatch):
-    'For faster testing we reduce the timeouts.'
+    "For faster testing we reduce the timeouts."
     monkeypatch.setattr(utils, 'DEFAULT_TIMEOUT', 0.1)
     monkeypatch.setattr(utils, 'DEFAULT_CHECK_INTERVAL', 0.05)
