@@ -60,6 +60,9 @@ def _read_file(
     paren = False
     from_ = None
     for line in path.open():
+        if '__future__' in line:
+            continue
+
         if paren:
             if ')' in line:
                 line = line.split(')', 1)[1]
@@ -100,6 +103,9 @@ def _clean_line(line: str, names: set[str]):
 def combine(args: argparse.Namespace):
     output_file = args.output_file
     pathlib.Path(output_file.name).parent.mkdir(parents=True, exist_ok=True)
+
+    # We're handling this separately because it has to be the first import.
+    output_file.write('from __future__ import annotations\n')
 
     output_file.write(
         _TEXT_TEMPLATE.format((base_path / 'README.rst').read_text()),

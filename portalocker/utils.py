@@ -247,7 +247,7 @@ class Lock(LockBase):
         check_interval: typing.Optional[float] = None,
         fail_when_locked: typing.Optional[bool] = None,
     ) -> typing.IO[typing.AnyStr]:
-        """Acquire the locked filehandle"""
+        '''Acquire the locked filehandle'''
 
         fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
 
@@ -316,14 +316,14 @@ class Lock(LockBase):
         return self.acquire()
 
     def release(self):
-        """Releases the currently locked file handle"""
+        '''Releases the currently locked file handle'''
         if self.fh:
             portalocker.unlock(self.fh)
             self.fh.close()
             self.fh = None
 
     def _get_fh(self) -> types.IO:
-        """Get a new filehandle"""
+        '''Get a new filehandle'''
         return typing.cast(
             types.IO,
             open(  # noqa: SIM115
@@ -334,20 +334,20 @@ class Lock(LockBase):
         )
 
     def _get_lock(self, fh: types.IO) -> types.IO:
-        """
+        '''
         Try to lock the given filehandle
 
-        returns LockException if it fails"""
+        returns LockException if it fails'''
         portalocker.lock(fh, self.flags)
         return fh
 
     def _prepare_fh(self, fh: types.IO) -> types.IO:
-        """
+        '''
         Prepare the filehandle for usage
 
         If truncate is a number, the file will be truncated to that amount of
         bytes
-        """
+        '''
         if self.truncate:
             fh.seek(0)
             fh.truncate(0)
@@ -356,11 +356,11 @@ class Lock(LockBase):
 
 
 class RLock(Lock):
-    """
+    '''
     A reentrant lock, functions in a similar way to threading.RLock in that it
     can be acquired multiple times.  When the corresponding number of release()
     calls are made the lock will finally release the underlying file lock.
-    """
+    '''
 
     def __init__(
         self,

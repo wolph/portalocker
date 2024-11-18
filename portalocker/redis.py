@@ -1,4 +1,6 @@
 # pyright: reportUnknownMemberType=false
+from __future__ import annotations
+
 import _thread
 import json
 import logging
@@ -26,7 +28,7 @@ class PubSubWorkerThread(redis.client.PubSubWorkerThread):  # type: ignore
 
 
 class RedisLock(utils.LockBase):
-    """
+    '''
     An extremely reliable Redis lock based on pubsub with a keep-alive thread
 
     As opposed to most Redis locking systems based on key/value pairs,
@@ -60,7 +62,7 @@ class RedisLock(utils.LockBase):
             to override these you need to explicitly specify a value (e.g.
             `health_check_interval=0`)
 
-    """
+    '''
 
     redis_kwargs: typing.Dict[str, typing.Any]
     thread: typing.Optional[PubSubWorkerThread]
@@ -137,7 +139,7 @@ class RedisLock(utils.LockBase):
         timeout: typing.Optional[float] = None,
         check_interval: typing.Optional[float] = None,
         fail_when_locked: typing.Optional[bool] = None,
-    ) -> 'RedisLock':
+    ) -> RedisLock:
         timeout = utils.coalesce(timeout, self.timeout, 0.0)
         check_interval = utils.coalesce(
             check_interval,
