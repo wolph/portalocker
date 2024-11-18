@@ -287,7 +287,7 @@ def exclusive_lock(filename, **kwargs):
 
 @dataclasses.dataclass(order=True)
 class LockResult:
-    exception_class: typing.Union[typing.Type[Exception], None] = None
+    exception_class: typing.Union[type[Exception], None] = None
     exception_message: typing.Union[str, None] = None
     exception_repr: typing.Union[str, None] = None
 

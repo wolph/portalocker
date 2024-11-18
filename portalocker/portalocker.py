@@ -14,9 +14,7 @@ class HasFileno(typing.Protocol):
     def fileno(self) -> int: ...
 
 
-LOCKER: typing.Optional[
-    typing.Callable[[typing.Union[int, HasFileno], int], typing.Any]
-] = None
+LOCKER: typing.Callable[[int | HasFileno, int], typing.Any] | None = None
 
 if os.name == 'nt':  # pragma: no cover
     import msvcrt
@@ -28,7 +26,7 @@ if os.name == 'nt':  # pragma: no cover
 
     __overlapped = pywintypes.OVERLAPPED()
 
-    def lock(file_: typing.Union[typing.IO, int], flags: LockFlags):
+    def lock(file_: typing.IO | int, flags: LockFlags):
         # Windows locking does not support locking through `fh.fileno()` so
         # we cast it to make mypy and pyright happy
         file_ = typing.cast(typing.IO, file_)

@@ -64,15 +64,15 @@ class RedisLock(utils.LockBase):
 
     '''
 
-    redis_kwargs: typing.Dict[str, typing.Any]
-    thread: typing.Optional[PubSubWorkerThread]
+    redis_kwargs: dict[str, typing.Any]
+    thread: PubSubWorkerThread | None
     channel: str
     timeout: float
-    connection: typing.Optional[redis.client.Redis[str]]
-    pubsub: typing.Optional[redis.client.PubSub] = None
+    connection: redis.client.Redis[str] | None
+    pubsub: redis.client.PubSub | None = None
     close_connection: bool
 
-    DEFAULT_REDIS_KWARGS: typing.ClassVar[typing.Dict[str, typing.Any]] = dict(
+    DEFAULT_REDIS_KWARGS: typing.ClassVar[dict[str, typing.Any]] = dict(
         health_check_interval=10,
         decode_responses=True,
     )
@@ -80,13 +80,13 @@ class RedisLock(utils.LockBase):
     def __init__(
         self,
         channel: str,
-        connection: typing.Optional[redis.client.Redis[str]] = None,
-        timeout: typing.Optional[float] = None,
-        check_interval: typing.Optional[float] = None,
-        fail_when_locked: typing.Optional[bool] = False,
+        connection: redis.client.Redis[str] | None = None,
+        timeout: float | None = None,
+        check_interval: float | None = None,
+        fail_when_locked: bool | None = False,
         thread_sleep_time: float = DEFAULT_THREAD_SLEEP_TIME,
         unavailable_timeout: float = DEFAULT_UNAVAILABLE_TIMEOUT,
-        redis_kwargs: typing.Optional[typing.Dict[str, typing.Any]] = None,
+        redis_kwargs: dict[str, typing.Any] | None = None,
     ):
         # We don't want to close connections given as an argument
         self.close_connection = not connection
@@ -113,7 +113,7 @@ class RedisLock(utils.LockBase):
 
         return self.connection
 
-    def channel_handler(self, message: typing.Dict[str, str]) -> None:
+    def channel_handler(self, message: dict[str, str]) -> None:
         if message.get('type') != 'message':  # pragma: no cover
             return
 
@@ -136,9 +136,9 @@ class RedisLock(utils.LockBase):
 
     def acquire(  # type: ignore[override]
         self,
-        timeout: typing.Optional[float] = None,
-        check_interval: typing.Optional[float] = None,
-        fail_when_locked: typing.Optional[bool] = None,
+        timeout: float | None = None,
+        check_interval: float | None = None,
+        fail_when_locked: bool | None = None,
     ) -> RedisLock:
         timeout = utils.coalesce(timeout, self.timeout, 0.0)
         check_interval = utils.coalesce(

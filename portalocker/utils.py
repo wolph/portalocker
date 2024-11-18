@@ -94,15 +94,15 @@ def open_atomic(
     # Create the parent directory if it doesn't exist
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    temp_fh = tempfile.NamedTemporaryFile(
+    with tempfile.NamedTemporaryFile(
         mode=binary and 'wb' or 'w',
         dir=str(path.parent),
         delete=False,
-    )
-    yield temp_fh
-    temp_fh.flush()
-    os.fsync(temp_fh.fileno())
-    temp_fh.close()
+    ) as temp_fh:
+        yield temp_fh
+        temp_fh.flush()
+        os.fsync(temp_fh.fileno())
+
     try:
         os.rename(temp_fh.name, path)
     finally:
@@ -120,9 +120,9 @@ class LockBase(abc.ABC):  # pragma: no cover
 
     def __init__(
         self,
-        timeout: typing.Optional[float] = None,
-        check_interval: typing.Optional[float] = None,
-        fail_when_locked: typing.Optional[bool] = None,
+        timeout: float | None = None,
+        check_interval: float | None = None,
+        fail_when_locked: bool | None = None,
     ):
         self.timeout = coalesce(timeout, DEFAULT_TIMEOUT)
         self.check_interval = coalesce(check_interval, DEFAULT_CHECK_INTERVAL)
@@ -134,15 +134,15 @@ class LockBase(abc.ABC):  # pragma: no cover
     @abc.abstractmethod
     def acquire(
         self,
-        timeout: typing.Optional[float] = None,
-        check_interval: typing.Optional[float] = None,
-        fail_when_locked: typing.Optional[bool] = None,
+        timeout: float | None = None,
+        check_interval: float | None = None,
+        fail_when_locked: bool | None = None,
     ) -> typing.IO[typing.AnyStr]: ...
 
     def _timeout_generator(
         self,
-        timeout: typing.Optional[float],
-        check_interval: typing.Optional[float],
+        timeout: float | None,
+        check_interval: float | None,
     ) -> typing.Iterator[int]:
         f_timeout = coalesce(timeout, self.timeout, 0.0)
         f_check_interval = coalesce(check_interval, self.check_interval, 0.0)
@@ -167,10 +167,10 @@ class LockBase(abc.ABC):  # pragma: no cover
 
     def __exit__(
         self,
-        exc_type: typing.Optional[typing.Type[BaseException]],
-        exc_value: typing.Optional[BaseException],
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
         traceback: typing.Any,  # Should be typing.TracebackType
-    ) -> typing.Optional[bool]:
+    ) -> bool | None:
         self.release()
         return None
 
@@ -243,9 +243,9 @@ class Lock(LockBase):
 
     def acquire(
         self,
-        timeout: typing.Optional[float] = None,
-        check_interval: typing.Optional[float] = None,
-        fail_when_locked: typing.Optional[bool] = None,
+        timeout: float | None = None,
+        check_interval: float | None = None,
+        fail_when_locked: bool | None = None,
     ) -> typing.IO[typing.AnyStr]:
         '''Acquire the locked filehandle'''
 
@@ -383,9 +383,9 @@ class RLock(Lock):
 
     def acquire(
         self,
-        timeout: typing.Optional[float] = None,
-        check_interval: typing.Optional[float] = None,
-        fail_when_locked: typing.Optional[bool] = None,
+        timeout: float | None = None,
+        check_interval: float | None = None,
+        fail_when_locked: bool | None = None,
     ) -> typing.IO[typing.AnyStr]:
         fh: typing.IO[typing.AnyStr]
         if self._acquire_count >= 1:
@@ -449,7 +449,7 @@ class BoundedSemaphore(LockBase):
     'bounded_semaphore.01.lock'
     """
 
-    lock: typing.Optional[Lock]
+    lock: Lock | None
 
     def __init__(
         self,
@@ -457,15 +457,15 @@ class BoundedSemaphore(LockBase):
         name: str = 'bounded_semaphore',
         filename_pattern: str = '{name}.{number:02d}.lock',
         directory: str = tempfile.gettempdir(),
-        timeout: typing.Optional[float] = DEFAULT_TIMEOUT,
-        check_interval: typing.Optional[float] = DEFAULT_CHECK_INTERVAL,
-        fail_when_locked: typing.Optional[bool] = True,
+        timeout: float | None = DEFAULT_TIMEOUT,
+        check_interval: float | None = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: bool | None = True,
     ):
         self.maximum = maximum
         self.name = name
         self.filename_pattern = filename_pattern
         self.directory = directory
-        self.lock: typing.Optional[Lock] = None
+        self.lock: Lock | None = None
         super().__init__(
             timeout=timeout,
             check_interval=check_interval,
@@ -496,10 +496,10 @@ class BoundedSemaphore(LockBase):
 
     def acquire(  # type: ignore[override]
         self,
-        timeout: typing.Optional[float] = None,
-        check_interval: typing.Optional[float] = None,
-        fail_when_locked: typing.Optional[bool] = None,
-    ) -> typing.Optional[Lock]:
+        timeout: float | None = None,
+        check_interval: float | None = None,
+        fail_when_locked: bool | None = None,
+    ) -> Lock | None:
         assert not self.lock, 'Already locked'
 
         filenames = self.get_filenames()
@@ -567,12 +567,12 @@ class NamedBoundedSemaphore(BoundedSemaphore):
     def __init__(
         self,
         maximum: int,
-        name: typing.Optional[str] = None,
+        name: str | None = None,
         filename_pattern: str = '{name}.{number:02d}.lock',
         directory: str = tempfile.gettempdir(),
-        timeout: typing.Optional[float] = DEFAULT_TIMEOUT,
-        check_interval: typing.Optional[float] = DEFAULT_CHECK_INTERVAL,
-        fail_when_locked: typing.Optional[bool] = True,
+        timeout: float | None = DEFAULT_TIMEOUT,
+        check_interval: float | None = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: bool | None = True,
     ):
         if name is None:
             name = 'bounded_semaphore.%d' % random.randint(0, 1000000)

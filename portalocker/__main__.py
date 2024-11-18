@@ -50,7 +50,7 @@ def main(argv: typing.Sequence[str] | None = None) -> None:
 
 def _read_file(
     path: pathlib.Path,
-    seen_files: typing.Set[pathlib.Path],
+    seen_files: set[pathlib.Path],
 ) -> typing.Iterator[str]:
     if path in seen_files:
         return
@@ -114,7 +114,7 @@ def combine(args: argparse.Namespace):
         _TEXT_TEMPLATE.format((base_path / 'LICENSE').read_text()),
     )
 
-    seen_files: typing.Set[pathlib.Path] = set()
+    seen_files: set[pathlib.Path] = set()
     for line in _read_file(src_path / '__init__.py', seen_files):
         output_file.write(line)
 
