@@ -47,7 +47,10 @@ Mode = typing.Literal[
     'rbU', 'rUb', 'Urb', 'brU', 'bUr', 'Ubr',
 ]
 Filename = Union[str, pathlib.Path]
-IO: typing.TypeAlias = Union[typing.IO[str], typing.IO[bytes]]  # type: ignore[name-defined]
+IO: typing.TypeAlias = Union[  # type: ignore[name-defined]
+    typing.IO[str],
+    typing.IO[bytes],
+]
 
 
 class FileOpenKwargs(typing.TypedDict):
