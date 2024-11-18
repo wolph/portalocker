@@ -30,6 +30,7 @@ ignore = [
     'SIM114', # Combine `if` branches using logical `or` operator
     'RET506', # Unnecessary `else` after `raise` statement
     'FA100', # Missing `from __future__ import annotations`, but uses `typing.Optional`
+    'RUF100', # Unused noqa directives. Due to multiple Python versions, we need to keep them
 ]
 
 select = [
