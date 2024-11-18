@@ -4,104 +4,50 @@ import pathlib
 import typing
 from typing import Union
 
+# fmt: off
 Mode = typing.Literal[
     # Text modes
-    'r',
-    'rt',
-    'tr',  # Read text
-    'w',
-    'wt',
-    'tw',  # Write text
-    'a',
-    'at',
-    'ta',  # Append text
-    'x',
-    'xt',
-    'tx',  # Exclusive creation text
-    'r+',
-    '+r',
-    'rt+',
-    'r+t',
-    '+rt',
-    'tr+',
-    't+r',
-    '+tr',  # Read and write text
-    'w+',
-    '+w',
-    'wt+',
-    'w+t',
-    '+wt',
-    'tw+',
-    't+w',
-    '+tw',  # Write and read text
-    'a+',
-    '+a',
-    'at+',
-    'a+t',
-    '+at',
-    'ta+',
-    't+a',
-    '+ta',  # Append and read text
-    'x+',
-    '+x',
-    'xt+',
-    'x+t',
-    '+xt',
-    'tx+',
-    't+x',
-    '+tx',  # Exclusive creation and read text
-    'U',
-    'rU',
-    'Ur',
-    'rtU',
-    'rUt',
-    'Urt',
-    'trU',
-    'tUr',
-    'Utr',  # Universal newline support
+    # Read text
+    'r', 'rt', 'tr',
+    # Write text
+    'w', 'wt', 'tw',
+    # Append text
+    'a', 'at', 'ta',
+    # Exclusive creation text
+    'x', 'xt', 'tx',
+    # Read and write text
+    'r+', '+r', 'rt+', 'r+t', '+rt', 'tr+', 't+r', '+tr',
+    # Write and read text
+    'w+', '+w', 'wt+', 'w+t', '+wt', 'tw+', 't+w', '+tw',
+    # Append and read text
+    'a+', '+a', 'at+', 'a+t', '+at', 'ta+', 't+a', '+ta',
+    # Exclusive creation and read text
+    'x+', '+x', 'xt+', 'x+t', '+xt', 'tx+', 't+x', '+tx',
+    # Universal newline support
+    'U', 'rU', 'Ur', 'rtU', 'rUt', 'Urt', 'trU', 'tUr', 'Utr',
+
     # Binary modes
-    'rb',
-    'br',  # Read binary
-    'wb',
-    'bw',  # Write binary
-    'ab',
-    'ba',  # Append binary
-    'xb',
-    'bx',  # Exclusive creation binary
-    'rb+',
-    'r+b',
-    '+rb',
-    'br+',
-    'b+r',
-    '+br',  # Read and write binary
-    'wb+',
-    'w+b',
-    '+wb',
-    'bw+',
-    'b+w',
-    '+bw',  # Write and read binary
-    'ab+',
-    'a+b',
-    '+ab',
-    'ba+',
-    'b+a',
-    '+ba',  # Append and read binary
-    'xb+',
-    'x+b',
-    '+xb',
-    'bx+',
-    'b+x',
-    '+bx',  # Exclusive creation and read binary
-    'rbU',
-    'rUb',
-    'Urb',
-    'brU',
-    'bUr',
-    'Ubr',
+    # Read binary
+    'rb', 'br',
+    # Write binary
+    'wb', 'bw',
+    # Append binary
+    'ab', 'ba',
+    # Exclusive creation binary
+    'xb', 'bx',
+    # Read and write binary
+    'rb+', 'r+b', '+rb', 'br+', 'b+r', '+br',
+    # Write and read binary
+    'wb+', 'w+b', '+wb', 'bw+', 'b+w', '+bw',
+    # Append and read binary
+    'ab+', 'a+b', '+ab', 'ba+', 'b+a', '+ba',
+    # Exclusive creation and read binary
+    'xb+', 'x+b', '+xb', 'bx+', 'b+x', '+bx',
     # Universal newline support in binary mode
+    'rbU', 'rUb', 'Urb', 'brU', 'bUr', 'Ubr',
 ]
 Filename = Union[str, pathlib.Path]
-IO: typing.TypeAlias = Union[typing.IO[str], typing.IO[bytes]]
+IO: typing.TypeAlias = Union[typing.IO[str], typing.IO[bytes]]  # type: ignore[name-defined]
 
 
 class FileOpenKwargs(typing.TypedDict):

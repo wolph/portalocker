@@ -102,7 +102,7 @@ elif os.name == 'posix':  # pragma: no cover
     # but any callable that matches the syntax will be accepted.
     LOCKER = fcntl.flock  # pyright: ignore[reportConstantRedefinition]
 
-    def lock(file: int | types.IO, flags: LockFlags):
+    def lock(file: int | types.IO, flags: LockFlags):  # type: ignore[misc]
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
         # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled
         # results in an error
@@ -146,7 +146,7 @@ elif os.name == 'posix':  # pragma: no cover
                 fh=file,
             ) from exc_value
 
-    def unlock(file: types.IO):
+    def unlock(file: types.IO):  # type: ignore[misc]
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
         LOCKER(file.fileno(), LockFlags.UNBLOCK)
 

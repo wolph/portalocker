@@ -4,7 +4,12 @@
 target-version = 'py39'
 
 src = ['portalocker']
-exclude = ['docs']
+exclude = [
+    'docs',
+    # Ignore local test files/directories/old-stuff
+    'test.py',
+    '*_old.py',
+]
 
 line-length = 80
 
