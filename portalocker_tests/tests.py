@@ -186,18 +186,24 @@ def test_exlusive(tmpfile):
         portalocker.lock(fh, portalocker.LOCK_EX | portalocker.LOCK_NB)
 
         # Make sure we can't read the locked file
-        with pytest.raises(portalocker.LockException), open(
-            tmpfile,
-            'r+',
-        ) as fh2:
+        with (
+            pytest.raises(portalocker.LockException),
+            open(
+                tmpfile,
+                'r+',
+            ) as fh2,
+        ):
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             assert fh2.read() == text_0
 
         # Make sure we can't write the locked file
-        with pytest.raises(portalocker.LockException), open(
-            tmpfile,
-            'w+',
-        ) as fh2:
+        with (
+            pytest.raises(portalocker.LockException),
+            open(
+                tmpfile,
+                'w+',
+            ) as fh2,
+        ):
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.write('surprise and fear')
 
@@ -218,10 +224,13 @@ def test_shared(tmpfile):
             assert fh2.read() == 'spam and eggs'
 
         # Make sure we can't write the locked file
-        with pytest.raises(portalocker.LockException), open(
-            tmpfile,
-            'w+',
-        ) as fh2:
+        with (
+            pytest.raises(portalocker.LockException),
+            open(
+                tmpfile,
+                'w+',
+            ) as fh2,
+        ):
             portalocker.lock(fh2, portalocker.LOCK_EX | portalocker.LOCK_NB)
             fh2.write('surprise and fear')
 
@@ -287,7 +296,7 @@ def exclusive_lock(filename, **kwargs):
 
 @dataclasses.dataclass(order=True)
 class LockResult:
-    exception_class: typing.Union[typing.Type[Exception], None] = None
+    exception_class: typing.Union[type[Exception], None] = None
     exception_message: typing.Union[str, None] = None
     exception_repr: typing.Union[str, None] = None
 

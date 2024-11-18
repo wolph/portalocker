@@ -1,12 +1,21 @@
 # We keep the ruff configuration separate so it can easily be shared across
 # all projects
 
-target-version = 'py38'
+target-version = 'py39'
 
 src = ['portalocker']
-exclude = ['docs']
+exclude = [
+    'docs',
+    # Ignore local test files/directories/old-stuff
+    'test.py',
+    '*_old.py',
+]
 
 line-length = 80
+
+[format]
+quote-style = 'single'
+
 
 [lint]
 ignore = [
@@ -26,6 +35,7 @@ ignore = [
     'SIM114', # Combine `if` branches using logical `or` operator
     'RET506', # Unnecessary `else` after `raise` statement
     'FA100', # Missing `from __future__ import annotations`, but uses `typing.Optional`
+    'RUF100', # Unused noqa directives. Due to multiple Python versions, we need to keep them
 ]
 
 select = [
