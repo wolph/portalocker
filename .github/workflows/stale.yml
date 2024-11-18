@@ -12,6 +12,6 @@ jobs:
       - uses: actions/stale@v8
         with:
           days-before-stale: 30
+          days-before-pr-stale: -1
           exempt-issue-labels: in-progress,help-wanted,pinned,security,enhancement
           exempt-all-pr-assignees: true
-
