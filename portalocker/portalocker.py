@@ -26,7 +26,7 @@ if os.name == 'nt':  # pragma: no cover
 
     __overlapped = pywintypes.OVERLAPPED()
 
-    def lock(file_: typing.IO | int, flags: LockFlags):
+    def lock(file_: typing.IO | int, flags: LockFlags) -> None:
         # Windows locking does not support locking through `fh.fileno()` so
         # we cast it to make mypy and pyright happy
         file_ = typing.cast(typing.IO, file_)
@@ -64,7 +64,7 @@ if os.name == 'nt':  # pragma: no cover
             if savepos:
                 file_.seek(savepos)
 
-    def unlock(file_: typing.IO):
+    def unlock(file_: typing.IO) -> None:
         try:
             savepos = file_.tell()
             if savepos:
@@ -102,7 +102,7 @@ elif os.name == 'posix':  # pragma: no cover
     # but any callable that matches the syntax will be accepted.
     LOCKER = fcntl.flock  # pyright: ignore[reportConstantRedefinition]
 
-    def lock(file: int | types.IO, flags: LockFlags):  # type: ignore[misc]
+    def lock(file: int | types.IO, flags: LockFlags) -> None:  # type: ignore[misc]
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
         # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled
         # results in an error
@@ -146,7 +146,7 @@ elif os.name == 'posix':  # pragma: no cover
                 fh=file,
             ) from exc_value
 
-    def unlock(file: types.IO):  # type: ignore[misc]
+    def unlock(file: types.IO) -> None:  # type: ignore[misc]
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
         LOCKER(file.fileno(), LockFlags.UNBLOCK)
 

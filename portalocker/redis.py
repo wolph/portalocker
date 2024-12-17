@@ -87,7 +87,7 @@ class RedisLock(utils.LockBase):
         thread_sleep_time: float = DEFAULT_THREAD_SLEEP_TIME,
         unavailable_timeout: float = DEFAULT_UNAVAILABLE_TIMEOUT,
         redis_kwargs: dict[str, typing.Any] | None = None,
-    ):
+    ) -> None:
         # We don't want to close connections given as an argument
         self.close_connection = not connection
 
@@ -131,7 +131,7 @@ class RedisLock(utils.LockBase):
         self.connection.publish(data['response_channel'], str(time.time()))
 
     @property
-    def client_name(self):
+    def client_name(self) -> str:
         return f'{self.channel}-lock'
 
     def acquire(  # type: ignore[override]
@@ -201,7 +201,7 @@ class RedisLock(utils.LockBase):
         self,
         connection: redis.client.Redis[str],
         timeout: float,
-    ):
+    ) -> bool | None:
         # Random channel name to get messages back from the lock
         response_channel = f'{self.channel}-{random.random()}'
 
@@ -234,7 +234,7 @@ class RedisLock(utils.LockBase):
                 )
         return None
 
-    def release(self):
+    def release(self) -> None:
         if self.thread:  # pragma: no branch
             self.thread.stop()
             self.thread.join()
