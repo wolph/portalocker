@@ -99,3 +99,12 @@ skip = '*/htmlcov,./docs/_build,*.asc'
 include = ['portalocker', 'portalocker_tests']
 exclude = ['dist/*']
 strict = ['portalocker']
+
+[tool.mypy]
+python_version = '3.9'
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+files = ['portalocker']
+ignore_missing_imports = true
+check_untyped_defs = true
