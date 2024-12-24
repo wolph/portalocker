@@ -123,7 +123,7 @@ class LockBase(abc.ABC):  # pragma: no cover
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ):
+    ) -> None:
         self.timeout = coalesce(timeout, DEFAULT_TIMEOUT)
         self.check_interval = coalesce(check_interval, DEFAULT_CHECK_INTERVAL)
         self.fail_when_locked = coalesce(
@@ -160,7 +160,7 @@ class LockBase(abc.ABC):  # pragma: no cover
             time.sleep(max(0.001, (i * f_check_interval) - since_start_time))
 
     @abc.abstractmethod
-    def release(self): ...
+    def release(self) -> None: ...
 
     def __enter__(self) -> typing.IO[typing.AnyStr]:
         return self.acquire()
@@ -174,7 +174,7 @@ class LockBase(abc.ABC):  # pragma: no cover
         self.release()
         return None
 
-    def __delete__(self, instance: LockBase):
+    def __delete__(self, instance: LockBase) -> None:
         instance.release()
 
 
@@ -218,7 +218,7 @@ class Lock(LockBase):
         fail_when_locked: bool = DEFAULT_FAIL_WHEN_LOCKED,
         flags: constants.LockFlags = LOCK_METHOD,
         **file_open_kwargs: typing.Any,
-    ):
+    ) -> None:
         if 'w' in mode:
             truncate = True
             mode = typing.cast(Mode, mode.replace('w', 'a'))
@@ -315,7 +315,7 @@ class Lock(LockBase):
     def __enter__(self) -> typing.IO[typing.AnyStr]:
         return self.acquire()
 
-    def release(self):
+    def release(self) -> None:
         '''Releases the currently locked file handle'''
         if self.fh:
             portalocker.unlock(self.fh)
@@ -370,7 +370,7 @@ class RLock(Lock):
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = False,
         flags: constants.LockFlags = LOCK_METHOD,
-    ):
+    ) -> None:
         super().__init__(
             filename,
             mode,
@@ -396,7 +396,7 @@ class RLock(Lock):
         assert fh
         return fh
 
-    def release(self):
+    def release(self) -> None:
         if self._acquire_count == 0:
             raise exceptions.LockException(
                 'Cannot release more times than acquired',
@@ -415,7 +415,7 @@ class TemporaryFileLock(Lock):
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = True,
         flags: constants.LockFlags = LOCK_METHOD,
-    ):
+    ) -> None:
         Lock.__init__(
             self,
             filename=filename,
@@ -427,7 +427,7 @@ class TemporaryFileLock(Lock):
         )
         atexit.register(self.release)
 
-    def release(self):
+    def release(self) -> None:
         Lock.release(self)
         if os.path.isfile(self.filename):  # pragma: no branch
             os.unlink(self.filename)
@@ -460,7 +460,7 @@ class BoundedSemaphore(LockBase):
         timeout: float | None = DEFAULT_TIMEOUT,
         check_interval: float | None = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool | None = True,
-    ):
+    ) -> None:
         self.maximum = maximum
         self.name = name
         self.filename_pattern = filename_pattern
@@ -533,7 +533,7 @@ class BoundedSemaphore(LockBase):
 
         return False
 
-    def release(self):  # pragma: no cover
+    def release(self) -> None:  # pragma: no cover
         if self.lock is not None:
             self.lock.release()
             self.lock = None
@@ -573,7 +573,7 @@ class NamedBoundedSemaphore(BoundedSemaphore):
         timeout: float | None = DEFAULT_TIMEOUT,
         check_interval: float | None = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool | None = True,
-    ):
+    ) -> None:
         if name is None:
             name = 'bounded_semaphore.%d' % random.randint(0, 1000000)
         super().__init__(
