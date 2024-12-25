@@ -5,18 +5,10 @@ requires = ['setuptools', 'setuptools-scm']
 [project]
 name = 'portalocker'
 dynamic = ['version']
-authors = [{name = 'Rick van Hattem', email = 'wolph@wol.ph'}]
-license = {text = 'BSD-3-Clause'}
+authors = [{ name = 'Rick van Hattem', email = 'wolph@wol.ph' }]
+license = { text = 'BSD-3-Clause' }
 description = 'Wraps the portalocker recipe for easy usage'
-keywords = [
-    'locking',
-    'locks',
-    'with',
-    'statement',
-    'windows',
-    'linux',
-    'unix',
-]
+keywords = ['locking', 'locks', 'with', 'statement', 'windows', 'linux', 'unix']
 readme = 'README.rst'
 classifiers = [
     'Development Status :: 5 - Production/Stable',
@@ -53,6 +45,7 @@ classifiers = [
     'Topic :: Software Development :: Libraries :: Python Modules',
     'Topic :: Software Development :: Libraries',
     'Topic :: System :: Monitoring',
+    'Typing :: Typed',
 ]
 requires-python = '>=3.8'
 dependencies = ['pywin32>=226; platform_system == "Windows"']
@@ -105,6 +98,11 @@ python_version = '3.9'
 strict = true
 warn_return_any = true
 warn_unused_configs = true
-files = ['portalocker']
+warn_unused_ignores = false
+packages = ['portalocker', 'portalocker_tests']
 ignore_missing_imports = true
 check_untyped_defs = true
+exclude = ['dist', 'docs', '.venv', 'venv']
+[[tool.mypy.overrides]]
+module = ['portalocker_tests.*']
+disallow_untyped_defs = false

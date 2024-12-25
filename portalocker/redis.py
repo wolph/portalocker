@@ -28,7 +28,7 @@ class PubSubWorkerThread(redis.client.PubSubWorkerThread):  # type: ignore
 
 
 class RedisLock(utils.LockBase):
-    '''
+    """
     An extremely reliable Redis lock based on pubsub with a keep-alive thread
 
     As opposed to most Redis locking systems based on key/value pairs,
@@ -62,7 +62,7 @@ class RedisLock(utils.LockBase):
             to override these you need to explicitly specify a value (e.g.
             `health_check_interval=0`)
 
-    '''
+    """
 
     redis_kwargs: dict[str, typing.Any]
     thread: PubSubWorkerThread | None
@@ -246,5 +246,5 @@ class RedisLock(utils.LockBase):
             self.pubsub.close()
             self.pubsub = None
 
-    def __del__(self):
+    def __del__(self) -> None:
         self.release()

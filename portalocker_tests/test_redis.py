@@ -26,7 +26,7 @@ def set_redis_timeouts(monkeypatch):
     monkeypatch.setattr(_thread, 'interrupt_main', lambda: None)
 
 
-def test_redis_lock():
+def test_redis_lock() -> None:
     channel = str(random.random())
 
     lock_a: redis.RedisLock = redis.RedisLock(channel)
@@ -61,7 +61,7 @@ def test_redis_lock_timeout(timeout, check_interval):
                 lock_a.connection.close()
 
 
-def test_redis_lock_context():
+def test_redis_lock_context() -> None:
     channel = str(random.random())
 
     lock_a = redis.RedisLock(channel, fail_when_locked=True)
@@ -72,7 +72,7 @@ def test_redis_lock_context():
             pass
 
 
-def test_redis_relock():
+def test_redis_relock() -> None:
     channel = str(random.random())
 
     lock_a = redis.RedisLock(channel, fail_when_locked=True)

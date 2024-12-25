@@ -26,10 +26,10 @@ if os.name == 'nt':  # pragma: no cover
 
     __overlapped = pywintypes.OVERLAPPED()
 
-    def lock(file_: typing.IO | int, flags: LockFlags) -> None:
+    def lock(file_: types.IO | int, flags: LockFlags) -> None:
         # Windows locking does not support locking through `fh.fileno()` so
         # we cast it to make mypy and pyright happy
-        file_ = typing.cast(typing.IO, file_)
+        file_ = typing.cast(types.IO, file_)
 
         mode = 0
         if flags & LockFlags.NON_BLOCKING:
@@ -64,7 +64,7 @@ if os.name == 'nt':  # pragma: no cover
             if savepos:
                 file_.seek(savepos)
 
-    def unlock(file_: typing.IO) -> None:
+    def unlock(file_: types.IO) -> None:
         try:
             savepos = file_.tell()
             if savepos:

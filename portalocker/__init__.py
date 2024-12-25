@@ -61,19 +61,19 @@ LockFlags = constants.LockFlags
 #: context wrappers
 
 __all__ = [
-    'lock',
-    'unlock',
     'LOCK_EX',
-    'LOCK_SH',
     'LOCK_NB',
+    'LOCK_SH',
     'LOCK_UN',
-    'LockFlags',
-    'LockException',
-    'Lock',
-    'RLock',
     'AlreadyLocked',
     'BoundedSemaphore',
-    'TemporaryFileLock',
-    'open_atomic',
+    'Lock',
+    'LockException',
+    'LockFlags',
+    'RLock',
     'RedisLock',
+    'TemporaryFileLock',
+    'lock',
+    'open_atomic',
+    'unlock',
 ]
