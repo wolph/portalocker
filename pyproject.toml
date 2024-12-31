@@ -50,8 +50,6 @@ classifiers = [
 requires-python = '>=3.9'
 dependencies = [
     'pywin32>=226; platform_system == "Windows"',
-    'tomli-w>=1.0.0',
-    'tomlkit>=0.13.2',
 ]
 
 [project.urls]
