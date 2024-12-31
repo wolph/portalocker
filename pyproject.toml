@@ -115,6 +115,11 @@ warn_unreachable = true
 module = ['portalocker_tests.*']
 disallow_untyped_defs = false
 
+[dependency-groups]
+dev = [
+    'portalocker[tests]',
+]
+
 [tool.ruff]
 src = ['portalocker', 'portalocker_tests']
 include = ['portalocker/**/*.py', 'portalocker_tests/**/*.py']
@@ -129,6 +134,3 @@ ignore = [
     'PC170', # no pygrep-hooks because no rST
     'RTD',   # no RTD
 ]
-
-[tool.uv.pip]
-all-extras = true
