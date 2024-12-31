@@ -1,0 +1,78 @@
+env_list = [
+    'py39',
+    'py310',
+    'py311',
+    'py312',
+    'pypy3',
+    'docs',
+    'mypy',
+    'pyright',
+    'ruff',
+    'repo-review',
+    'codespell',
+]
+skip_missing_interpreters = true
+
+[env_run_base]
+pass_env = ['FORCE_COLOR']
+commands = [['pytest', '{posargs}']]
+extras = ['tests', 'redis']
+
+[env.mypy]
+commands = [['mypy']]
+
+[env.pyright]
+deps  = ['pyright']
+commands = [['pyright']]
+
+[env.ruff]
+deps = ['ruff']
+commands = [['ruff', 'check'], ['ruff', 'format', '--check']]
+
+[env.docs]
+extras = ['docs']
+allowlist_externals = ['rm', 'cd', 'mkdir']
+commands = [
+    [
+        'rm',
+        '-f',
+        'docs/modules.rst',
+    ],
+    [
+        'mkdir',
+        '-p',
+        'docs/_static',
+    ],
+    [
+        'sphinx-apidoc',
+        '-e',
+        '-o',
+        'docs/',
+        'portalocker',
+    ],
+    [
+        'rm',
+        '-f',
+        'docs/modules.rst',
+    ],
+    [
+        'sphinx-build',
+        '-b',
+        'html',
+        '-d',
+        'docs/_build/doctrees',
+        'docs',
+        'docs/_build/html',
+        '{posargs}',
+    ],
+]
+
+[env.repo-review]
+deps = ['sp-repo-review[cli]', 'validate-pyproject']
+commands = [['repo-review']]
+
+[env.codespell]
+commands = [['codespell']]
+deps = ['codespell', 'tomli']
+skip_install = true
+command = 'codespell'
