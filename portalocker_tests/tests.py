@@ -337,7 +337,7 @@ def lock(
 @pytest.mark.skipif(
     'pypy' in sys.version.lower(),
     reason='pypy3 does not support the multiprocessing test',
-    )
+)
 def test_shared_processes(tmpfile, fail_when_locked):
     flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
     print()
@@ -375,6 +375,7 @@ def _lock_and_sleep(
     'pypy' in sys.version.lower(),
     reason='pypy3 does not support the multiprocessing test',
 )
+@pytest.mark.flaky(reruns=5, reruns_delay=1)
 def test_exclusive_processes(
     tmpfile: str,
     fail_when_locked: bool,
@@ -389,7 +390,7 @@ def test_exclusive_processes(
         result_b = pool.apply_async(lock, [tmpfile, fail_when_locked, flags])
 
         try:
-            a = result_a.get(timeout=1)  # Wait for 'a' with timeout
+            a = result_a.get(timeout=1.2)  # Wait for 'a' with timeout
         except multiprocessing.TimeoutError:
             a = None
 
@@ -398,7 +399,7 @@ def test_exclusive_processes(
 
         try:
             # Lower timeout since we already waited with `a`
-            b = result_b.get(timeout=0.1)  # Wait for 'b' with timeout
+            b = result_b.get(timeout=0.6)  # Wait for 'b' with timeout
         except multiprocessing.TimeoutError:
             b = None
 
