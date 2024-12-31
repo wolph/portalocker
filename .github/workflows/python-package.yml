@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
@@ -50,9 +50,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Start Redis
-      uses: supercharge/redis-github-action@1.7.0
+      uses: supercharge/redis-github-action@1.8.0
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'

@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
@@ -36,7 +36,7 @@ jobs:
           python -m pip install -e '.[tests]'
 
       - name: Linting with pyright
-        uses: jakebailey/pyright-action@v1
+        uses: jakebailey/pyright-action@v2
         with:
           path: portalocker portalocker_tests
 
