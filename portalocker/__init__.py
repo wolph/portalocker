@@ -10,7 +10,7 @@ from .utils import (
 try:  # pragma: no cover
     from .redis import RedisLock
 except ImportError:  # pragma: no cover
-    RedisLock = None  # type: ignore
+    RedisLock = None  # type: ignore[assignment,misc]
 
 
 #: The package name on Pypi

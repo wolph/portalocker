@@ -2,6 +2,7 @@ import dataclasses
 import math
 import multiprocessing
 import os
+import sys
 import time
 import typing
 
@@ -19,7 +20,7 @@ if os.name == 'posix':
         fcntl.lockf,
     ]
 else:
-    LOCKERS = [None]  # type: ignore
+    LOCKERS = [None]  # type: ignore[list-item]
 
 
 @pytest.fixture
@@ -61,7 +62,7 @@ def test_with_timeout(tmpfile):
             print('writing more stuff to my cache...', file=fh)
 
 
-def test_without_timeout(tmpfile, monkeypatch):
+def test_without_timeout(tmpfile):
     # Open the file 2 times
     with pytest.raises(portalocker.LockException):
         with portalocker.Lock(tmpfile, timeout=None) as fh:
@@ -333,6 +334,10 @@ def lock(
 
 
 @pytest.mark.parametrize('fail_when_locked', [True, False])
+@pytest.mark.skipif(
+    'pypy' in sys.version.lower(),
+    reason='pypy3 does not support the multiprocessing test',
+    )
 def test_shared_processes(tmpfile, fail_when_locked):
     flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
     print()
@@ -351,8 +356,25 @@ def test_shared_processes(tmpfile, fail_when_locked):
             assert result == LockResult()
 
 
+def _lock_and_sleep(
+    filename: str,
+    fail_when_locked: bool,
+    flags: LockFlags,
+    keep_locked: float = 0.1,
+) -> LockResult:
+    result = lock(filename, fail_when_locked, flags)
+    print(f'{result=}')
+    time.sleep(keep_locked)
+    return result
+
+
 @pytest.mark.parametrize('fail_when_locked', [True, False])
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
+# Skip pypy3
+@pytest.mark.skipif(
+    'pypy' in sys.version.lower(),
+    reason='pypy3 does not support the multiprocessing test',
+)
 def test_exclusive_processes(
     tmpfile: str,
     fail_when_locked: bool,
@@ -367,23 +389,26 @@ def test_exclusive_processes(
         result_b = pool.apply_async(lock, [tmpfile, fail_when_locked, flags])
 
         try:
-            a = result_a.get(timeout=1.1)  # Wait for 'a' with timeout
+            a = result_a.get(timeout=1)  # Wait for 'a' with timeout
         except multiprocessing.TimeoutError:
             a = None
 
+        print(f'{a=}')
+        print(repr(a))
+
         try:
             # Lower timeout since we already waited with `a`
-            b = result_b.get(timeout=0.2)  # Wait for 'b' with timeout
+            b = result_b.get(timeout=0.1)  # Wait for 'b' with timeout
         except multiprocessing.TimeoutError:
             b = None
 
+        print(f'{b=}')
+        print(repr(b))
+
         assert a or b
         # Make sure a is always filled
-        if b:
-            b, a = b, a
-
-        print(f'{a=}')
-        print(f'{b=}')
+        if a is None:
+            b, a = a, b
 
         # make pyright happy
         assert a is not None
@@ -394,7 +419,7 @@ def test_exclusive_processes(
 
             assert not a.exception_class or not b.exception_class
             assert issubclass(
-                a.exception_class or b.exception_class,  # type: ignore
+                a.exception_class or b.exception_class,  # type: ignore[arg-type]
                 portalocker.LockException,
             )
         else:

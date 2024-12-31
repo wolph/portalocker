@@ -47,8 +47,12 @@ classifiers = [
     'Topic :: System :: Monitoring',
     'Typing :: Typed',
 ]
-requires-python = '>=3.8'
-dependencies = ['pywin32>=226; platform_system == "Windows"']
+requires-python = '>=3.9'
+dependencies = [
+    'pywin32>=226; platform_system == "Windows"',
+    'tomli-w>=1.0.0',
+    'tomlkit>=0.13.2',
+]
 
 [project.urls]
 bugs = 'https://github.com/wolph/portalocker/issues'
@@ -103,6 +107,38 @@ packages = ['portalocker', 'portalocker_tests']
 ignore_missing_imports = true
 check_untyped_defs = true
 exclude = ['dist', 'docs', '.venv', 'venv']
+enable_error_code = ['ignore-without-code', 'truthy-bool', 'redundant-expr']
+warn_unreachable = true
+
 [[tool.mypy.overrides]]
 module = ['portalocker_tests.*']
 disallow_untyped_defs = false
+
+[dependency-groups]
+dev = [
+    'pytest-doc>=0.0.1',
+    'pytest>=8.3.4',
+    'pytest-docs>=0.1.0',
+    'pytest-mypy>=0.10.3',
+    'pytest-timeout>=2.3.1',
+    'redis>=5.2.1',
+    'sphinx>=7.1.2',
+    'types-redis>=4.6.0.20241004',
+    'mypy>=1.14.0',
+    'pytest-cov>=5.0.0',
+]
+
+[tool.ruff]
+src = ['portalocker', 'portalocker_tests']
+include = ['portalocker/**/*.py', 'portalocker_tests/**/*.py']
+
+[tool.repo-review]
+ignore = [
+    'PY004', # no /docs
+    'PY007', # tox configured in tox.toml
+    'PP301', # pytest is irrelevant
+    'PC111', # no blacken-docs because markdown has no code
+    'PC140', # manual typecheck pre-commit hooks
+    'PC170', # no pygrep-hooks because no rST
+    'RTD',   # no RTD
+]

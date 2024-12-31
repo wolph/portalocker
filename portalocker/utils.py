@@ -393,7 +393,7 @@ class RLock(Lock):
         else:
             fh = super().acquire(timeout, check_interval, fail_when_locked)
         self._acquire_count += 1
-        assert fh
+        assert fh is not None
         return fh
 
     def release(self) -> None:

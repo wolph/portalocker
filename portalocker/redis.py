@@ -18,7 +18,7 @@ DEFAULT_UNAVAILABLE_TIMEOUT = 1
 DEFAULT_THREAD_SLEEP_TIME = 0.1
 
 
-class PubSubWorkerThread(redis.client.PubSubWorkerThread):  # type: ignore
+class PubSubWorkerThread(redis.client.PubSubWorkerThread):
     def run(self) -> None:
         try:
             super().run()

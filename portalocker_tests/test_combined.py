@@ -14,6 +14,6 @@ def test_combined(tmpdir):
 
     sys.path.append(output_file.dirname)
     # Combined is being generated above but linters won't understand that
-    import combined  # type: ignore
+    import combined  # pyright: ignore[reportMissingImports]
 
     assert combined
