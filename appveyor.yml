@@ -17,5 +17,4 @@ install:
 build: false  # Not a C# project, build stuff at the test step instead.
 
 test_script:
-  - $env:Path = "C:\Users\appveyor\.local\bin;$env:Path"
-  - uv run tox
+  - C:\Users\appveyor\.local\bin\uv.exe run tox
