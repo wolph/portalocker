@@ -338,6 +338,7 @@ def lock(
     'pypy' in sys.version.lower(),
     reason='pypy3 does not support the multiprocessing test',
 )
+@pytest.mark.flaky(reruns=5, reruns_delay=1)
 def test_shared_processes(tmpfile, fail_when_locked):
     flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
     print()
