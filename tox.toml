@@ -68,6 +68,7 @@ commands = [
 ]
 
 [env.repo-review]
+basepython = 'py3.12'
 deps = ['sp-repo-review[cli]', 'validate-pyproject']
 commands = [['repo-review']]
 
