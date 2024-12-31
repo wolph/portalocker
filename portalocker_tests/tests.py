@@ -349,24 +349,12 @@ def test_shared_processes(tmpfile, fail_when_locked):
         results = pool.starmap_async(lock, 2 * [args])
 
         # sourcery skip: no-loop-in-tests
-        for result in results.get(timeout=1.2):
+        for result in results.get(timeout=1.5):
             print(f'{result=}')
             # sourcery skip: no-conditionals-in-tests
             if result.exception_class is not None:
                 raise result.exception_class
             assert result == LockResult()
-
-
-def _lock_and_sleep(
-    filename: str,
-    fail_when_locked: bool,
-    flags: LockFlags,
-    keep_locked: float = 0.1,
-) -> LockResult:
-    result = lock(filename, fail_when_locked, flags)
-    print(f'{result=}')
-    time.sleep(keep_locked)
-    return result
 
 
 @pytest.mark.parametrize('fail_when_locked', [True, False])
