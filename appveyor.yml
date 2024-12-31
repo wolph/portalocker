@@ -17,4 +17,4 @@ install:
 build: false  # Not a C# project, build stuff at the test step instead.
 
 test_script:
-  - C:\Users\appveyor\.local\bin\uv.exe run tox
+  - C:\Users\appveyor\.local\bin\uvx.exe tox
