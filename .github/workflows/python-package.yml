@@ -9,6 +9,10 @@ on:
 env:
   FORCE_COLOR: 1
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Run os specific tests on the slower OS X/Windows machines
   windows_osx:

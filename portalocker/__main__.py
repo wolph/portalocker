@@ -90,7 +90,7 @@ def _read_file(
             yield _clean_line(line, names)
 
 
-def _clean_line(line: str, names: set[str]):
+def _clean_line(line: str, names: set[str]) -> str:
     # Replace `some_import.spam` with `spam`
     if names:
         joined_names = '|'.join(names)
@@ -100,7 +100,7 @@ def _clean_line(line: str, names: set[str]):
     return _USELESS_ASSIGNMENT_RE.sub('', line)
 
 
-def combine(args: argparse.Namespace):
+def combine(args: argparse.Namespace) -> None:
     output_file = args.output_file
     pathlib.Path(output_file.name).parent.mkdir(parents=True, exist_ok=True)
 

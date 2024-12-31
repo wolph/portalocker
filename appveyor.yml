@@ -6,16 +6,19 @@ image:
 
 environment:
   matrix:
-  - TOXENV: py38
   - TOXENV: py39
   - TOXENV: py310
   - TOXENV: py311
+  - TOXENV: py312
+  - TOXENV: py313
 
 install:
-  - py -m pip install -U tox setuptools wheel
-  - py -m pip install -Ue ".[tests]"
+  - powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+#  - py -m pip install -U tox setuptools wheel
+#  - py -m pip install -Ue ".[tests]"
 
 build: false  # Not a C# project, build stuff at the test step instead.
 
 test_script:
-  - py -m tox"
+  - dir
+  - C:\Users\appveyor\.local\bin\uvx.exe tox

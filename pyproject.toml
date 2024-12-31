@@ -5,18 +5,10 @@ requires = ['setuptools', 'setuptools-scm']
 [project]
 name = 'portalocker'
 dynamic = ['version']
-authors = [{name = 'Rick van Hattem', email = 'wolph@wol.ph'}]
-license = {text = 'BSD-3-Clause'}
+authors = [{ name = 'Rick van Hattem', email = 'wolph@wol.ph' }]
+license = { text = 'BSD-3-Clause' }
 description = 'Wraps the portalocker recipe for easy usage'
-keywords = [
-    'locking',
-    'locks',
-    'with',
-    'statement',
-    'windows',
-    'linux',
-    'unix',
-]
+keywords = ['locking', 'locks', 'with', 'statement', 'windows', 'linux', 'unix']
 readme = 'README.rst'
 classifiers = [
     'Development Status :: 5 - Production/Stable',
@@ -53,9 +45,14 @@ classifiers = [
     'Topic :: Software Development :: Libraries :: Python Modules',
     'Topic :: Software Development :: Libraries',
     'Topic :: System :: Monitoring',
+    'Typing :: Typed',
 ]
-requires-python = '>=3.8'
-dependencies = ['pywin32>=226; platform_system == "Windows"']
+requires-python = '>=3.9'
+dependencies = [
+    'pywin32>=226; platform_system == "Windows"',
+    'tomli-w>=1.0.0',
+    'tomlkit>=0.13.2',
+]
 
 [project.urls]
 bugs = 'https://github.com/wolph/portalocker/issues'
@@ -72,6 +69,7 @@ tests = [
     'pytest-mypy>=0.8.0',
     'types-redis',
     'redis',
+    'pytest-rerunfailures>=15.0',
 ]
 redis = ['redis']
 
@@ -99,3 +97,40 @@ skip = '*/htmlcov,./docs/_build,*.asc'
 include = ['portalocker', 'portalocker_tests']
 exclude = ['dist/*']
 strict = ['portalocker']
+
+[tool.mypy]
+python_version = '3.9'
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_unused_ignores = false
+packages = ['portalocker', 'portalocker_tests']
+ignore_missing_imports = true
+check_untyped_defs = true
+exclude = ['dist', 'docs', '.venv', 'venv']
+enable_error_code = ['ignore-without-code', 'truthy-bool', 'redundant-expr']
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ['portalocker_tests.*']
+disallow_untyped_defs = false
+
+[dependency-groups]
+dev = [
+    'portalocker[tests]',
+]
+
+[tool.ruff]
+src = ['portalocker', 'portalocker_tests']
+include = ['portalocker/**/*.py', 'portalocker_tests/**/*.py']
+
+[tool.repo-review]
+ignore = [
+    'PY004', # no /docs
+    'PY007', # tox configured in tox.toml
+    'PP301', # pytest is irrelevant
+    'PC111', # no blacken-docs because markdown has no code
+    'PC140', # manual typecheck pre-commit hooks
+    'PC170', # no pygrep-hooks because no rST
+    'RTD',   # no RTD
+]

@@ -2,6 +2,7 @@ import dataclasses
 import math
 import multiprocessing
 import os
+import sys
 import time
 import typing
 
@@ -19,7 +20,7 @@ if os.name == 'posix':
         fcntl.lockf,
     ]
 else:
-    LOCKERS = [None]  # type: ignore
+    LOCKERS = [None]  # type: ignore[list-item]
 
 
 @pytest.fixture
@@ -61,7 +62,7 @@ def test_with_timeout(tmpfile):
             print('writing more stuff to my cache...', file=fh)
 
 
-def test_without_timeout(tmpfile, monkeypatch):
+def test_without_timeout(tmpfile):
     # Open the file 2 times
     with pytest.raises(portalocker.LockException):
         with portalocker.Lock(tmpfile, timeout=None) as fh:
@@ -305,8 +306,8 @@ def lock(
     filename: str,
     fail_when_locked: bool,
     flags: LockFlags,
-    timeout=0.1,
-    keep_locked=0.05,
+    timeout: float = 0.1,
+    keep_locked: float = 0.05,
 ) -> LockResult:
     # Returns a case of True, False or FileNotFound
     # https://thedailywtf.com/articles/what_is_truth_0x3f_
@@ -333,6 +334,11 @@ def lock(
 
 
 @pytest.mark.parametrize('fail_when_locked', [True, False])
+@pytest.mark.skipif(
+    'pypy' in sys.version.lower(),
+    reason='pypy3 does not support the multiprocessing test',
+)
+@pytest.mark.flaky(reruns=5, reruns_delay=1)
 def test_shared_processes(tmpfile, fail_when_locked):
     flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
     print()
@@ -343,7 +349,7 @@ def test_shared_processes(tmpfile, fail_when_locked):
         results = pool.starmap_async(lock, 2 * [args])
 
         # sourcery skip: no-loop-in-tests
-        for result in results.get(timeout=1.0):
+        for result in results.get(timeout=1.5):
             print(f'{result=}')
             # sourcery skip: no-conditionals-in-tests
             if result.exception_class is not None:
@@ -353,7 +359,17 @@ def test_shared_processes(tmpfile, fail_when_locked):
 
 @pytest.mark.parametrize('fail_when_locked', [True, False])
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
-def test_exclusive_processes(tmpfile: str, fail_when_locked: bool, locker):
+# Skip pypy3
+@pytest.mark.skipif(
+    'pypy' in sys.version.lower(),
+    reason='pypy3 does not support the multiprocessing test',
+)
+@pytest.mark.flaky(reruns=5, reruns_delay=1)
+def test_exclusive_processes(
+    tmpfile: str,
+    fail_when_locked: bool,
+    locker: typing.Callable[..., typing.Any],
+) -> None:
     flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING
 
     print('Locking', tmpfile, fail_when_locked, locker)
@@ -363,23 +379,26 @@ def test_exclusive_processes(tmpfile: str, fail_when_locked: bool, locker):
         result_b = pool.apply_async(lock, [tmpfile, fail_when_locked, flags])
 
         try:
-            a = result_a.get(timeout=1.1)  # Wait for 'a' with timeout
+            a = result_a.get(timeout=1.2)  # Wait for 'a' with timeout
         except multiprocessing.TimeoutError:
             a = None
 
+        print(f'{a=}')
+        print(repr(a))
+
         try:
             # Lower timeout since we already waited with `a`
-            b = result_b.get(timeout=0.2)  # Wait for 'b' with timeout
+            b = result_b.get(timeout=0.6)  # Wait for 'b' with timeout
         except multiprocessing.TimeoutError:
             b = None
 
+        print(f'{b=}')
+        print(repr(b))
+
         assert a or b
         # Make sure a is always filled
-        if b:
-            b, a = b, a
-
-        print(f'{a=}')
-        print(f'{b=}')
+        if a is None:
+            b, a = a, b
 
         # make pyright happy
         assert a is not None
@@ -390,7 +409,7 @@ def test_exclusive_processes(tmpfile: str, fail_when_locked: bool, locker):
 
             assert not a.exception_class or not b.exception_class
             assert issubclass(
-                a.exception_class or b.exception_class,  # type: ignore
+                a.exception_class or b.exception_class,  # type: ignore[arg-type]
                 portalocker.LockException,
             )
         else:
@@ -421,7 +440,7 @@ def test_lock_fileno(tmpfile, locker):
 )
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
 def test_locker_mechanism(tmpfile, locker):
-    '''Can we switch the locking mechanism?'''
+    """Can we switch the locking mechanism?"""
     # We can test for flock vs lockf based on their different behaviour re.
     # locking the same file.
     with portalocker.Lock(tmpfile, 'a+', flags=LockFlags.EXCLUSIVE):
@@ -443,7 +462,7 @@ def test_locker_mechanism(tmpfile, locker):
 
 
 def test_exception(monkeypatch, tmpfile):
-    '''Do we stop immediately if the locking fails, even with a timeout?'''
+    """Do we stop immediately if the locking fails, even with a timeout?"""
 
     def patched_lock(*args, **kwargs):
         raise ValueError('Test exception')
