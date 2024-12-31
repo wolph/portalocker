@@ -124,7 +124,8 @@ def combine(args: argparse.Namespace) -> None:
     logger.info(f'Wrote combined file to {output_file.name}')
     # Run black and ruff if available. If not then just run the file.
     os.system(f'black {output_file.name}')
-    os.system(f'ruff --fix {output_file.name}')
+    os.system(f'ruff format {output_file.name}')
+    os.system(f'ruff check --fix --fix-only {output_file.name}')
     os.system(f'python3 {output_file.name}')
 
 
