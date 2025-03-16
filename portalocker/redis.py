@@ -134,6 +134,13 @@ class RedisLock(utils.LockBase):
     def client_name(self) -> str:
         return f'{self.channel}-lock'
 
+    def _timeout_generator(self, timeout: float, check_interval: float):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            yield
+            sleep_time = check_interval * (0.5 + random.random())
+            time.sleep(sleep_time)
+
     def acquire(  # type: ignore[override]
         self,
         timeout: float | None = None,
