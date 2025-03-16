@@ -46,6 +46,7 @@ if os.name == 'nt':  # pragma: no cover
     LOCKER = win32file.LockFileEx  # pyright: ignore[reportConstantRedefinition]
 
     __overlapped = pywintypes.OVERLAPPED()
+    lock_length = 0x10000
 
     def lock_win32(file_: types.IO | int, flags: LockFlags) -> None:
         # Windows locking does not support locking through `fh.fileno()` so
@@ -267,8 +268,8 @@ elif os.name == 'posix':  # pragma: no cover
             ) from exc_value
 
     def unlock(file: types.IO) -> None:  # type: ignore[misc]
-        assert LOCKER is not None, 'We need a locking function in `LOCKER` '
-        LOCKER(file.fileno(), LockFlags.UNBLOCK)
+        import fcntl
+        fcntl.flock(file, fcntl.LOCK_UN)
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')
