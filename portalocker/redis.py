@@ -193,9 +193,9 @@ class RedisLock(utils.LockBase):
                     self.release()
 
             if fail_when_locked:  # pragma: no cover
-                raise exceptions.AlreadyLocked(exceptions)
+                raise exceptions.AlreadyLocked()
 
-        raise exceptions.AlreadyLocked(exceptions)
+        raise exceptions.AlreadyLocked()
 
     def check_or_kill_lock(
         self,
