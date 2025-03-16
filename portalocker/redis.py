@@ -136,11 +136,13 @@ class RedisLock(utils.LockBase):
 
     def _timeout_generator(self, timeout: float, check_interval: float):
         deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            yield
+        first = True
+        while first or time.monotonic() < deadline:
+            first = False
             effective_interval = check_interval if check_interval > 0 else self.thread_sleep_time
             sleep_time = effective_interval * (0.5 + random.random())
             time.sleep(sleep_time)
+            yield
 
     def acquire(  # type: ignore[override]
         self,
@@ -192,7 +194,7 @@ class RedisLock(utils.LockBase):
                     sleep_time=self.thread_sleep_time,
                 )
                 self.thread.start()
-
+                time.sleep(0.01)
                 subscribers = connection.pubsub_numsub(self.channel)[0][1]
                 if subscribers == 1:  # pragma: no branch
                     return self

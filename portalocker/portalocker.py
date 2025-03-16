@@ -268,8 +268,8 @@ elif os.name == 'posix':  # pragma: no cover
             ) from exc_value
 
     def unlock(file: types.IO) -> None:  # type: ignore[misc]
-        import fcntl
-        fcntl.flock(file, fcntl.LOCK_UN)
+        assert LOCKER is not None, 'We need a locking function in `LOCKER` '
+        LOCKER(file.fileno(), LockFlags.UNBLOCK)
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')
