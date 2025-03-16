@@ -138,7 +138,8 @@ class RedisLock(utils.LockBase):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             yield
-            sleep_time = check_interval * (0.5 + random.random())
+            effective_interval = check_interval if check_interval > 0 else self.thread_sleep_time
+            sleep_time = effective_interval * (0.5 + random.random())
             time.sleep(sleep_time)
 
     def acquire(  # type: ignore[override]
