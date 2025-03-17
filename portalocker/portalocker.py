@@ -37,13 +37,13 @@ LOCKER: typing.Callable[[int | HasFileno, int], typing.Any] | None = None
 if os.name == 'nt':  # pragma: no cover
     import msvcrt
     if not hasattr(msvcrt, "LK_NBRLCK"):
-        msvcrt.LK_NBRLCK = 0
+        msvcrt.LK_NBRLCK = 0  # type: ignore[attr-defined]
     if not hasattr(msvcrt, "LK_RLCK"):
-        msvcrt.LK_RLCK = 1
+        msvcrt.LK_RLCK = 1  # type: ignore[attr-defined]
     if not hasattr(msvcrt, "LK_NBLCK"):
-        msvcrt.LK_NBLCK = 2
+        msvcrt.LK_NBLCK = 2  # type: ignore[attr-defined]
     if not hasattr(msvcrt, "LK_LOCK"):
-        msvcrt.LK_LOCK = 3
+        msvcrt.LK_LOCK = 3  # type: ignore[attr-defined]
 
     import pywintypes
     import win32con
@@ -58,10 +58,10 @@ if os.name == 'nt':  # pragma: no cover
     __overlapped = pywintypes.OVERLAPPED()
     lock_length = 0x10000
 
-    def lock_win32(file_: typing.IO[Any] | int, flags: LockFlags) -> None:
+    def lock_win32(file_: typing.IO[typing.Any] | int, flags: LockFlags) -> None:
         # Windows locking does not support locking through `fh.fileno()` so
         # we cast it to make mypy and pyright happy
-        file_ = typing.cast(types.IO, file_)
+        file_ = typing.cast(typing.IO[typing.Any], file_)
 
         mode = 0
         if flags & LockFlags.NON_BLOCKING:
@@ -98,6 +98,7 @@ if os.name == 'nt':  # pragma: no cover
 
     def unlock_win32(file_: typing.IO[Any] | int) -> None:
         try:
+            file_ = typing.cast(typing.IO[typing.Any], file_)
             savepos = file_.tell()
             if savepos:
                 file_.seek(0)
@@ -141,6 +142,7 @@ if os.name == 'nt':  # pragma: no cover
                     if (flags & LockFlags.NON_BLOCKING)
                     else msvcrt.LK_RLCK
                 )
+            file_ = typing.cast(typing.IO[typing.Any], file_)
             hfile = win32file._get_osfhandle(file_.fileno())
             try:
                 win32file.LockFileEx(hfile, mode, 0, -0x10000, __overlapped)
@@ -161,6 +163,7 @@ if os.name == 'nt':  # pragma: no cover
                 else msvcrt.LK_LOCK
             )
             try:
+                file_ = typing.cast(typing.IO[typing.Any], file_)
                 savepos = file_.tell()
                 if savepos:
                     file_.seek(0)
@@ -224,14 +227,14 @@ if os.name == 'nt':  # pragma: no cover
                 fh=file_,
             ) from exc
 
-    def lock(file: int | typing.IO[Any], flags: LockFlags) -> None:
+    def lock(file: int | typing.IO[typing.Any], flags: LockFlags) -> None:
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
         if win32file.LockFileEx == LOCKER:
             lock_win32(file, flags)
         else:
             lock_msvcrt(file, flags)
 
-    def unlock(file: int | typing.IO[Any]) -> None:
+    def unlock(file: int | typing.IO[typing.Any]) -> None:
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
         if win32file.LockFileEx == LOCKER:
             unlock_win32(file)
@@ -247,7 +250,7 @@ elif os.name == 'posix':  # pragma: no cover
     # but any callable that matches the syntax will be accepted.
     LOCKER = fcntl.flock  # pyright: ignore[reportConstantRedefinition]
 
-    def lock(file: int | types.IO, flags: LockFlags) -> None:  # type: ignore[misc]
+    def lock(file: int | typing.IO[typing.Any], flags: LockFlags) -> None:  # type: ignore[misc]
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
         # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled
         # results in an error
@@ -291,7 +294,7 @@ elif os.name == 'posix':  # pragma: no cover
                 fh=file,
             ) from exc_value
 
-    def unlock(file: int | types.IO) -> None:
+    def unlock(file: int | typing.IO[typing.Any]) -> None:
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
         if isinstance(file, int):
             fd = file

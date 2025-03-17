@@ -150,7 +150,7 @@ class RedisLock(utils.LockBase):
             )
             sleep_time = effective_interval * (0.5 + random.random())
             time.sleep(sleep_time)
-            yield
+            yield 0
 
     def acquire(  # type: ignore[override]
         self,
