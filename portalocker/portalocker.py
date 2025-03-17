@@ -191,6 +191,7 @@ if os.name == 'nt':  # pragma: no cover
         If a 'Permission denied' error occurs, falls back to UnlockFileEx.
         """
         try:
+            file_ = typing.cast(typing.IO[typing.Any], file_)
             savepos = file_.tell()
             if savepos:
                 file_.seek(0)
