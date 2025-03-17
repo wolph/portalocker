@@ -59,7 +59,7 @@ def _read_file(
     seen_files.add(path)
     paren = False
     from_ = None
-    for line in path.open(encoding="utf-8"):
+    for line in path.open(encoding='utf-8'):
         if '__future__' in line:
             continue
 
