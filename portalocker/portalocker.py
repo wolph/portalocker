@@ -177,7 +177,7 @@ if os.name == 'nt':  # pragma: no cover
     def unlock_msvcrt(file_: typing.IO) -> None:
         """Unlock a file using msvcrt.locking (alternative method).
 
-        If a 'Permission denied' error occurs, falls back to win32file.UnlockFileEx.
+        If a 'Permission denied' error occurs, falls back to UnlockFileEx.
         """
         try:
             savepos = file_.tell()
