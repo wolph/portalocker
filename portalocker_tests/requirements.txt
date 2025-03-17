@@ -1,2 +1,3 @@
+# mypy: ignore-errors
 # type: ignore
 -e.[tests]
