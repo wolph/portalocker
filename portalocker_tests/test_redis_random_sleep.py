@@ -1,12 +1,13 @@
 import time
+from typing import Any
 
 from portalocker import redis
 
 
 class FakeLock(redis.RedisLock):
-    def __init__(self, thread_sleep_time, *args, **kwargs):
+    def __init__(self, thread_sleep_time: float, *args: Any, **kwargs: Any) -> None:
         # Channel doesn't affect sleep behavior.
-        super().__init__(*args, channel='test_channel', **kwargs)
+        super().__init__('test_channel', *args, **kwargs)
         self.thread_sleep_time = thread_sleep_time
 
 
