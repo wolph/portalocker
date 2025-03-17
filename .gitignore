@@ -4,3 +4,4 @@ dist
 htmlcov
 *.egg-info
 .cache
+.aider*
