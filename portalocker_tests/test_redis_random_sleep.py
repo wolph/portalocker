@@ -1,5 +1,5 @@
 import time
-import pytest
+
 from portalocker import redis
 
 
