@@ -1,3 +1,2 @@
-# mypy: ignore-errors
-# type: ignore
+# mypy: skip-file
 -e.[tests]
