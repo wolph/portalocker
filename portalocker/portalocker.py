@@ -231,7 +231,7 @@ if os.name == 'nt':  # pragma: no cover
                 fh=file_,
             ) from exc
 
-    LOCKER = (lock_msvcrt, unlock_msvcrt)  # use msvcrt.locking based implementation for Windows
+    LOCKER = (lock_msvcrt, unlock_msvcrt)  # msvcrt locking on Windows
 
     def lock(file: int | typing.IO[typing.Any], flags: LockFlags) -> None:
         lock_func, _ = LOCKER
