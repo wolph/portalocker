@@ -55,7 +55,7 @@ if os.name == 'nt':  # pragma: no cover
     # The locking implementation.
     # Expected values are either win32file.LockFileEx() or msvcrt.locking(),
     # but any callable that matches the syntax will be accepted.
-    LOCKER = win32file.LockFileEx  # pyright: ignore[reportConstantRedefinition]
+    LOCKER = lock_msvcrt  # use msvcrt.locking based implementation for Windows
 
     __overlapped = pywintypes.OVERLAPPED()
     lock_length = 0x10000
