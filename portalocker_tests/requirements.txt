@@ -1,1 +1,2 @@
+# type: ignore
 -e.[tests]
