@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import sys
 import typing
+from typing import Any
 
 from . import constants, exceptions, types
 
@@ -138,9 +139,9 @@ if os.name == 'nt':  # pragma: no cover
                 )
             else:
                 mode = (
-                    msvcrt.LK_NBRLCK
+                    msvcrt.LK_NBRLCK  # type: ignore[attr-defined]
                     if (flags & LockFlags.NON_BLOCKING)
-                    else msvcrt.LK_RLCK
+                    else msvcrt.LK_RLCK  # type: ignore[attr-defined]
                 )
             file_ = typing.cast(typing.IO[typing.Any], file_)
             hfile = win32file._get_osfhandle(file_.fileno())
@@ -158,9 +159,9 @@ if os.name == 'nt':  # pragma: no cover
         else:
             # For exclusive locks, use msvcrt.locking.
             mode = (
-                msvcrt.LK_NBLCK
+                msvcrt.LK_NBLCK  # type: ignore[attr-defined]
                 if flags & LockFlags.NON_BLOCKING
-                else msvcrt.LK_LOCK
+                else msvcrt.LK_LOCK  # type: ignore[attr-defined]
             )
             try:
                 file_ = typing.cast(typing.IO[typing.Any], file_)

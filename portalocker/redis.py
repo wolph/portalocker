@@ -134,7 +134,7 @@ class RedisLock(utils.LockBase):
     def client_name(self) -> str:
         return f'{self.channel}-lock'
 
-    def _timeout_generator(self, timeout: float | None, check_interval: float | None) -> typing.Iterator[None]:
+    def _timeout_generator(self, timeout: float | None, check_interval: float | None) -> typing.Iterator[int]:
         if timeout is None:
             timeout = 0.0
         if check_interval is None:
