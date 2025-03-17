@@ -231,21 +231,15 @@ if os.name == 'nt':  # pragma: no cover
                 fh=file_,
             ) from exc
 
-    LOCKER = lock_msvcrt  # use msvcrt.locking based implementation for Windows
+    LOCKER = (lock_msvcrt, unlock_msvcrt)  # use msvcrt.locking based implementation for Windows
 
     def lock(file: int | typing.IO[typing.Any], flags: LockFlags) -> None:
-        assert LOCKER is not None, 'We need a locking function in `LOCKER` '
-        if win32file.LockFileEx == LOCKER:
-            lock_win32(file, flags)
-        else:
-            lock_msvcrt(file, flags)
+        lock_func, _ = LOCKER
+        lock_func(file, flags)
 
     def unlock(file: int | typing.IO[typing.Any]) -> None:
-        assert LOCKER is not None, 'We need a locking function in `LOCKER` '
-        if win32file.LockFileEx == LOCKER:
-            unlock_win32(file)
-        else:
-            unlock_msvcrt(file)
+        _, unlock_func = LOCKER
+        unlock_func(file)
 
 elif os.name == 'posix':  # pragma: no cover
     import errno
