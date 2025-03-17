@@ -55,7 +55,6 @@ if os.name == 'nt':  # pragma: no cover
     # The locking implementation.
     # Expected values are either win32file.LockFileEx() or msvcrt.locking(),
     # but any callable that matches the syntax will be accepted.
-    LOCKER = lock_msvcrt  # use msvcrt.locking based implementation for Windows
 
     __overlapped = pywintypes.OVERLAPPED()
     lock_length = 0x10000
@@ -231,6 +230,8 @@ if os.name == 'nt':  # pragma: no cover
                 exc.strerror,
                 fh=file_,
             ) from exc
+
+    LOCKER = lock_msvcrt  # use msvcrt.locking based implementation for Windows
 
     def lock(file: int | typing.IO[typing.Any], flags: LockFlags) -> None:
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
