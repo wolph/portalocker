@@ -54,7 +54,7 @@ def test_timeout_generator_with_negative_check_interval(monkeypatch):
 
     monkeypatch.setattr(time, 'sleep', fake_sleep)
 
-    # For negative check_interval, effective_interval falls back to thread_sleep_time.
+    # For negative check_interval, effective_interval is thread_sleep_time.
     lock = FakeLock(thread_sleep_time=0.05)
     gen = lock._timeout_generator(timeout=0.1, check_interval=-0.01)
     next(gen)
