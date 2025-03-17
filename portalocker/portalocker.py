@@ -21,7 +21,7 @@ import sys
 import typing
 from typing import Any
 
-from . import constants, exceptions, types
+from . import constants, exceptions
 
 # Alias for readability. Due to import recursion issues we cannot do:
 # from .constants import LockFlags
@@ -37,13 +37,13 @@ LOCKER: typing.Callable[[int | HasFileno, int], typing.Any] | None = None
 
 if os.name == 'nt':  # pragma: no cover
     import msvcrt
-    if not hasattr(msvcrt, "LK_NBRLCK"):
+    if not hasattr(msvcrt, 'LK_NBRLCK'):
         msvcrt.LK_NBRLCK = 0  # type: ignore[attr-defined]
-    if not hasattr(msvcrt, "LK_RLCK"):
+    if not hasattr(msvcrt, 'LK_RLCK'):
         msvcrt.LK_RLCK = 1  # type: ignore[attr-defined]
-    if not hasattr(msvcrt, "LK_NBLCK"):
+    if not hasattr(msvcrt, 'LK_NBLCK'):
         msvcrt.LK_NBLCK = 2  # type: ignore[attr-defined]
-    if not hasattr(msvcrt, "LK_LOCK"):
+    if not hasattr(msvcrt, 'LK_LOCK'):
         msvcrt.LK_LOCK = 3  # type: ignore[attr-defined]
 
     import pywintypes

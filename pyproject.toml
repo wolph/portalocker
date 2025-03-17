@@ -131,4 +131,5 @@ ignore = [
     'PC140', # manual typecheck pre-commit hooks
     'PC170', # no pygrep-hooks because no rST
     'RTD',   # no RTD
+    'PY005',  # Tests folder is not named tests
 ]
