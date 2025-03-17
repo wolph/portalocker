@@ -173,7 +173,6 @@ class LockBase(abc.ABC):  # pragma: no cover
         return None
 
 
-
 class Lock(LockBase):
     """Lock manager with built-in timeout
 

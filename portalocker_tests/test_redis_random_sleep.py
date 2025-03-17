@@ -5,7 +5,9 @@ from portalocker import redis
 
 
 class FakeLock(redis.RedisLock):
-    def __init__(self, thread_sleep_time: float, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self, thread_sleep_time: float, *args: Any, **kwargs: Any
+    ) -> None:
         # Channel doesn't affect sleep behavior.
         super().__init__('test_channel', *args, **kwargs)
         self.thread_sleep_time = thread_sleep_time

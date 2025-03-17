@@ -37,6 +37,7 @@ LOCKER: typing.Callable[[int | HasFileno, int], typing.Any] | None = None
 
 if os.name == 'nt':  # pragma: no cover
     import msvcrt
+
     if not hasattr(msvcrt, 'LK_NBRLCK'):
         msvcrt.LK_NBRLCK = 0  # type: ignore[attr-defined]
     if not hasattr(msvcrt, 'LK_RLCK'):
@@ -59,7 +60,9 @@ if os.name == 'nt':  # pragma: no cover
     __overlapped = pywintypes.OVERLAPPED()
     lock_length = 0x10000
 
-    def lock_win32(file_: typing.IO[typing.Any] | int, flags: LockFlags) -> None:
+    def lock_win32(
+        file_: typing.IO[typing.Any] | int, flags: LockFlags
+    ) -> None:
         # Windows locking does not support locking through `fh.fileno()` so
         # we cast it to make mypy and pyright happy
         file_ = typing.cast(typing.IO[typing.Any], file_)
