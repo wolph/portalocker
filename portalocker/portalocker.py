@@ -11,7 +11,7 @@ win32file.LockFileEx or msvcrt.locking.
 This version “packs” the implementation functions into a single variable,
 LOCKER, which is a tuple of the form:
      (lock_function, unlock_function)
-The exported lock() and unlock() functions simply delegate to the ones stored in LOCKER.
+The exported functions delegate to those in LOCKER.
 """
 
 from __future__ import annotations
@@ -163,7 +163,7 @@ if os.name == 'nt':  # pragma: no cover
                         exceptions.LockException.LOCK_FAILED,
                         exc_value.strerror,
                         fh=file_,
-                    )
+                    ) from exc_value
                 finally:
                     if savepos:
                         file_.seek(savepos)
@@ -172,12 +172,12 @@ if os.name == 'nt':  # pragma: no cover
                     exceptions.LockException.LOCK_FAILED,
                     exc_value.strerror,
                     fh=file_,
-                )
+                ) from exc_value
 
     def unlock_msvcrt(file_: typing.IO) -> None:
         """Unlock a file using msvcrt.locking (alternative method).
 
-        If a "Permission denied" error occurs, falls back to win32file.UnlockFileEx.
+        If a 'Permission denied' error occurs, falls back to win32file.UnlockFileEx.
         """
         try:
             savepos = file_.tell()
@@ -205,7 +205,7 @@ if os.name == 'nt':  # pragma: no cover
                         exceptions.LockException.LOCK_FAILED,
                         exception.strerror,
                         fh=file_,
-                    )
+                    ) from exception
             finally:
                 if savepos:
                     file_.seek(savepos)
@@ -214,7 +214,7 @@ if os.name == 'nt':  # pragma: no cover
                 exceptions.LockException.LOCK_FAILED,
                 exc.strerror,
                 fh=file_,
-            )
+            ) from exc
 
     def lock(file: types.IO, flags: LockFlags) -> None:
         assert LOCKER is not None, 'We need a locking function in `LOCKER` '
