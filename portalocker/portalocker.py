@@ -234,10 +234,12 @@ if os.name == 'nt':  # pragma: no cover
     LOCKER = (lock_msvcrt, unlock_msvcrt)  # msvcrt locking on Windows
 
     def lock(file: int | typing.IO[typing.Any], flags: LockFlags) -> None:
+        assert LOCKER is not None, 'We need a locking function in `LOCKER`'
         lock_func, _ = LOCKER
         lock_func(file, flags)
 
     def unlock(file: int | typing.IO[typing.Any]) -> None:
+        assert LOCKER is not None, 'We need a locking function in `LOCKER`'
         _, unlock_func = LOCKER
         unlock_func(file)
 
