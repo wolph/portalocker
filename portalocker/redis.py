@@ -139,7 +139,11 @@ class RedisLock(utils.LockBase):
         first = True
         while first or time.monotonic() < deadline:
             first = False
-            effective_interval = check_interval if check_interval > 0 else self.thread_sleep_time
+            effective_interval = (
+                check_interval
+                if check_interval > 0
+                else self.thread_sleep_time
+            )
             sleep_time = effective_interval * (0.5 + random.random())
             time.sleep(sleep_time)
             yield

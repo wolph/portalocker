@@ -1,4 +1,4 @@
-'''Module portalocker.
+"""Module portalocker.
 
 This module provides cross-platform file locking functionality.
 The Windows implementation now supports two variants:
@@ -12,7 +12,7 @@ This version “packs” the implementation functions into a single variable,
 LOCKER, which is a tuple of the form:
      (lock_function, unlock_function)
 The exported lock() and unlock() functions simply delegate to the ones stored in LOCKER.
-'''
+"""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from . import constants, exceptions, types
 # Alias for readability. Due to import recursion issues we cannot do:
 # from .constants import LockFlags
 LockFlags = constants.LockFlags
+
 
 # Protocol for objects with a fileno() method.
 class HasFileno(typing.Protocol):
@@ -116,13 +117,21 @@ if os.name == 'nt':  # pragma: no cover
             ) from exc
 
     def lock_msvcrt(file_: typing.IO, flags: LockFlags) -> None:
-        '''Lock a file using an alternative method (msvcrt.locking).'''
+        """Lock a file using an alternative method (msvcrt.locking)."""
         if flags & LockFlags.SHARED:
             # For shared locks use win32file.LockFileEx.
             if sys.version_info.major == 2:
-                mode = win32con.LOCKFILE_FAIL_IMMEDIATELY if (flags & LockFlags.NON_BLOCKING) else 0
+                mode = (
+                    win32con.LOCKFILE_FAIL_IMMEDIATELY
+                    if (flags & LockFlags.NON_BLOCKING)
+                    else 0
+                )
             else:
-                mode = msvcrt.LK_NBRLCK if (flags & LockFlags.NON_BLOCKING) else msvcrt.LK_RLCK
+                mode = (
+                    msvcrt.LK_NBRLCK
+                    if (flags & LockFlags.NON_BLOCKING)
+                    else msvcrt.LK_RLCK
+                )
             hfile = win32file._get_osfhandle(file_.fileno())
             try:
                 win32file.LockFileEx(hfile, mode, 0, -0x10000, __overlapped)
@@ -137,7 +146,11 @@ if os.name == 'nt':  # pragma: no cover
                     raise
         else:
             # For exclusive locks, use msvcrt.locking.
-            mode = msvcrt.LK_NBLCK if flags & LockFlags.NON_BLOCKING else msvcrt.LK_LOCK
+            mode = (
+                msvcrt.LK_NBLCK
+                if flags & LockFlags.NON_BLOCKING
+                else msvcrt.LK_LOCK
+            )
             try:
                 savepos = file_.tell()
                 if savepos:
@@ -161,10 +174,10 @@ if os.name == 'nt':  # pragma: no cover
                 )
 
     def unlock_msvcrt(file_: typing.IO) -> None:
-        '''Unlock a file using msvcrt.locking (alternative method).
+        """Unlock a file using msvcrt.locking (alternative method).
 
         If a "Permission denied" error occurs, falls back to win32file.UnlockFileEx.
-        '''
+        """
         try:
             savepos = file_.tell()
             if savepos:
@@ -176,7 +189,9 @@ if os.name == 'nt':  # pragma: no cover
                 if exc.strerror == 'Permission denied':
                     hfile = win32file._get_osfhandle(file_.fileno())
                     try:
-                        win32file.UnlockFileEx(hfile, 0, -0x10000, __overlapped)
+                        win32file.UnlockFileEx(
+                            hfile, 0, -0x10000, __overlapped
+                        )
                     except pywintypes.error as exc:
                         exception = exc
                         if exc.winerror == winerror.ERROR_NOT_LOCKED:
