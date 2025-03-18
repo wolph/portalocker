@@ -14,22 +14,27 @@ env_list = [
 skip_missing_interpreters = true
 
 [env_run_base]
+labels = ['python']
 pass_env = ['FORCE_COLOR']
 commands = [['pytest', '{posargs}']]
 extras = ['tests', 'redis']
 
 [env.mypy]
+labels = ['lint']
 commands = [['mypy']]
 
 [env.pyright]
+labels = ['lint']
 deps  = ['pyright']
 commands = [['pyright']]
 
 [env.ruff]
+labels = ['lint']
 deps = ['ruff']
 commands = [['ruff', 'check'], ['ruff', 'format', '--check']]
 
 [env.docs]
+labels = ['docs']
 extras = ['docs']
 allowlist_externals = ['rm', 'cd', 'mkdir']
 commands = [
@@ -68,11 +73,13 @@ commands = [
 ]
 
 [env.repo-review]
+labels = ['lint']
 basepython = ['py312']
 deps = ['sp-repo-review[cli]', 'validate-pyproject']
 commands = [['repo-review']]
 
 [env.codespell]
+labels = ['lint']
 commands = [['codespell']]
 deps = ['codespell', 'tomli']
 skip_install = true
