@@ -89,6 +89,8 @@ def open_atomic(
     else:
         path = pathlib.Path(filename)
 
+    assert not path.exists(), f'{path!r} exists'
+
     # Create the parent directory if it doesn't exist
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -171,6 +173,9 @@ class LockBase(abc.ABC):  # pragma: no cover
     ) -> bool | None:
         self.release()
         return None
+
+    def __delete__(self, instance: LockBase) -> None:
+        instance.release()
 
 
 class Lock(LockBase):
