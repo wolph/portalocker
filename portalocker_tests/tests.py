@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import typing
+from unittest import mock
 
 import pytest
 
@@ -21,6 +22,8 @@ if os.name == 'posix':
     ]
 else:
     LOCKERS = [None]  # type: ignore[list-item]
+
+    fcntl = mock.MagicMock()
 
 
 @pytest.fixture
