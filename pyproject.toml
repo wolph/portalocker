@@ -115,7 +115,10 @@ disallow_untyped_defs = false
 
 [dependency-groups]
 dev = [
+    "mypy>=1.14.1",
     'portalocker[tests]',
+    "pyright>=1.1.400",
+    "tox>=4.26.0",
 ]
 
 [tool.ruff]
