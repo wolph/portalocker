@@ -68,6 +68,8 @@ tests = [
     'types-redis',
     'redis',
     'pytest-rerunfailures>=15.0',
+    "types-pywin32>=310.0.0.20250429",
+    "coverage-conditional-plugin>=0.9.0",
 ]
 redis = ['redis']
 
@@ -92,6 +94,7 @@ skip-string-normalization = true
 skip = '*/htmlcov,./docs/_build,*.asc'
 
 [tool.pyright]
+pythonVersion = '3.9'
 include = ['portalocker', 'portalocker_tests']
 exclude = ['dist/*']
 strict = ['portalocker']
@@ -115,9 +118,9 @@ disallow_untyped_defs = false
 
 [dependency-groups]
 dev = [
-    "mypy>=1.14.1",
     'portalocker[tests]',
-    "pyright>=1.1.400",
+    "basedmypy>=2.10.0",
+    "basedpyright>=1.29.1",
     "tox>=4.26.0",
 ]
 
@@ -136,3 +139,29 @@ ignore = [
     'RTD',   # no RTD
     'PY005',  # Tests folder is not named tests
 ]
+
+[tool.coverage.run]
+plugins = ['coverage_conditional_plugin']
+branch = true
+source = ['portalocker', 'portalocker_tests']
+
+[tool.coverage.report]
+ignore_errors = true
+fail_under = 100
+exclude_also = [
+    'def __repr__',
+    'if self.debug:',
+    'if settings.DEBUG',
+    'raise AssertionError',
+    'raise NotImplementedError',
+    'if 0:',
+    'if __name__ == .__main__.:',
+    'typing.Protocol',
+]
+omit = [
+    'portalocker/redis.py',
+]
+
+[tool.coverage.coverage_conditional_plugin.rules]
+win32 = 'sys_platform == "win32"'
+posix = 'sys_platform == "posix"'

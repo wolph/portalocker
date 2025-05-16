@@ -19,9 +19,15 @@ if os.name == 'posix':
     LOCKERS = [
         fcntl.flock,
         fcntl.lockf,
+        portalocker.portalocker.POSIX_LOCKER_FLOCK,
+        portalocker.portalocker.POSIX_LOCKER_LOCKF,
+        portalocker.portalocker.POSIX_LOCKER_FCNTL,
     ]
 else:
-    LOCKERS = [None]  # type: ignore[list-item]
+    LOCKERS = [
+        portalocker.portalocker.WINDOWS_LOCKER_WIN32,
+        portalocker.portalocker.WINDOWS_LOCKER_MSVCRT,
+    ]
 
     fcntl = mock.MagicMock()
 
@@ -255,10 +261,10 @@ def test_blocking_timeout(tmpfile, locker):
         lock.acquire(timeout=5)
 
 
-@pytest.mark.skipif(
-    os.name == 'nt',
-    reason='Windows uses an entirely different lockmechanism',
-)
+# @pytest.mark.skipif(
+#     os.name == 'nt',
+#     reason='Windows uses an entirely different lockmechanism',
+# )
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
 def test_nonblocking(tmpfile, locker):
     with open(tmpfile, 'w') as fh, pytest.raises(RuntimeError):

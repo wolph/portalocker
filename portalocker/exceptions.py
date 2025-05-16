@@ -5,7 +5,7 @@ from portalocker import types
 
 class BaseLockException(Exception):  # noqa: N818
     # Error codes:
-    LOCK_FAILED = 1
+    LOCK_FAILED: typing.Final = 1
 
     def __init__(
         self,
