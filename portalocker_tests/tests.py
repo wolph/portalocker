@@ -19,14 +19,9 @@ if os.name == 'posix':
     LOCKERS = [
         fcntl.flock,
         fcntl.lockf,
-        portalocker.portalocker.POSIX_LOCKER_FLOCK,
-        portalocker.portalocker.POSIX_LOCKER_LOCKF,
-        portalocker.portalocker.POSIX_LOCKER_FCNTL,
     ]
 else:
     LOCKERS = [
-        portalocker.portalocker.WINDOWS_LOCKER_WIN32,
-        portalocker.portalocker.WINDOWS_LOCKER_MSVCRT,
     ]
 
     fcntl = mock.MagicMock()

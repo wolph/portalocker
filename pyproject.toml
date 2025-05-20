@@ -152,6 +152,7 @@ exclude_also = [
     'def __repr__',
     'if self.debug:',
     'if settings.DEBUG',
+    'if typing.TYPE_CHECKING',
     'raise AssertionError',
     'raise NotImplementedError',
     'if 0:',
@@ -163,5 +164,21 @@ omit = [
 ]
 
 [tool.coverage.coverage_conditional_plugin.rules]
-win32 = 'sys_platform == "win32"'
-posix = 'sys_platform == "posix"'
+nt = 'os_name == "nt"'
+not-nt = 'os_name != "nt"'
+posix = 'os_name == "posix"'
+
+[tool.pytest.ini_options]
+python_files = [
+    'portalocker_tests/*.py',
+]
+
+addopts = '''
+    --ignore setup.py
+    --ignore portalocker/_*.py
+    --doctest-modules
+    --cov portalocker
+    --cov-report term-missing
+'''
+
+timeout = 20
