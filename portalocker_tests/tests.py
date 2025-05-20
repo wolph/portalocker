@@ -21,8 +21,7 @@ if os.name == 'posix':
         fcntl.lockf,
     ]
 else:
-    LOCKERS = [
-    ]
+    LOCKERS = []
 
     fcntl = mock.MagicMock()
 

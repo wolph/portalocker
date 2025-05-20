@@ -56,7 +56,7 @@ if os.name == 'nt':  # pragma: nt
     def _prepare_windows_file(
         file_obj: FileArgument,
     ) -> tuple[int, typing.IO[Any] | None, int | None]:
-        """Prepare file for Windows locking: get fd, optionally seek and save pos."""
+        """Prepare file for Windows: get fd, optionally seek and save pos."""
         if isinstance(file_obj, int):
             return file_obj, None, None
         else:  # It's typing.IO[Any]
@@ -69,12 +69,12 @@ if os.name == 'nt':  # pragma: nt
     def _restore_windows_file_pos(
         file_io_obj: typing.IO[Any] | None, original_pos: int | None
     ) -> None:
-        """Restore file position if it was an IO object and position was saved."""
+        """Restore file position if it was an IO object and pos was saved."""
         if file_io_obj and original_pos is not None and original_pos != 0:
             file_io_obj.seek(original_pos)
 
     class Win32Locker(BaseLocker):
-        """Locker implementation using the Win32 API (LockFileEx/UnlockFileEx)."""
+        """Locker using Win32 API (LockFileEx/UnlockFileEx)."""
 
         _overlapped: Any  # pywintypes.OVERLAPPED
         _lock_bytes_low: int = -0x10000
@@ -84,8 +84,8 @@ if os.name == 'nt':  # pragma: nt
                 import pywintypes
             except ImportError as e:
                 raise ImportError(
-                    'pywintypes is required for Win32Locker but not found. '
-                    'Please install pywin32.'
+                    'pywintypes is required for Win32Locker but not '
+                    'found. Please install pywin32.'
                 ) from e
             self._overlapped = pywintypes.OVERLAPPED()
 
@@ -94,7 +94,8 @@ if os.name == 'nt':  # pragma: nt
                 import msvcrt
             except ImportError as e:
                 raise ImportError(
-                    'msvcrt is required for _get_os_handle on Windows but not found.'
+                    'msvcrt is required for _get_os_handle on Windows '
+                    'but not found.'
                 ) from e
             return msvcrt.get_osfhandle(fd)  # type: ignore[attr-defined]
 
@@ -194,7 +195,11 @@ if os.name == 'nt':  # pragma: nt
             )
 
             try:
-                msvcrt.locking(fd, mode, self._msvcrt_lock_length)  # type: ignore[attr-defined]
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    fd,
+                    mode,
+                    self._msvcrt_lock_length,
+                )
             except OSError as exc_value:
                 if exc_value.errno in (13, 16, 33, 36):
                     raise exceptions.AlreadyLocked(
@@ -217,11 +222,16 @@ if os.name == 'nt':  # pragma: nt
             took_fallback_path = False
 
             try:
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, self._msvcrt_lock_length)  # type: ignore[attr-defined]
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    fd,
+                    msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+                    self._msvcrt_lock_length,
+                )
             except OSError as exc:
                 if exc.errno == 13:  # EACCES (Permission denied)
                     took_fallback_path = True
-                    # Restore position before calling win32_locker, as it will re-prepare.
+                    # Restore position before calling win32_locker,
+                    # as it will re-prepare.
                     _restore_windows_file_pos(io_obj_ctx, pos_ctx)
                     try:
                         self._win32_locker.unlock(
@@ -230,15 +240,15 @@ if os.name == 'nt':  # pragma: nt
                     except exceptions.LockException as win32_exc:
                         raise exceptions.LockException(
                             exceptions.LockException.LOCK_FAILED,
-                            f'msvcrt unlock failed ({exc.strerror}), and win32 '
-                            f'fallback failed ({win32_exc.strerror})',
+                            f'msvcrt unlock failed ({exc.strerror}), and '
+                            f'win32 fallback failed ({win32_exc.strerror})',
                             fh=file_obj,
                         ) from win32_exc
                     except Exception as final_exc:
                         raise exceptions.LockException(
                             exceptions.LockException.LOCK_FAILED,
-                            f'msvcrt unlock failed ({exc.strerror}), and win32 '
-                            f'fallback failed with unexpected error: '
+                            f'msvcrt unlock failed ({exc.strerror}), and '
+                            f'win32 fallback failed with unexpected error: '
                             f'{final_exc!s}',
                             fh=file_obj,
                         ) from final_exc
@@ -283,11 +293,12 @@ else:  # pragma: not-nt
                 return file_obj.fileno()
             else:
                 # Should not be reached if PosixFileArgument is correct.
-                # isinstance(file_obj, io.IOBase) could be an alternative check
+                # isinstance(file_obj, io.IOBase) could be an
+                # alternative check
                 # but hasattr is more general for HasFileno.
                 raise TypeError(
-                    "Argument 'file_obj' must be an int, an IO object with "
-                    'fileno(), or implement HasFileno.'
+                    "Argument 'file_obj' must be an int, an IO object "
+                    'with fileno(), or implement HasFileno.'
                 )
 
         def lock(self, file_obj: PosixFileArgument, flags: LockFlags) -> None:
@@ -295,8 +306,8 @@ else:  # pragma: not-nt
                 LockFlags.SHARED | LockFlags.EXCLUSIVE
             ):
                 raise RuntimeError(
-                    'When locking in non-blocking mode on POSIX, the SHARED '
-                    'or EXCLUSIVE flag must be specified as well.'
+                    'When locking in non-blocking mode on POSIX, '
+                    'the SHARED or EXCLUSIVE flag must be specified as well.'
                 )
 
             fd = self._get_fd(file_obj)
