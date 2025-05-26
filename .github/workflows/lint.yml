@@ -4,40 +4,47 @@ on:
   push:
   pull_request:
 
-jobs:
-  matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.matrix.outputs.matrix }}
-    steps:
-      - name: Generate dynamic matrix
-        id: matrix
-        uses: coactions/dynamic-matrix@v4.1.0
-        with:
-          min_python: '3.9'
-          other_names: |
-            lint
-            pyright
-            mypy
-          platforms: linux
+env:
+  FORCE_COLOR: 1
 
-  run-tox:
-    needs: matrix
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        tox: ${{ fromJson(needs.matrix.outputs.matrix) }}
+        # Define all your tox environments that you want to run in parallel
+        tox_env:
+          - 'py39'
+          - 'py310'
+          - 'py311'
+          - 'py312'
+          - 'ruff'
+          - 'mypy'  # Or a more specific name if you have multiple mypy setups
+          - 'pyright'
+
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.tox.python_version }}
+
+      - name: Set up Python (for running tox)
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.tox.python_version }}
-          cache: 'pip'
-      - name: Install dependencies
+          # Use a consistent, recent Python version to install and run tox.
+          # Tox will use the 'basepython' setting from tox.ini for each environment.
+          python-version: '3.11'
+          cache: 'pip' # Cache pip dependencies
+
+      - name: Install tox
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e '.[tests]'
-      - name: Run tox for ${{ matrix.tox.name }}
-        run: |
-          tox -e ${{ matrix.tox.name }}
+          python -m pip install --upgrade pip
+          python -m pip install tox
+
+      - name: Python version (of tox runner)
+        run: python --version
+
+      - name: Run tox -e ${{ matrix.tox_env }}
+        run: tox -e ${{ matrix.tox_env }}
