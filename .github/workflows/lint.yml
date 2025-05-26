@@ -4,48 +4,40 @@ on:
   push:
   pull_request:
 
-env:
-  FORCE_COLOR: 1
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  lint:
+  matrix:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Generate dynamic matrix
+        id: matrix
+        uses: coactions/dynamic-matrix@v4.1.0
+        with:
+          min_python: '3.9'
+          other_names: |
+            lint
+            pyright
+            mypy
+          platforms: linux
 
+  run-tox:
+    needs: matrix
+    runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
       matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12']
-
+        tox: ${{ fromJson(needs.matrix.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python ${{ matrix.tox.python_version }}
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.tox.python_version }}
           cache: 'pip'
-      - name: Python version
-        run: python --version
-
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip setuptools wheel mypy
+          python -m pip install --upgrade pip setuptools wheel
           python -m pip install -e '.[tests]'
-
-      - name: Linting with pyright
-        uses: jakebailey/pyright-action@v2
-        with:
-          path: portalocker portalocker_tests
-
-      - name: Linting with ruff
-        uses: jpetrucciani/ruff-check@main
-        with:
-          extra-args: portalocker portalocker_tests
-
-      - name: Linting with mypy
+      - name: Run tox for ${{ matrix.tox.name }}
         run: |
-          python -m mypy portalocker portalocker_tests
-
+          tox -e ${{ matrix.tox.name }}
