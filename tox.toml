@@ -20,21 +20,21 @@ commands = [['pytest', '{posargs}']]
 extras = ['tests', 'redis']
 
 [env.mypy]
-labels = ['lint']
+labels = ['lint', 'nontest']
 commands = [['mypy']]
 
 [env.pyright]
-labels = ['lint']
+labels = ['lint', 'nontest']
 deps  = ['pyright']
 commands = [['pyright']]
 
 [env.ruff]
-labels = ['lint']
+labels = ['lint', 'nontest']
 deps = ['ruff']
 commands = [['ruff', 'check'], ['ruff', 'format', '--check']]
 
 [env.docs]
-labels = ['docs']
+labels = ['docs', 'nontest']
 extras = ['docs']
 allowlist_externals = ['rm', 'cd', 'mkdir']
 commands = [
@@ -73,13 +73,13 @@ commands = [
 ]
 
 [env.repo-review]
-labels = ['lint']
+labels = ['lint', 'nontest']
 basepython = ['py312']
 deps = ['sp-repo-review[cli]', 'validate-pyproject']
 commands = [['repo-review']]
 
 [env.codespell]
-labels = ['lint']
+labels = ['lint', 'nontest']
 commands = [['codespell']]
 deps = ['codespell', 'tomli']
 skip_install = true
