@@ -13,26 +13,20 @@ the original external API, including the LOCKER constant for specific
 backwards compatibility (POSIX) and Windows behavior.
 """
 
-from __future__ import annotations
-
 import os
 import typing
 from typing import (  # Added Optional, Tuple, Union
     Any,
     Callable,
+    Optional,
     Union,
 )
 
 from . import constants, exceptions
+from .types import HasFileno
 
 # Alias for readability
 LockFlags = constants.LockFlags
-
-
-# Protocol for objects with a fileno() method.
-# Used for type-hinting fcntl.flock.
-class HasFileno(typing.Protocol):
-    def fileno(self) -> int: ...
 
 
 # Type alias for file arguments used in lock/unlock functions
@@ -51,11 +45,11 @@ class BaseLocker:
         raise NotImplementedError
 
 
-if os.name == 'nt':  # pragma: nt
+if os.name == 'nt':  # pragma: not-posix
     # Windows-specific helper functions
     def _prepare_windows_file(
         file_obj: FileArgument,
-    ) -> tuple[int, typing.IO[Any] | None, int | None]:
+    ) -> tuple[int, Optional[typing.IO[Any]], Optional[int]]:
         """Prepare file for Windows: get fd, optionally seek and save pos."""
         if isinstance(file_obj, int):
             return file_obj, None, None
@@ -67,7 +61,8 @@ if os.name == 'nt':  # pragma: nt
             return fd, file_obj, original_pos
 
     def _restore_windows_file_pos(
-        file_io_obj: typing.IO[Any] | None, original_pos: int | None
+        file_io_obj: Optional[typing.IO[Any]],
+        original_pos: Optional[int],
     ) -> None:
         """Restore file position if it was an IO object and pos was saved."""
         if file_io_obj and original_pos is not None and original_pos != 0:
@@ -283,7 +278,16 @@ else:  # pragma: not-nt
     PosixFileArgument = Union[FileArgument, HasFileno]
 
     class PosixLocker(BaseLocker):
-        """Locker implementation using fcntl.flock."""
+        """Locker implementation using the `LOCKER` constant"""
+
+        _locker: Optional[Callable[[Union[int, HasFileno], int], Any]] = None
+
+        @property
+        def locker(self) -> Callable[[Union[int, HasFileno], int], Any]:
+            if self._locker is None:
+                return LOCKER
+            else:
+                return self._locker
 
         def _get_fd(self, file_obj: PosixFileArgument) -> int:
             if isinstance(file_obj, int):
@@ -312,7 +316,7 @@ else:  # pragma: not-nt
 
             fd = self._get_fd(file_obj)
             try:
-                fcntl.flock(fd, flags)
+                self.locker(fd, flags)
             except OSError as exc_value:
                 if exc_value.errno in (errno.EACCES, errno.EAGAIN):
                     raise exceptions.AlreadyLocked(
@@ -335,7 +339,17 @@ else:  # pragma: not-nt
 
         def unlock(self, file_obj: PosixFileArgument) -> None:
             fd = self._get_fd(file_obj)
-            fcntl.flock(fd, LockFlags.UNBLOCK)
+            self.locker(fd, LockFlags.UNBLOCK)
+
+    class FlockLocker(PosixLocker):
+        """FlockLocker is a PosixLocker implementation using fcntl.flock."""
+
+        LOCKER = fcntl.flock
+
+    class LockfLocker(PosixLocker):
+        """LockfLocker is a PosixLocker implementation using fcntl.lockf."""
+
+        LOCKER = fcntl.lockf
 
     # LOCKER constant for POSIX is fcntl.flock for backward compatibility.
     # Type matches: Callable[[Union[int, HasFileno], int], Any]

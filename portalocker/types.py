@@ -61,3 +61,9 @@ class FileOpenKwargs(typing.TypedDict):
     newline: str | None
     closefd: bool | None
     opener: typing.Callable[[str, int], int] | None
+
+
+# Protocol for objects with a fileno() method.
+# Used for type-hinting fcntl.flock.
+class HasFileno(typing.Protocol):
+    def fileno(self) -> int: ...

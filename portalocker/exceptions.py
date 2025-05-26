@@ -10,7 +10,7 @@ class BaseLockException(Exception):  # noqa: N818
     def __init__(
         self,
         *args: typing.Any,
-        fh: typing.Union[types.IO, None, int] = None,
+        fh: typing.Union[types.IO, None, int, types.HasFileno] = None,
         **kwargs: typing.Any,
     ) -> None:
         self.fh = fh

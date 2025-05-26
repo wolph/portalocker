@@ -167,6 +167,7 @@ omit = [
 nt = 'os_name == "nt"'
 not-nt = 'os_name != "nt"'
 posix = 'os_name == "posix"'
+not-posix = 'os_name != "posix"'
 
 [tool.pytest.ini_options]
 python_files = [

@@ -4,10 +4,10 @@ import random
 import time
 
 import pytest
+from redis import client, exceptions
 
 import portalocker
 from portalocker import redis, utils
-from redis import client, exceptions
 
 logger = logging.getLogger(__name__)
 
