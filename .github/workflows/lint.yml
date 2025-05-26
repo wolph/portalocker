@@ -23,10 +23,6 @@ jobs:
       - name: Generate tox environment matrix
         id: dynamic_matrix_step # Clear ID for the step producing the output
         uses: coactions/dynamic-matrix@v4
-        with:
-        # Ensure this points to your tox configuration file if it's not auto-detected
-        # config-file: 'tox.toml' # Or 'tox.ini'
-        # Add other parameters like factors-allow-list if needed
 
   test:
     needs: generate-matrix
