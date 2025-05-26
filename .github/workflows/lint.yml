@@ -1,4 +1,4 @@
-name: lint
+name: CI with dynamic tox matrix
 
 on:
   push:
@@ -12,79 +12,51 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Job to generate the matrix of tox environments
   generate-matrix:
     runs-on: ubuntu-latest
     outputs:
-      # The output 'matrix' will be a JSON string of the tox environments
-      matrix: ${{ steps.generate.outputs.matrix }}
+      matrix: ${{ steps.dynamic_matrix_step.outputs.matrix }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Generate tox environment matrix
-        id: generate
-        uses: coactions/dynamic-matrix@v3 # Or the latest version
+        id: dynamic_matrix_step # Clear ID for the step producing the output
+        uses: coactions/dynamic-matrix@v4
         with:
-        # This assumes your tox configuration file is named tox.ini or tox.toml
-        # and is at the root of your repository.
-        # If your file is tox.toml, it should be detected automatically.
-        # You can specify the configuration file if needed:
-        # config-file: 'tox.toml'
+        # Ensure this points to your tox configuration file if it's not auto-detected
+        # config-file: 'tox.toml' # Or 'tox.ini'
+        # Add other parameters like factors-allow-list if needed
 
-        # If you only want to include environments with a specific factor/name pattern:
-        # factors-allow-list: |
-        #   py.*
-        #   lint.*
-
-        # Or exclude specific environments
-        # exclude-factors: |
-        #   experimental-.*
-
-  # Job to run tests using the dynamically generated matrix
   test:
-    needs: generate-matrix # This job depends on the matrix being generated
+    needs: generate-matrix
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # Use the 'matrix' output from the 'generate-matrix' job
-      # The 'fromJSON' function converts the JSON string output into a usable matrix object
+      # This is the critical line (ensure it's correctly indented)
       matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
-      # matrix will now look something like:
-      # {
-      #   include: [
-      #     { "tox_env": "py39", "python_version": "3.9" },
-      #     { "tox_env": "py310", "python_version": "3.10" },
-      #     { "tox_env": "lint" } # if python_version is not part of the factor
-      #   ]
-      # }
-      # The exact structure depends on what coactions/dynamic-matrix outputs
-      # based on your tox.toml. It typically outputs 'tox_env' and 'python_version'.
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python_version || '3.x' }}
-        # The '|| '3.x'' provides a fallback if python_version is not in the matrix entry
-        # (e.g., for a linting environment not tied to a Python version in the matrix output)
-        # Adjust this default as needed, or ensure all tox environments output a python_version
-        # if they need a specific Python setup outside of tox.
+      - name: Set up Python for tox runner
         uses: actions/setup-python@v5
         with:
-          # If 'matrix.python_version' is provided by dynamic-matrix, use it.
-          # Otherwise, tox will handle Python selection based on 'base_python' in tox.toml.
-          # It's often simplest to set up a consistent Python here for running tox itself.
-          python-version: ${{ matrix.python_version || '3.11' }} # Python to run tox
+          # This Python version is used to run tox itself.
+          # Tox will then use 'base_python' from your tox.toml for each environment.
+          # matrix.python_version could be used if dynamic-matrix provides it AND you want it here.
+          python-version: ${{ matrix.python_version || '3.11' }}
           cache: 'pip'
 
       - name: Install tox
         run: |
           python -m pip install --upgrade pip
-          python -m pip install tox tox-gh-actions # tox-gh-actions can be useful
+          python -m pip install tox
 
       - name: Python version (of tox runner)
         run: python --version
 
       - name: Run tox -e ${{ matrix.tox_env }}
-        # 'matrix.tox_env' should be the name of the tox environment
+        # 'matrix.tox_env' assumes coactions/dynamic-matrix outputs 'tox_env' as the environment key.
+        # Adjust if the key is different (e.g., 'env', 'factor').
+        # You can inspect the output of the 'generate-matrix' job to be sure.
         run: tox -e ${{ matrix.tox_env }}
