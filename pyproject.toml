@@ -122,6 +122,8 @@ dev = [
     "basedmypy>=2.10.0",
     "basedpyright>=1.29.1",
     "tox>=4.26.0",
+    "mypy>=1.15.0",
+    "pyright>=1.1.401",
 ]
 
 [tool.ruff]

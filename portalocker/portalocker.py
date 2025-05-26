@@ -13,13 +13,15 @@ the original external API, including the LOCKER constant for specific
 backwards compatibility (POSIX) and Windows behavior.
 """
 
+import io
 import os
 import typing
-from typing import (  # Added Optional, Tuple, Union
+from typing import (
     Any,
     Callable,
     Optional,
     Union,
+    cast,  # NEW
 )
 
 from . import constants, exceptions
@@ -30,7 +32,7 @@ LockFlags = constants.LockFlags
 
 
 # Type alias for file arguments used in lock/unlock functions
-FileArgument = Union[typing.IO[Any], int]
+FileArgument = Union[typing.IO[Any], int, HasFileno]  # CHANGED
 
 
 class BaseLocker:
@@ -52,13 +54,21 @@ if os.name == 'nt':  # pragma: not-posix
     ) -> tuple[int, Optional[typing.IO[Any]], Optional[int]]:
         """Prepare file for Windows: get fd, optionally seek and save pos."""
         if isinstance(file_obj, int):
+            # Plain file descriptor
             return file_obj, None, None
-        else:  # It's typing.IO[Any]
-            fd = file_obj.fileno()
+
+        # Full IO objects (have tell/seek) → preserve and restore position
+        if isinstance(file_obj, io.IOBase):
+            fd: int = file_obj.fileno()
             original_pos = file_obj.tell()
             if original_pos != 0:
                 file_obj.seek(0)
-            return fd, file_obj, original_pos
+            return fd, typing.cast(typing.IO[Any], file_obj), original_pos
+            # cast satisfies mypy: IOBase → IO[Any]
+
+        # Fallback: an object that only implements fileno() (HasFileno)
+        fd = typing.cast(HasFileno, file_obj).fileno()  # type: ignore[redundant-cast]
+        return fd, None, None
 
     def _restore_windows_file_pos(
         file_io_obj: Optional[typing.IO[Any]],
@@ -92,7 +102,7 @@ if os.name == 'nt':  # pragma: not-posix
                     'msvcrt is required for _get_os_handle on Windows '
                     'but not found.'
                 ) from e
-            return msvcrt.get_osfhandle(fd)  # type: ignore[attr-defined]
+            return cast(int, msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined]
 
         def lock(self, file_obj: FileArgument, flags: LockFlags) -> None:
             import pywintypes
@@ -285,9 +295,18 @@ else:  # pragma: not-nt
         @property
         def locker(self) -> Callable[[Union[int, HasFileno], int], Any]:
             if self._locker is None:
-                return LOCKER
-            else:
-                return self._locker
+                # On POSIX systems ``LOCKER`` is a callable (fcntl.flock) but
+                # mypy also sees the Windows-only tuple assignment.  Explicitly
+                # cast so mypy knows we are returning the callable variant
+                # here.
+                return cast(
+                    Callable[[Union[int, HasFileno], int], Any], LOCKER
+                )  # pyright: ignore[reportUnnecessaryCast]
+
+            # mypy does not realise ``self._locker`` is non-None after the
+            # check
+            assert self._locker is not None
+            return self._locker
 
         def _get_fd(self, file_obj: PosixFileArgument) -> int:
             if isinstance(file_obj, int):
@@ -354,13 +373,13 @@ else:  # pragma: not-nt
     # LOCKER constant for POSIX is fcntl.flock for backward compatibility.
     # Type matches: Callable[[Union[int, HasFileno], int], Any]
     LOCKER_TYPE_POSIX = Callable[[Union[int, HasFileno], int], Any]
-    LOCKER: LOCKER_TYPE_POSIX = fcntl.flock
+    LOCKER: LOCKER_TYPE_POSIX = fcntl.flock  # type: ignore[no-redef]
 
     _posix_locker_instance = PosixLocker()
 
     # Public API for POSIX uses the PosixLocker instance
-    def lock(file: PosixFileArgument, flags: LockFlags) -> None:
+    def lock(file: FileArgument, flags: LockFlags) -> None:
         _posix_locker_instance.lock(file, flags)
 
-    def unlock(file: PosixFileArgument) -> None:
+    def unlock(file: FileArgument) -> None:
         _posix_locker_instance.unlock(file)
