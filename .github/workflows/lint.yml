@@ -25,7 +25,6 @@ jobs:
       - name: Generate tox environment matrix
         id: generate
         uses: coactions/dynamic-matrix@v3 # Or the latest version
-        with:
         # This assumes your tox configuration file is named tox.ini or tox.toml
         # and is at the root of your repository.
         # If your file is tox.toml, it should be detected automatically.
