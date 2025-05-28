@@ -144,12 +144,12 @@ def combine(args: argparse.Namespace) -> None:
     try:
         subprocess.run(['black', output_file.name])
     except FileNotFoundError:  # pragma: no cover
-            logger.warning(
-                'Black is not installed. Skipping formatting step.'
-            )
+        logger.warning('Black is not installed. Skipping formatting step.')
     try:
         subprocess.run(['ruff', 'format', output_file.name])
-        subprocess.run(['ruff', 'check', '--fix', '--fix-only', output_file.name])
+        subprocess.run(
+            ['ruff', 'check', '--fix', '--fix-only', output_file.name]
+        )
     except FileNotFoundError:  # pragma: no cover
         logger.warning(
             'Ruff is not installed. Skipping linting and formatting step.'
