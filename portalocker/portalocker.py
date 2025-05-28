@@ -57,7 +57,7 @@ if os.name == 'nt':  # pragma: not-posix
             # Plain file descriptor
             return file_obj, None, None
 
-        # Full IO objects (have tell/seek) → preserve and restore position
+        # Full IO objects (have tell/seek) -> preserve and restore position
         if isinstance(file_obj, io.IOBase):
             fd: int = file_obj.fileno()
             original_pos = file_obj.tell()
