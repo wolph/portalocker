@@ -89,7 +89,7 @@ def _read_file(
                         yield from _read_file(src_path / f'{name}.py', seen_files)
             else:
                 yield _clean_line(line, names)
-    except UnicodeDecodeError as exception:
+    except UnicodeDecodeError as exception:  # pragma: no cover
         _, text, start_byte, end_byte, error = exception.args
 
         offset = 100
@@ -135,22 +135,10 @@ def combine(args: argparse.Namespace) -> None:
 
     logger.info(f'Wrote combined file to {output_file.name}')
     # Run black and ruff if available. If not then just run the file.
-    try:
-        subprocess.run(['black', output_file.name])
-    except Exception as e:
-        logger.warning(f'black failed: {e}')
-    try:
-        subprocess.run(['ruff', 'format', output_file.name])
-    except Exception as e:
-        logger.warning(f'ruff format failed: {e}')
-    try:
-        subprocess.run(['ruff', 'check', '--fix', '--fix-only', output_file.name])
-    except Exception as e:
-        logger.warning(f'ruff check failed: {e}')
-    try:
-        subprocess.run(['python3', output_file.name])
-    except Exception as e:
-        logger.warning(f'python3 run failed: {e}')
+    subprocess.run(['black', output_file.name])
+    subprocess.run(['ruff', 'format', output_file.name])
+    subprocess.run(['ruff', 'check', '--fix', '--fix-only', output_file.name])
+    subprocess.run(['python3', output_file.name])
 
 
 if __name__ == '__main__':
