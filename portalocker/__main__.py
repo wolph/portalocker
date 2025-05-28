@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import pathlib
 import re
+import subprocess
 import typing
 
 base_path = pathlib.Path(__file__).parent.parent
@@ -59,35 +59,47 @@ def _read_file(
     seen_files.add(path)
     paren = False
     from_ = None
-    for line in path.open(encoding='utf-8'):
-        if '__future__' in line:
-            continue
-
-        if paren:
-            if ')' in line:
-                line = line.split(')', 1)[1]
-                paren = False
+    try:
+        for line in path.open(encoding='ascii'):
+            if '__future__' in line:
                 continue
 
-            match = _NAMES_RE.match(line)
-        else:
-            match = _RELATIVE_IMPORT_RE.match(line)
+            if paren:
+                if ')' in line:
+                    line = line.split(')', 1)[1]
+                    paren = False
+                    continue
 
-        if match:
-            if not paren:
-                paren = bool(match.group('paren'))
-                from_ = match.group('from')
-
-            if from_:
-                names.add(from_)
-                yield from _read_file(src_path / f'{from_}.py', seen_files)
+                match = _NAMES_RE.match(line)
             else:
-                for name in match.group('names').split(','):
-                    name = name.strip()
-                    names.add(name)
-                    yield from _read_file(src_path / f'{name}.py', seen_files)
-        else:
-            yield _clean_line(line, names)
+                match = _RELATIVE_IMPORT_RE.match(line)
+
+            if match:
+                if not paren:
+                    paren = bool(match.group('paren'))
+                    from_ = match.group('from')
+
+                if from_:
+                    names.add(from_)
+                    yield from _read_file(src_path / f'{from_}.py', seen_files)
+                else:
+                    for name in match.group('names').split(','):
+                        name = name.strip()
+                        names.add(name)
+                        yield from _read_file(src_path / f'{name}.py', seen_files)
+            else:
+                yield _clean_line(line, names)
+    except UnicodeDecodeError as exception:
+        _, text, start_byte, end_byte, error = exception.args
+
+        offset = 100
+        snippet = text[start_byte - offset:end_byte + offset]
+        logger.error(
+            f'Invalid encoding for {path}: {error} at byte '
+            f'({start_byte}:{end_byte})\n'
+            f'Snippet: {snippet!r}'
+        )
+        raise
 
 
 def _clean_line(line: str, names: set[str]) -> str:
@@ -101,7 +113,6 @@ def _clean_line(line: str, names: set[str]) -> str:
 
 
 def combine(args: argparse.Namespace) -> None:
-    import subprocess
     output_file = args.output_file
     pathlib.Path(output_file.name).parent.mkdir(parents=True, exist_ok=True)
 
@@ -109,10 +120,10 @@ def combine(args: argparse.Namespace) -> None:
     output_file.write('from __future__ import annotations\n')
 
     output_file.write(
-        _TEXT_TEMPLATE.format((base_path / 'README.rst').read_text()),
+        _TEXT_TEMPLATE.format((base_path / 'README.rst').read_text(encoding='ascii')),
     )
     output_file.write(
-        _TEXT_TEMPLATE.format((base_path / 'LICENSE').read_text()),
+        _TEXT_TEMPLATE.format((base_path / 'LICENSE').read_text(encoding='ascii')),
     )
 
     seen_files: set[pathlib.Path] = set()

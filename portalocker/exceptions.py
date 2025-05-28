@@ -1,6 +1,6 @@
 import typing
 
-from portalocker import types
+from . import types
 
 
 class BaseLockException(Exception):  # noqa: N818

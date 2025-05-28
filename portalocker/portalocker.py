@@ -64,7 +64,7 @@ if os.name == 'nt':  # pragma: not-posix
             if original_pos != 0:
                 file_obj.seek(0)
             return fd, typing.cast(typing.IO[Any], file_obj), original_pos
-            # cast satisfies mypy: IOBase → IO[Any]
+            # cast satisfies mypy: IOBase -> IO[Any]
 
         # Fallback: an object that only implements fileno() (HasFileno)
         fd = typing.cast(HasFileno, file_obj).fileno()  # type: ignore[redundant-cast]
