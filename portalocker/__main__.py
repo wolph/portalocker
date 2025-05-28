@@ -48,7 +48,7 @@ def main(argv: typing.Sequence[str] | None = None) -> None:
     args.func(args)
 
 
-def _read_file(
+def _read_file(  # noqa: C901
     path: pathlib.Path,
     seen_files: set[pathlib.Path],
 ) -> typing.Iterator[str]:
@@ -86,15 +86,17 @@ def _read_file(
                     for name in match.group('names').split(','):
                         name = name.strip()
                         names.add(name)
-                        yield from _read_file(src_path / f'{name}.py', seen_files)
+                        yield from _read_file(
+                            src_path / f'{name}.py', seen_files
+                        )
             else:
                 yield _clean_line(line, names)
     except UnicodeDecodeError as exception:  # pragma: no cover
         _, text, start_byte, end_byte, error = exception.args
 
         offset = 100
-        snippet = text[start_byte - offset:end_byte + offset]
-        logger.error(
+        snippet = text[start_byte - offset : end_byte + offset]
+        logger.error(  # noqa: TRY400
             f'Invalid encoding for {path}: {error} at byte '
             f'({start_byte}:{end_byte})\n'
             f'Snippet: {snippet!r}'
@@ -120,10 +122,14 @@ def combine(args: argparse.Namespace) -> None:
     output_file.write('from __future__ import annotations\n')
 
     output_file.write(
-        _TEXT_TEMPLATE.format((base_path / 'README.rst').read_text(encoding='ascii')),
+        _TEXT_TEMPLATE.format(
+            (base_path / 'README.rst').read_text(encoding='ascii')
+        ),
     )
     output_file.write(
-        _TEXT_TEMPLATE.format((base_path / 'LICENSE').read_text(encoding='ascii')),
+        _TEXT_TEMPLATE.format(
+            (base_path / 'LICENSE').read_text(encoding='ascii')
+        ),
     )
 
     seen_files: set[pathlib.Path] = set()
