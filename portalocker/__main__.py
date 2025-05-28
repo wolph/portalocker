@@ -141,9 +141,19 @@ def combine(args: argparse.Namespace) -> None:
 
     logger.info(f'Wrote combined file to {output_file.name}')
     # Run black and ruff if available. If not then just run the file.
-    subprocess.run(['black', output_file.name])
-    subprocess.run(['ruff', 'format', output_file.name])
-    subprocess.run(['ruff', 'check', '--fix', '--fix-only', output_file.name])
+    try:
+        subprocess.run(['black', output_file.name])
+    except FileNotFoundError:  # pragma: no cover
+            logger.warning(
+                'Black is not installed. Skipping formatting step.'
+            )
+    try:
+        subprocess.run(['ruff', 'format', output_file.name])
+        subprocess.run(['ruff', 'check', '--fix', '--fix-only', output_file.name])
+    except FileNotFoundError:  # pragma: no cover
+        logger.warning(
+            'Ruff is not installed. Skipping linting and formatting step.'
+        )
     subprocess.run(['python3', output_file.name])
 
 
