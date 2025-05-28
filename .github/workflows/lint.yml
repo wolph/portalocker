@@ -12,65 +12,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Job to generate the matrix of tox environments
-  generate-matrix:
+  lint:
     runs-on: ubuntu-latest
-    outputs:
-      # The output 'matrix' will be a JSON string of the tox environments
-      matrix: ${{ steps.generate.outputs.matrix }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
 
-      - name: Generate tox environment matrix
-        id: generate
-        uses: coactions/dynamic-matrix@v3 # Or the latest version
-        # This assumes your tox configuration file is named tox.ini or tox.toml
-        # and is at the root of your repository.
-        # If your file is tox.toml, it should be detected automatically.
-        # You can specify the configuration file if needed:
-        # config-file: 'tox.toml'
-
-        # If you only want to include environments with a specific factor/name pattern:
-        # factors-allow-list: |
-        #   py.*
-        #   lint.*
-
-        # Or exclude specific environments
-        # exclude-factors: |
-        #   experimental-.*
-
-  # Job to run tests using the dynamically generated matrix
-  test:
-    name: ${{ matrix.tox_env }} # This should now work
-    needs: generate-matrix
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Explicitly define 'tox_env' as the matrix variable.
-        # Its value will be the array of environments extracted from the 'tox_env' key
-        # of the JSON object returned by fromJSON.
-        tox_env: ${{ fromJSON(needs.generate-matrix.outputs.matrix).tox_env }}
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python for tox runner
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          # This Python version is for running tox itself.
-          # tox will use 'base_python' from your tox.toml for each specific environment.
-          # matrix.python_version is not in your current dynamic matrix output, so fallback is good.
-          python-version: ${{ matrix.python_version || '3.11' }}
+          python-version: ${{ matrix.python-version }}
           cache: 'pip'
-
-      - name: Install tox
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install tox
-
-      - name: Python version (of tox runner)
+      - name: Python version
         run: python --version
 
-      - name: Run tox -e ${{ matrix.tox_env }}
-        run: tox -e ${{ matrix.tox_env }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel mypy
+          python -m pip install -e '.[tests]'
+
+      - name: Linting with pyright
+        uses: jakebailey/pyright-action@v2
+        with:
+          path: portalocker portalocker_tests
+
+      - name: Linting with ruff
+        uses: jpetrucciani/ruff-check@main
+        with:
+          extra-args: portalocker portalocker_tests
+
+      - name: Linting with mypy
+        run: |
+          python -m mypy portalocker portalocker_tests
