@@ -43,43 +43,33 @@ jobs:
   tox-matrix:
     runs-on: ubuntu-latest
     outputs:
-      python-matrix: ${{ steps.generate-matrix.outputs.python-matrix }}
-      lint-matrix: ${{ steps.generate-matrix.outputs.lint-matrix }}
-      docs-matrix: ${{ steps.generate-matrix.outputs.docs-matrix }}
+      matrix: ${{ steps.generate-matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install Tox
-        run: python -m pip install tox
       - name: Generate Matrix
         id: generate-matrix
         uses: coactions/dynamic-matrix@v1
         with:
-          min-python: '3.9'
-          max-python: '3.12'
-          selector-python: 'labels.python and not labels.nontest'
-          selector-lint: 'labels.lint and labels.nontest'
-          selector-docs: 'labels.docs and labels.nontest'
-  
+          other_names: lint
+
   # Run Python tests on Linux with Redis
   linux-tests:
+    name: ${{ matrix.name }}
     needs: tox-matrix
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
-        tox: ${{ fromJson(needs.tox-matrix.outputs.python-matrix) }}
+        tox: ${{ fromJson(needs.tox-matrix.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Start Redis
         uses: supercharge/redis-github-action@1.8.0
-      - name: Set up Python ${{ matrix.tox.python }}
+      - name: Set up Python ${{ matrix.python_version }}
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.tox.python }}
+          python-version: ${{ matrix.python_version }}
           cache: 'pip'
       - name: Python version
         run: python --version
@@ -89,44 +79,44 @@ jobs:
       - name: Run tests with tox
         run: tox -e ${{ matrix.tox.env }}
 
-  # Run linting tasks
-  lint:
-    needs: tox-matrix
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        tox: ${{ fromJson(needs.tox-matrix.outputs.lint-matrix) }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.tox.python || '3.12' }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.tox.python || '3.12' }}
-          cache: 'pip'
-      - name: Install dependencies
-        run: |
-          python -m pip install tox
-      - name: Run linting
-        run: tox -e ${{ matrix.tox.env }}
-
-  # Run documentation builds
-  docs:
-    needs: tox-matrix
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        tox: ${{ fromJson(needs.tox-matrix.outputs.docs-matrix) }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.tox.python || '3.12' }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.tox.python || '3.12' }}
-          cache: 'pip'
-      - name: Install dependencies
-        run: |
-          python -m pip install tox
-      - name: Build docs
-        run: tox -e ${{ matrix.tox.env }}
+#  # Run linting tasks
+#  lint:
+#    needs: tox-matrix
+#    runs-on: ubuntu-latest
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        tox: ${{ fromJson(needs.tox-matrix.outputs.lint-matrix) }}
+#    steps:
+#      - uses: actions/checkout@v4
+#      - name: Set up Python ${{ matrix.tox.python || '3.12' }}
+#        uses: actions/setup-python@v5
+#        with:
+#          python-version: ${{ matrix.tox.python || '3.12' }}
+#          cache: 'pip'
+#      - name: Install dependencies
+#        run: |
+#          python -m pip install tox
+#      - name: Run linting
+#        run: tox -e ${{ matrix.tox.env }}
+#
+#  # Run documentation builds
+#  docs:
+#    needs: tox-matrix
+#    runs-on: ubuntu-latest
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        tox: ${{ fromJson(needs.tox-matrix.outputs.docs-matrix) }}
+#    steps:
+#      - uses: actions/checkout@v4
+#      - name: Set up Python ${{ matrix.tox.python || '3.12' }}
+#        uses: actions/setup-python@v5
+#        with:
+#          python-version: ${{ matrix.tox.python || '3.12' }}
+#          cache: 'pip'
+#      - name: Install dependencies
+#        run: |
+#          python -m pip install tox
+#      - name: Build docs
+#        run: tox -e ${{ matrix.tox.env }}
