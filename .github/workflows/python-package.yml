@@ -51,6 +51,7 @@ jobs:
         uses: coactions/dynamic-matrix@v1
         with:
           min_python: '3.9'
+          other_names:
 
   # Run Python tests on Linux with Redis
   linux-tests:
