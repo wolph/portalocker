@@ -15,29 +15,30 @@ concurrency:
 
 jobs:
   # Run os specific tests on the slower OS X/Windows machines
-#  windows_osx:
-#    runs-on: ${{ matrix.os }}
-#    strategy:
-#      fail-fast: false
-#      matrix:
-#        python-version: ['3.9', '3.10', '3.11', '3.12']
-#        os: ['macos-latest', 'windows-latest']
-#
-#    steps:
-#      - uses: actions/checkout@v4
-#      - name: Set up Python ${{ matrix.python-version }}
-#        uses: actions/setup-python@v5
-#        with:
-#          python-version: ${{ matrix.python-version }}
-#          cache: 'pip'
-#      - name: Python version
-#        run: python --version
-#      - name: Install dependencies
-#        run: |
-#          python -m pip install --upgrade pip setuptools wheel
-#          python -m pip install -e ".[tests]"
-#      - name: Test with pytest
-#        run: python -m pytest
+  windows_osx:
+    name: ${{ matrix.python-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+        os: ['macos-latest', 'windows-latest']
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+      - name: Python version
+        run: python --version
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -e ".[tests]"
+      - name: Test with pytest
+        run: python -m pytest
 
   # Discover Tox environments and build the matrix
   pre:
@@ -49,8 +50,7 @@ jobs:
         id: generate-matrix
         uses: coactions/dynamic-matrix@v1
         with:
-          other_names: |
-            lint
+          min_python: '3.9'
 
   # Run Python tests on Linux with Redis
   linux-tests:
