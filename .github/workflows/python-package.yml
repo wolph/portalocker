@@ -40,7 +40,7 @@ jobs:
 #        run: python -m pytest
 
   # Discover Tox environments and build the matrix
-  tox-matrix:
+  pre:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.generate-matrix.outputs.matrix }}
@@ -49,17 +49,17 @@ jobs:
         id: generate-matrix
         uses: coactions/dynamic-matrix@v1
         with:
-          other_names: lint
+          other_names: |
+            lint
 
   # Run Python tests on Linux with Redis
   linux-tests:
     name: ${{ matrix.name }}
-    needs: tox-matrix
+    needs: pre
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
-      matrix:
-        tox: ${{ fromJson(needs.tox-matrix.outputs.matrix) }}
+      matrix: ${{ fromJson(needs.pre.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,12 +81,12 @@ jobs:
 
 #  # Run linting tasks
 #  lint:
-#    needs: tox-matrix
+#    needs: pre
 #    runs-on: ubuntu-latest
 #    strategy:
 #      fail-fast: false
 #      matrix:
-#        tox: ${{ fromJson(needs.tox-matrix.outputs.lint-matrix) }}
+#        tox: ${{ fromJson(needs.pre.outputs.lint-matrix) }}
 #    steps:
 #      - uses: actions/checkout@v4
 #      - name: Set up Python ${{ matrix.tox.python || '3.12' }}
@@ -102,12 +102,12 @@ jobs:
 #
 #  # Run documentation builds
 #  docs:
-#    needs: tox-matrix
+#    needs: pre
 #    runs-on: ubuntu-latest
 #    strategy:
 #      fail-fast: false
 #      matrix:
-#        tox: ${{ fromJson(needs.tox-matrix.outputs.docs-matrix) }}
+#        tox: ${{ fromJson(needs.pre.outputs.docs-matrix) }}
 #    steps:
 #      - uses: actions/checkout@v4
 #      - name: Set up Python ${{ matrix.tox.python || '3.12' }}
