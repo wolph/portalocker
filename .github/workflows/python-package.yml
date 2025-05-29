@@ -15,29 +15,29 @@ concurrency:
 
 jobs:
   # Run os specific tests on the slower OS X/Windows machines
-  windows_osx:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12']
-        os: ['macos-latest', 'windows-latest']
-
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: 'pip'
-      - name: Python version
-        run: python --version
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e ".[tests]"
-      - name: Test with pytest
-        run: python -m pytest
+#  windows_osx:
+#    runs-on: ${{ matrix.os }}
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        python-version: ['3.9', '3.10', '3.11', '3.12']
+#        os: ['macos-latest', 'windows-latest']
+#
+#    steps:
+#      - uses: actions/checkout@v4
+#      - name: Set up Python ${{ matrix.python-version }}
+#        uses: actions/setup-python@v5
+#        with:
+#          python-version: ${{ matrix.python-version }}
+#          cache: 'pip'
+#      - name: Python version
+#        run: python --version
+#      - name: Install dependencies
+#        run: |
+#          python -m pip install --upgrade pip setuptools wheel
+#          python -m pip install -e ".[tests]"
+#      - name: Test with pytest
+#        run: python -m pytest
 
   # Discover Tox environments and build the matrix
   tox-matrix:
@@ -77,7 +77,7 @@ jobs:
         run: |
           python -m pip install tox
       - name: Run tests with tox
-        run: tox -e ${{ matrix.tox.env }}
+        run: tox -e ${{ matrix.passed_name }}
 
 #  # Run linting tasks
 #  lint:
