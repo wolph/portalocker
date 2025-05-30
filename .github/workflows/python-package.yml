@@ -15,33 +15,33 @@ concurrency:
 
 jobs:
   # Run os specific tests on the slower OS X/Windows machines
-  windows_osx:
-    name: ${{ matrix.python-version }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.9', '3.10', '3.11', '3.12']
-        os: ['macos-latest', 'windows-latest']
-
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: 'pip'
-      - name: Python version
-        run: python --version
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          python -m pip install -e ".[tests]"
-      - name: Test with pytest
-        run: python -m pytest
+#  windows_osx:
+#    name: ${{ matrix.python-version }} on ${{ matrix.os }}
+#    runs-on: ${{ matrix.os }}
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        python-version: ['3.9', '3.10', '3.11', '3.12']
+#        os: ['macos-latest', 'windows-latest']
+#
+#    steps:
+#      - uses: actions/checkout@v4
+#      - name: Set up Python ${{ matrix.python-version }}
+#        uses: actions/setup-python@v5
+#        with:
+#          python-version: ${{ matrix.python-version }}
+#          cache: 'pip'
+#      - name: Python version
+#        run: python --version
+#      - name: Install dependencies
+#        run: |
+#          python -m pip install --upgrade pip setuptools wheel
+#          python -m pip install -e ".[tests]"
+#      - name: Test with pytest
+#        run: python -m pytest
 
   # Discover Tox environments and build the matrix
-  linux-matrix:
+  tox-matrix:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.generate-matrix.outputs.matrix }}
@@ -50,6 +50,7 @@ jobs:
         id: generate-matrix
         uses: coactions/dynamic-matrix@v3
         with:
+          platforms: 'linux,macos,windows'
           min_python: '3.9'
           other_names: |
             ruff
@@ -57,11 +58,11 @@ jobs:
   # Run Python tests on Linux with Redis
   linux-tests:
     name: ${{ matrix.name }}
-    needs: linux-matrix
+    needs: tox-matrix
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.linux-matrix.outputs.matrix) }}
+      matrix: ${{ fromJson(needs.tox-matrix.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -83,12 +84,12 @@ jobs:
 
 #  # Run linting tasks
 #  lint:
-#    needs: linux-matrix
+#    needs: tox-matrix
 #    runs-on: ubuntu-latest
 #    strategy:
 #      fail-fast: false
 #      matrix:
-#        tox: ${{ fromJson(needs.linux-matrix.outputs.lint-matrix) }}
+#        tox: ${{ fromJson(needs.tox-matrix.outputs.lint-matrix) }}
 #    steps:
 #      - uses: actions/checkout@v4
 #      - name: Set up Python ${{ matrix.tox.python || '3.12' }}
@@ -104,12 +105,12 @@ jobs:
 #
 #  # Run documentation builds
 #  docs:
-#    needs: linux-matrix
+#    needs: tox-matrix
 #    runs-on: ubuntu-latest
 #    strategy:
 #      fail-fast: false
 #      matrix:
-#        tox: ${{ fromJson(needs.linux-matrix.outputs.docs-matrix) }}
+#        tox: ${{ fromJson(needs.tox-matrix.outputs.docs-matrix) }}
 #    steps:
 #      - uses: actions/checkout@v4
 #      - name: Set up Python ${{ matrix.tox.python || '3.12' }}
