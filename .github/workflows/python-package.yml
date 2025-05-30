@@ -48,12 +48,10 @@ jobs:
     steps:
       - name: Generate Matrix
         id: generate-matrix
-        uses: coactions/dynamic-matrix@v1
+        uses: coactions/dynamic-matrix@v3
         with:
           min_python: '3.9'
           other_names: |
-            mypy 
-            pyright
             ruff
 
   # Run Python tests on Linux with Redis
