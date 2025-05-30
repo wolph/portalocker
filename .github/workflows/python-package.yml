@@ -49,8 +49,12 @@ jobs:
       - name: Generate Matrix
         id: generate-matrix
         uses: coactions/dynamic-matrix@v1
-#        with:
-#          min_python: '3.9'
+        with:
+          min_python: '3.9'
+          other_names: |
+            mypy 
+            pyright
+            ruff
 
   # Run Python tests on Linux with Redis
   linux-tests:
@@ -77,7 +81,7 @@ jobs:
         run: |
           python -m pip install tox
       - name: Run tests with tox
-        run: tox -e ${{ matrix.passed_name }}
+        run: {{ matrix.command }}
 
 #  # Run linting tasks
 #  lint:

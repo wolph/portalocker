@@ -1,5 +1,5 @@
-pre-push:
-  parallel: true
+#pre-push:
+#  parallel: true
 
 templates:
   ruff: 'uvx ruff'
