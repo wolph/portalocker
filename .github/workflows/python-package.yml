@@ -46,9 +46,6 @@ jobs:
           uv run ruff check --output-format=github .
           uv run ruff format --check .
 
-      - name: Run pyright type checker
-        uses: jakebailey/pyright-action@v2
-
   matrix:
     runs-on: ubuntu-latest
     outputs:
@@ -74,23 +71,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup uv for Python ${{ matrix.python }}
+      - name: Setup uv for Python ${{ matrix.python_version }}
         uses: astral-sh/setup-uv@v6
         with:
-          python-version: ${{ matrix.python }}
+          python-version: ${{ matrix.python_version }}
 
-      - name: Run pyright
-        run: >
-          uv run
-          -p ${{ matrix.python }}
-          --active
-          --no-editable
-          pyright
+      - name: Run pyright type checker
+        uses: jakebailey/pyright-action@v2
 
       - name: Run mypy
         run: >
           uv run
-          -p ${{ matrix.python }}
+          -p ${{ matrix.python_version }}
           --active
           --no-editable
           mypy
@@ -105,7 +97,7 @@ jobs:
       - name: Run stubtest
         run: >
           uv run
-          -p ${{ matrix.python }}
+          -p ${{ matrix.python_version }}
           --active
           --no-editable
           stubtest
