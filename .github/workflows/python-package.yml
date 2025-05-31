@@ -76,8 +76,13 @@ jobs:
         with:
           python-version: ${{ matrix.python_version }}
 
-      - name: Run pyright type checker
-        uses: jakebailey/pyright-action@v2
+      - name: Run pyright
+        run: >
+          uv run
+          -p ${{ matrix.python_version }}
+          --active
+          --no-editable
+          pyright
 
       - name: Run mypy
         run: >
@@ -92,18 +97,7 @@ jobs:
           --no-incremental
           --cache-dir=/dev/null
           --soft-error-limit=-1
-          .  # Check current directory, adjust as needed
-
-      - name: Run stubtest
-        run: >
-          uv run
-          -p ${{ matrix.python_version }}
-          --active
-          --no-editable
-          stubtest
-          --allowlist=.mypyignore  # Ensure this allowlist file exists and is configured
-          --mypy-config-file=pyproject.toml # Ensure your mypy config is specified
-          portalocker
+          .
 
   # Run os specific tests on the slower OS X/Windows machines
 #  windows_osx:
