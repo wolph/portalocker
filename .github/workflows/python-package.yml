@@ -58,7 +58,7 @@ jobs:
           min_python: '3.9'
 
   typetest:
-    name: Type Test ${{matrix.os}} - Python ${{ matrix.python_version }}
+    name: Type ${{matrix.os}} py${{ matrix.python_version }}
     needs: matrix
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 5 # Adjusted timeout
@@ -128,7 +128,7 @@ jobs:
 
   # Run Python tests on Linux with Redis
   tests:
-    name: ${{matrix.os}} - Python ${{ matrix.python_version }}
+    name: Test ${{matrix.os}} py${{ matrix.python_version }}
     needs: matrix
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     strategy:

@@ -20,9 +20,11 @@ skip_missing_interpreters = true
 labels = ['python']
 pass_env = ['FORCE_COLOR']
 commands = [
+    ['mypy'],
+    ['pyright'],
     ['pytest', '{posargs}'],
 ]
-
+allowlist_externals = ['pytest', 'mypy', 'pyright']
 extras = ['tests', 'redis']
 
 [env.mypy]
