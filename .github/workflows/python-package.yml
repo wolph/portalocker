@@ -31,9 +31,6 @@ jobs:
         with:
           plugins: sp-repo-review
 
-      - name: Check for typos
-        uses: crate-ci/typos@master
-
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
         with:
@@ -48,7 +45,7 @@ jobs:
         run: uvx tox -e docs
 
       - name: Typo checking
-        run: uvx tox -e codespell
+        uses: codespell-project/actions-codespell@v2
 
   matrix:
     runs-on: ubuntu-latest
@@ -131,12 +128,12 @@ jobs:
       - name: Run pytest
         run: >
           pytest
-          --junitxml=junit/test-results-${{ matrix.python_version }}.xml
+          --junitxml=junit/test-results-${{ matrix.name }}.xml
 
       - name: Upload pytest test results
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-results-${{ matrix.python_version }}
-          path: junit/test-results-${{ matrix.python_version }}.xml
+          name: pytest-results-${{ matrix.name }}
+          path: junit/test-results-${{ matrix.name }}.xml
         # Use always() to always run this step to publish test results when there are test failures
         if: ${{ always() }}
