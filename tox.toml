@@ -16,7 +16,10 @@ skip_missing_interpreters = true
 [env_run_base]
 labels = ['python']
 pass_env = ['FORCE_COLOR']
-commands = [['pytest', '{posargs}']]
+commands = [
+    ['pytest', '{posargs}'],
+]
+
 extras = ['tests', 'redis']
 
 [env.mypy]

@@ -8,12 +8,111 @@ on:
 
 env:
   FORCE_COLOR: 1
+  UV_LOCKED: 1 # Recommended when using uv
+
+permissions: # Added based on common practice and example
+  contents: read
+  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5 # Adjusted timeout
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check repository best-practices
+        uses: scientific-python/repo-review@v0.12.2
+        with:
+          plugins: sp-repo-review
+
+      - name: Check for typos
+        uses: crate-ci/typos@master
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          activate-environment: true # Optional: activates the virtual environment globally for subsequent steps
+          python-version: "3.12" # Or your desired Python version for linting
+
+      - name: Run ruff linter and formatter
+        run: |
+          uv run ruff check --output-format=github .
+          uv run ruff format --check .
+
+      - name: Run pyright type checker
+        uses: jakebailey/pyright-action@v2
+
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate-matrix.outputs.matrix }}
+    steps:
+      - name: Generate Matrix
+        id: generate-matrix
+        uses: coactions/dynamic-matrix@v3
+        with:
+          platforms: 'linux,macos,windows'
+          min_python: '3.9'
+
+  typetest:
+    name: Type Test ${{matrix.os}} - Python ${{ matrix.python_version }}
+    needs: matrix
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    timeout-minutes: 5 # Adjusted timeout
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv for Python ${{ matrix.python }}
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Run pyright
+        run: >
+          uv run
+          -p ${{ matrix.python }}
+          --active
+          --no-editable
+          pyright
+
+      - name: Run mypy
+        run: >
+          uv run
+          -p ${{ matrix.python }}
+          --active
+          --no-editable
+          mypy
+          --tb
+          --hide-error-context
+          --hide-error-code-links
+          --no-incremental
+          --cache-dir=/dev/null
+          --soft-error-limit=-1
+          .  # Check current directory, adjust as needed
+
+      - name: Run stubtest
+        run: >
+          uv run
+          -p ${{ matrix.python }}
+          --active
+          --no-editable
+          stubtest
+          --allowlist=.mypyignore  # Ensure this allowlist file exists and is configured
+          --mypy-config-file=pyproject.toml # Ensure your mypy config is specified
+          portalocker
+
   # Run os specific tests on the slower OS X/Windows machines
 #  windows_osx:
 #    name: ${{ matrix.python-version }} on ${{ matrix.os }}
@@ -41,34 +140,23 @@ jobs:
 #        run: python -m pytest
 
   # Discover Tox environments and build the matrix
-  tox-matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.generate-matrix.outputs.matrix }}
-    steps:
-      - name: Generate Matrix
-        id: generate-matrix
-        uses: coactions/dynamic-matrix@v3
-        with:
-          platforms: 'linux,macos,windows'
-          min_python: '3.9'
-          other_names: |
-            ruff
 
   # Run Python tests on Linux with Redis
-  linux-tests:
-    name: ${{ matrix.name }}
-    needs: tox-matrix
+  tests:
+    name: ${{matrix.os}} - Python ${{ matrix.python_version }}
+    needs: matrix
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.tox-matrix.outputs.matrix) }}
+      matrix: ${{ fromJson(needs.matrix.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - name: Start Redis
         uses: supercharge/redis-github-action@1.8.0
+        # Redis does not support all operating systems so allow failure
+        continue-on-error: true
       - name: Set up Python ${{ matrix.python_version }}
         uses: actions/setup-python@v5
         with:
@@ -82,44 +170,3 @@ jobs:
       - name: Run tests with tox
         run: ${{ matrix.command }}
 
-#  # Run linting tasks
-#  lint:
-#    needs: tox-matrix
-#    runs-on: ubuntu-latest
-#    strategy:
-#      fail-fast: false
-#      matrix:
-#        tox: ${{ fromJson(needs.tox-matrix.outputs.lint-matrix) }}
-#    steps:
-#      - uses: actions/checkout@v4
-#      - name: Set up Python ${{ matrix.tox.python || '3.12' }}
-#        uses: actions/setup-python@v5
-#        with:
-#          python-version: ${{ matrix.tox.python || '3.12' }}
-#          cache: 'pip'
-#      - name: Install dependencies
-#        run: |
-#          python -m pip install tox
-#      - name: Run linting
-#        run: tox -e ${{ matrix.tox.env }}
-#
-#  # Run documentation builds
-#  docs:
-#    needs: tox-matrix
-#    runs-on: ubuntu-latest
-#    strategy:
-#      fail-fast: false
-#      matrix:
-#        tox: ${{ fromJson(needs.tox-matrix.outputs.docs-matrix) }}
-#    steps:
-#      - uses: actions/checkout@v4
-#      - name: Set up Python ${{ matrix.tox.python || '3.12' }}
-#        uses: actions/setup-python@v5
-#        with:
-#          python-version: ${{ matrix.tox.python || '3.12' }}
-#          cache: 'pip'
-#      - name: Install dependencies
-#        run: |
-#          python -m pip install tox
-#      - name: Build docs
-#        run: tox -e ${{ matrix.tox.env }}
