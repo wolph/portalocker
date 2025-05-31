@@ -138,8 +138,6 @@ ignore = [
     'PC111', # no blacken-docs because markdown has no code
     'PC140', # manual typecheck pre-commit hooks
     'PC170', # no pygrep-hooks because no rST
-    'PP301', # pytest is irrelevant
-    'PY004', # no /docs
     'PY005',  # Tests folder is not named tests
     'PY006', # pre-commit should not be used
     'PY007', # tox configured in tox.toml
@@ -185,6 +183,10 @@ filterwarnings = [
     'ignore::PendingDeprecationWarning',
     'ignore::ImportWarning',
     'ignore::ResourceWarning',
+]
+testpaths = [
+    'portalocker',
+    'portalocker_tests',
 ]
 
 python_files = [
