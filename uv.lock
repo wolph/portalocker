@@ -29,70 +29,6 @@ wheels = [
 ]
 
 [[package]]
-name = "basedmypy"
-version = "2.10.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "basedtyping" },
-    { name = "mypy-extensions" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/24/f5/223ddf7be63d4549a0e0351e37a54f799d18ef4b799af95093c8359ddf48/basedmypy-2.10.0.tar.gz", hash = "sha256:85dd20aa8de401982073970a90a78a5d47442251140401b4863f0018247e533f", size = 5516524 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/bb/3e7fda299de3fa9b62b03f744d92d24124d40d1ce02d4f2e8e9a6acc683a/basedmypy-2.10.0-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:531f8c9e18b7b97cc11fd981c529115d2e3282ffff439a6487d83c4c4881aebf", size = 11088450 },
-    { url = "https://files.pythonhosted.org/packages/4a/9a/386d825e43ccda3676dcbd96cc30968b3f939a964cc98d7465c26e4e78a1/basedmypy-2.10.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:0359e002801ed0bdb5ac2d2ce32abdeda2c15d8f0206c8cdef22b3bccc4f75d0", size = 10191181 },
-    { url = "https://files.pythonhosted.org/packages/63/a9/54beaef65f195e4833d9aec4bbb877acecbe1f5cbb35e6b59ace159d0919/basedmypy-2.10.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ac9b8416834fad37a092f957c0caec78d63a09684055597e9c12380c54d6b7bb", size = 12761715 },
-    { url = "https://files.pythonhosted.org/packages/6b/08/614913c64008c5c514ab3c8f0dd1d5b20d6546916ff9344824350244f755/basedmypy-2.10.0-cp310-cp310-musllinux_1_2_x86_64.whl", hash = "sha256:3a124f7c31d2c65003213e0c60ea2913774bdb122e971fa6eb080d152df5fe61", size = 12954329 },
-    { url = "https://files.pythonhosted.org/packages/79/29/77ee3c18582524781d2c99917e8e94f501c6ddb94e419c5ed3a07683c30c/basedmypy-2.10.0-cp310-cp310-win_amd64.whl", hash = "sha256:a7ee1defe6807ce2e2a3f2cd9b7edbb4465c5cad3d822be9dc4caa9f0427da29", size = 9577577 },
-    { url = "https://files.pythonhosted.org/packages/ef/ba/f2e5905c3e5ac0c4f50912dfbe181087da24e299380db555c0eb02fcf96f/basedmypy-2.10.0-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:4704fe9fc164234ccc707a030bda765db57e26baa11975689d488ce37be18c32", size = 11012707 },
-    { url = "https://files.pythonhosted.org/packages/3d/65/cb862eb79edee57fb7954a12406b019189fb210507724c11616aacea1bed/basedmypy-2.10.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:ae94e57b12e6cf97be83680f4ea039b722bd3d902b36ad45aabf92b5f42b891e", size = 10108023 },
-    { url = "https://files.pythonhosted.org/packages/11/93/04dfe0756ef8f9201b721306c943c2cb0b27ce77c4ab05f77e00e40bf5aa/basedmypy-2.10.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:bd3f41c8d26bef408b7e3abf6baebf0267fedf3d393e360761a6d38ed770e398", size = 12677726 },
-    { url = "https://files.pythonhosted.org/packages/49/b5/c70a93bc0db1b0f113d895f589fde2b6f152e9b788bd624b2883474aa822/basedmypy-2.10.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:43c2a8d859c30c9cdf5037d00d602efc7e0a90966cdff579895726019381e4c9", size = 12825877 },
-    { url = "https://files.pythonhosted.org/packages/6f/51/b0ae5c98439f6d002c958189303777e2846d0fe79c64d1bdc90762dabe6a/basedmypy-2.10.0-cp311-cp311-win_amd64.whl", hash = "sha256:65775c786349f0d0adfef3f923baf05888a0f2434d5623520a22d47de6d4123a", size = 9571492 },
-    { url = "https://files.pythonhosted.org/packages/c2/cd/bd22280452d1363c9ca752e3e16fd56ca151cc14a08b45ad43b652db05ab/basedmypy-2.10.0-cp312-cp312-macosx_10_13_x86_64.whl", hash = "sha256:671f8772cbd95d5d249566bb0f2666bdd4ec674bf78e89920601cfd5500973ce", size = 11151863 },
-    { url = "https://files.pythonhosted.org/packages/31/0c/ca810df3ee39bcf23b7658d891ee56c0cede0ef81348cece7503557d1c5e/basedmypy-2.10.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:6999cc9226921aed439d1ac354dfd57841667c7d75e147f699e7b4ccaffb8b13", size = 10069742 },
-    { url = "https://files.pythonhosted.org/packages/c6/d6/65a4b2139cdb5f79a841676d0ded8bdd4b08846eeb92522712a1301a1bf2/basedmypy-2.10.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:117bfd52b9b986650c88b7522e89209de8e97fc5e0e6903ce734f1e09e92939a", size = 12799939 },
-    { url = "https://files.pythonhosted.org/packages/51/58/0a84e7e568e8cdb4845dc679e3fc4c088af5e6e01e43cf73cf59db850b1d/basedmypy-2.10.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:e130836271eeed20458b950b30896130019f289f5cb6c2498c6305149bca0c57", size = 12915197 },
-    { url = "https://files.pythonhosted.org/packages/ac/aa/3aec20d8137808d5951ab80ea0230497c2a4f17f69b37840e054afc06f9d/basedmypy-2.10.0-cp312-cp312-win_amd64.whl", hash = "sha256:4c687678c104a810c570b4b91ea3457af4e17759b65d081cc8e19daf9989679d", size = 9678731 },
-    { url = "https://files.pythonhosted.org/packages/ca/6e/a9fbef73c01d731ce0339be9b6f3e356a0ac217b13e27c4cb3a12ba9811f/basedmypy-2.10.0-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:f1e4800cb4643b49a1fe851bd3eae27c714a86b92ace5f916acd8571f2739843", size = 11154841 },
-    { url = "https://files.pythonhosted.org/packages/1c/7b/486eefe99853b6fc409bf1aed5a5e3df21f02b06586d169d1545dd6264c6/basedmypy-2.10.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:025d7ad9ab60717b50cc87c9c4dcb9e7ba9047b77ccd5312b7f3da3c13dae9c1", size = 10071084 },
-    { url = "https://files.pythonhosted.org/packages/10/f0/4f1abccbee4b3da150f992a9a34ef63a97350efeb63acf6635999e0d4730/basedmypy-2.10.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:9933a38b73f5d57e0609a30721d12d40d384a9ff33b0828fe26ac19bbc89e375", size = 12801332 },
-    { url = "https://files.pythonhosted.org/packages/e3/03/983b23bf5e146875d31046d02a4a258f8e3297262451fc958bcd317e1e8e/basedmypy-2.10.0-cp313-cp313-musllinux_1_2_x86_64.whl", hash = "sha256:64ad7c3c13e0504891a70e1a0db49ac78851c0847f7d4770c0b22efe54c20457", size = 12910526 },
-    { url = "https://files.pythonhosted.org/packages/8b/c8/5c680ef984f5d5c458e892a502d9255c0c360f7f35ae2dda12c071b971c5/basedmypy-2.10.0-cp313-cp313-win_amd64.whl", hash = "sha256:1c782fde0a3018ca1a89eeeaaf5d48eb2618cc7e039ac24a59dc08c24597aa22", size = 9680025 },
-    { url = "https://files.pythonhosted.org/packages/41/c6/37e6da459014a56eb72720b743b1489dc09670b628a846ea2cc5c433dbe7/basedmypy-2.10.0-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:17a81a7f46797d0d05ecd9409ebf9e0b65dd21f2fd9713f69edfe4fc708ab8fe", size = 11090151 },
-    { url = "https://files.pythonhosted.org/packages/17/b8/4b059482038a4676821d195a4b302941c92ebb6d42cad3387fa2b65fc5b0/basedmypy-2.10.0-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:6f52d09cd7e0d8404887407d691b96f5f9de0d635ab7a4249ba3435ccd41dbf1", size = 10188549 },
-    { url = "https://files.pythonhosted.org/packages/94/6a/71f93817fbde1bdedd5f2aed5d662c420b54328d2bb6290c2cc94bc17d28/basedmypy-2.10.0-cp39-cp39-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f92421e2d34c22cae17cbc487530f743e618ab620972ff385374ad2465aff443", size = 12758840 },
-    { url = "https://files.pythonhosted.org/packages/0f/15/afb57e6f1fdfca1684c83bd1a851b053ce37c90019b7b072d0ab5a7b8bf9/basedmypy-2.10.0-cp39-cp39-musllinux_1_2_x86_64.whl", hash = "sha256:0db27293bbc50dd1951e232b41773d151b23004e0090c7fc89125774d854e754", size = 12957666 },
-    { url = "https://files.pythonhosted.org/packages/0e/81/eb9668c719ebe6351077d32183ab48f94233da95471a6f31695740412391/basedmypy-2.10.0-cp39-cp39-win_amd64.whl", hash = "sha256:80319b464dbac8caa4203088824efb547cc5b41f3b613bf7cdc792b89cd18aba", size = 9575426 },
-    { url = "https://files.pythonhosted.org/packages/b0/bd/33d3b1a369fa1c516900b0e01844d8782dd06adc4f2de350570831ad2711/basedmypy-2.10.0-py3-none-any.whl", hash = "sha256:05047ee1821ba4026c21029b342b903883aac8520961bb9d021f49721428d029", size = 2263380 },
-]
-
-[[package]]
-name = "basedpyright"
-version = "1.29.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "nodejs-wheel-binaries" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/0c/db/fcfced6e89a49b52694d51078c2cf626b3fe9d097c1145bb8424337d7ae6/basedpyright-1.29.2.tar.gz", hash = "sha256:12c49186003b9f69a028615da883ef97035ea2119a9e3f93a00091b3a27088a6", size = 21966851 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/98/b7/8307208ab517ac6e5d0331ad7347624fe8b250fb6e659ba3bd081d82c890/basedpyright-1.29.2-py3-none-any.whl", hash = "sha256:f389e2997de33d038c5065fd85bff351fbdc62fa6d6371c7b947fc3bce8d437d", size = 11472099 },
-]
-
-[[package]]
-name = "basedtyping"
-version = "0.1.10"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/99/36/7ba70ab751f08f8619c9c1985899cc75223fef6b9583159414e08a1240f3/basedtyping-0.1.10.tar.gz", hash = "sha256:d7600917ec9f232c9eb4266916c2ea5a4719ffca59fb7902fc96fd59a4678110", size = 14672 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/db/4a/76fe7ddbb90aadaeb298dbb57e562a365f21a6fa17d3c69e73cb3c0c84e8/basedtyping-0.1.10-py3-none-any.whl", hash = "sha256:8952416f8fd196d25c1f6d6bb556223183e928c944bee4bd0c49af659677dea9", size = 15045 },
-]
-
-[[package]]
 name = "black"
 version = "25.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -692,22 +628,6 @@ wheels = [
 ]
 
 [[package]]
-name = "nodejs-wheel-binaries"
-version = "22.16.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0f/c6/66f36b7b0d528660dfb4a59cb9b8dd6a3f4c0a3939cd49c404a775ea4a63/nodejs_wheel_binaries-22.16.0.tar.gz", hash = "sha256:d695832f026df3a0cf9a089d222225939de9d1b67f8f0a353b79f015aabbe7e2", size = 8061 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d7/dc/417a5c5f99e53a5d2b3be122506312731eb90fb9630c248e327e2e38cc6b/nodejs_wheel_binaries-22.16.0-py2.py3-none-macosx_11_0_arm64.whl", hash = "sha256:986b715a96ed703f8ce0c15712f76fc42895cf09067d72b6ef29e8b334eccf64", size = 50957501 },
-    { url = "https://files.pythonhosted.org/packages/0e/dd/d6ce48209ed15f5d1fccb29eeaa111f962557123eaf4fd03a7316c42734c/nodejs_wheel_binaries-22.16.0-py2.py3-none-macosx_11_0_x86_64.whl", hash = "sha256:4ae3cf22138891cb44c3ee952862a257ce082b098b29024d7175684a9a77b0c0", size = 51891634 },
-    { url = "https://files.pythonhosted.org/packages/80/fa/a07e622fd87717eec3e5cff41575f85ad62717e8698884d28ca809266ca1/nodejs_wheel_binaries-22.16.0-py2.py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:71f2de4dc0b64ae43e146897ce811f80ac4f9acfbae6ccf814226282bf4ef174", size = 57857862 },
-    { url = "https://files.pythonhosted.org/packages/1f/80/52736f9570a93f8e6b7942981dc9770eca2bc7aa1d200c1d54198374a6ca/nodejs_wheel_binaries-22.16.0-py2.py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:dbfccbcd558d2f142ccf66d8c3a098022bf4436db9525b5b8d32169ce185d99e", size = 58395868 },
-    { url = "https://files.pythonhosted.org/packages/0f/0e/53616a5ed8fc1fbe9e48bf132862da5a9abf5cc7f8483dab1722ec257187/nodejs_wheel_binaries-22.16.0-py2.py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:447ad796850eb52ca20356ad39b2d296ed8fef3f214921f84a1ccdad49f2eba1", size = 59712469 },
-    { url = "https://files.pythonhosted.org/packages/4a/cd/e2b5083df581fc1d08eb93feb6f8fbd3d56b113cef9b59d8e0fb7d4dd4f3/nodejs_wheel_binaries-22.16.0-py2.py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:7f526ca6a132b0caf633566a2a78c6985fe92857e7bfdb37380f76205a10b808", size = 60763005 },
-    { url = "https://files.pythonhosted.org/packages/71/8d/57112b49214e8bd636f3cc3386eba6be4d23552ec8a0f6efbe814013caa7/nodejs_wheel_binaries-22.16.0-py2.py3-none-win_amd64.whl", hash = "sha256:2fffb4bf1066fb5f660da20819d754f1b424bca1b234ba0f4fa901c52e3975fb", size = 41313324 },
-    { url = "https://files.pythonhosted.org/packages/91/03/a852711aec73dfb965844592dfe226024c0da28e37d1ee54083342e38f57/nodejs_wheel_binaries-22.16.0-py2.py3-none-win_arm64.whl", hash = "sha256:2728972d336d436d39ee45988978d8b5d963509e06f063e80fe41b203ee80b28", size = 38828154 },
-]
-
-[[package]]
 name = "packaging"
 version = "25.0"
 source = { registry = "https://pypi.org/simple" }
@@ -773,8 +693,6 @@ tests = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "basedmypy" },
-    { name = "basedpyright" },
     { name = "black" },
     { name = "lefthook" },
     { name = "mypy" },
@@ -803,8 +721,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "basedmypy", specifier = ">=2.10.0" },
-    { name = "basedpyright", specifier = ">=1.29.1" },
     { name = "black", specifier = ">=25.1.0" },
     { name = "lefthook", specifier = ">=1.11.13" },
     { name = "mypy", specifier = ">=1.15.0" },

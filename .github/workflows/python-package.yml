@@ -69,13 +69,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup uv for Python ${{ matrix.python_version }}
         uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python_version }}
 
-      - name: Ensure that everything is up to date
+      - name: Sync uv environment to show what packages are installed
         run: >
           uv sync
           -p ${{ matrix.python_version }}
@@ -138,20 +140,26 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
       - name: Start Redis
         uses: supercharge/redis-github-action@1.8.0
         # Redis does not support all operating systems so allow failure
         continue-on-error: true
-      - name: Set up Python ${{ matrix.python_version }}
-        uses: actions/setup-python@v5
+
+      - name: Setup uv for Python ${{ matrix.python_version }}
+        uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python_version }}
-          cache: 'pip'
-      - name: Python version
-        run: python --version
-      - name: Install dependencies
-        run: |
-          python -m pip install tox
-      - name: Run tests with tox
-        run: ${{ matrix.command }}
 
+      - name: Sync uv environment to show what packages are installed
+        run: >
+          uv sync
+          -p ${{ matrix.python_version }}
+
+      - name: Run pytest
+        run: >
+          uv run
+          -p ${{ matrix.python_version }}
+          --active
+          --no-editable
+          pytest

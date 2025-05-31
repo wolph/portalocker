@@ -119,8 +119,6 @@ disallow_untyped_defs = false
 
 [dependency-groups]
 dev = [
-    "basedmypy>=2.10.0",
-    "basedpyright>=1.29.1",
     "black>=25.1.0",
     "lefthook>=1.11.13",
     "mypy>=1.15.0",
