@@ -1,3 +1,6 @@
+min_version = '4'
+requires = ['tox-uv>=1']
+
 env_list = [
     'py39',
     'py310',
@@ -77,8 +80,8 @@ commands = [
 
 [env.repo-review]
 labels = ['lint', 'nontest']
-basepython = ['py312']
-deps = ['sp-repo-review[cli]', 'validate-pyproject']
+basepython = ['py313']
+deps = ['sp-repo-review[cli]', 'validate-pyproject', 'tomli', 'packaging']
 commands = [['repo-review']]
 
 [env.codespell]
