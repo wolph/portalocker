@@ -36,10 +36,13 @@ jobs:
         with:
           activate-environment: true
 
-      - name: Run ruff linter and formatter
-        run: |
-          ruff check --output-format=github .
-          ruff format --check .
+      - name: Run ruff check
+        uses: astral-sh/ruff-action@v3
+
+      - name: Run ruff formatter
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: 'format --check --diff'
 
       - name: Build sphinx docs
         run: uvx tox -e docs
