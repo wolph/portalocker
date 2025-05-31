@@ -14,8 +14,6 @@ environment:
 
 install:
   - powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-#  - py -m pip install -U tox setuptools wheel
-#  - py -m pip install -Ue ".[tests]"
 
 build: false  # Not a C# project, build stuff at the test step instead.
 
