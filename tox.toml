@@ -20,7 +20,12 @@ skip_missing_interpreters = true
 labels = ['python']
 pass_env = ['FORCE_COLOR']
 commands = [
-    ['mypy'],
+    [
+        'mypy',
+        '--cache-dir=/dev/null',
+        '--soft-error-limit=-1',
+        '.',
+    ],
     ['pyright'],
     ['pytest', '{posargs}'],
 ]

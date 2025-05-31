@@ -78,6 +78,7 @@ jobs:
       - name: Ensure that everything is up to date
         run: >
           uv sync
+          -p ${{ matrix.python_version }}
 
       - name: Run pyright
         run: >
