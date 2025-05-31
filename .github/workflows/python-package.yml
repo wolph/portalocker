@@ -75,6 +75,10 @@ jobs:
         with:
           python-version: ${{ matrix.python_version }}
 
+      - name: Ensure that everything is up to date
+        run: >
+          uv sync
+
       - name: Run pyright
         run: >
           uv run
@@ -90,12 +94,7 @@ jobs:
           --active
           --no-editable
           mypy
-          --tb
-          --hide-error-context
-          --hide-error-code-links
-          --no-incremental
           --cache-dir=/dev/null
-          --soft-error-limit=-1
           .
 
   # Run os specific tests on the slower OS X/Windows machines
