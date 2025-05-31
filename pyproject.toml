@@ -6,15 +6,16 @@ requires = ['setuptools', 'setuptools-scm']
 name = 'portalocker'
 dynamic = ['version']
 authors = [{ name = 'Rick van Hattem', email = 'wolph@wol.ph' }]
-license = { text = 'BSD-3-Clause' }
+license = 'BSD-3-Clause'
+license-files = ['LICENSE']
 description = 'Wraps the portalocker recipe for easy usage'
 keywords = ['locking', 'locks', 'with', 'statement', 'windows', 'linux', 'unix']
 readme = 'README.rst'
+
 classifiers = [
     'Development Status :: 5 - Production/Stable',
     'Development Status :: 6 - Mature',
     'Intended Audience :: Developers',
-    'License :: OSI Approved :: BSD License',
     'Natural Language :: English',
     'Operating System :: MacOS :: MacOS X',
     'Operating System :: MacOS',

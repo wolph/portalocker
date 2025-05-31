@@ -7,7 +7,7 @@ templates:
 pre-commit:
   parallel: true
   commands:
-    uv-lock:
+    uv-lock-sort:
       glob: 'pyproject.toml'
       run: uv lock
       stage_fixed: true
@@ -15,6 +15,9 @@ pre-commit:
       glob: 'pyproject.toml'
       run: uvx uv-sort pyproject.toml
       stage_fixed: true
+    validate-pyproject:
+      glob: 'pyproject.toml'
+      run: uvx --with=tomli --with=packaging validate-pyproject pyproject.toml
     ruff:
       glob: '*.py'
       run: |
