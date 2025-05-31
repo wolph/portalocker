@@ -181,7 +181,7 @@ def test_release_unacquired(tmpfile):
         portalocker.RLock(tmpfile).release()
 
 
-def test_exlusive(tmpfile):
+def test_exclusive(tmpfile):
     text_0 = 'spam and eggs'
     with open(tmpfile, 'w') as fh:
         fh.write(text_0)

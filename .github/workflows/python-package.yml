@@ -8,7 +8,6 @@ on:
 
 env:
   FORCE_COLOR: 1
-  UV_LOCKED: 1 # Recommended when using uv
 
 permissions: # Added based on common practice and example
   contents: read
