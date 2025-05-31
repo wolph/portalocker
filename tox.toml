@@ -81,7 +81,6 @@ commands = [
         'docs/_build/doctrees',
         'docs',
         'docs/_build/html',
-        '{posargs}',
     ],
 ]
 
