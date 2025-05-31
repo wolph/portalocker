@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint
+    name: Lint and docs
     runs-on: ubuntu-latest
     timeout-minutes: 5 # Adjusted timeout
 
@@ -37,13 +37,18 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
         with:
-          activate-environment: true # Optional: activates the virtual environment globally for subsequent steps
-          python-version: "3.12" # Or your desired Python version for linting
+          activate-environment: true
 
       - name: Run ruff linter and formatter
         run: |
-          uv run ruff check --output-format=github .
-          uv run ruff format --check .
+          ruff check --output-format=github .
+          ruff format --check .
+
+      - name: Build sphinx docs
+        run: uvx tox -e docs
+
+      - name: Typo checking
+        run: uvx tox -e codespell
 
   matrix:
     runs-on: ubuntu-latest
@@ -56,6 +61,9 @@ jobs:
         with:
           platforms: 'linux,macos,windows'
           min_python: '3.9'
+          linux: full
+          windows: full
+          macos: full
 
   typetest:
     name: Type ${{matrix.os}} py${{ matrix.python_version }}
@@ -76,6 +84,7 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python_version }}
+          activate-environment: true
 
       - name: Sync uv environment to show what packages are installed
         run: >
@@ -83,52 +92,14 @@ jobs:
           -p ${{ matrix.python_version }}
 
       - name: Run pyright
-        run: >
-          uv run
-          -p ${{ matrix.python_version }}
-          --active
-          --no-editable
-          pyright
+        run: pyright
 
       - name: Run mypy
         run: >
-          uv run
-          -p ${{ matrix.python_version }}
-          --active
-          --no-editable
           mypy
           --cache-dir=/dev/null
           .
 
-  # Run os specific tests on the slower OS X/Windows machines
-#  windows_osx:
-#    name: ${{ matrix.python-version }} on ${{ matrix.os }}
-#    runs-on: ${{ matrix.os }}
-#    strategy:
-#      fail-fast: false
-#      matrix:
-#        python-version: ['3.9', '3.10', '3.11', '3.12']
-#        os: ['macos-latest', 'windows-latest']
-#
-#    steps:
-#      - uses: actions/checkout@v4
-#      - name: Set up Python ${{ matrix.python-version }}
-#        uses: actions/setup-python@v5
-#        with:
-#          python-version: ${{ matrix.python-version }}
-#          cache: 'pip'
-#      - name: Python version
-#        run: python --version
-#      - name: Install dependencies
-#        run: |
-#          python -m pip install --upgrade pip setuptools wheel
-#          python -m pip install -e ".[tests]"
-#      - name: Test with pytest
-#        run: python -m pytest
-
-  # Discover Tox environments and build the matrix
-
-  # Run Python tests on Linux with Redis
   tests:
     name: Test ${{matrix.os}} py${{ matrix.python_version }}
     needs: matrix
@@ -149,6 +120,7 @@ jobs:
       - name: Setup uv for Python ${{ matrix.python_version }}
         uses: astral-sh/setup-uv@v6
         with:
+          activate-environment: true
           python-version: ${{ matrix.python_version }}
 
       - name: Sync uv environment to show what packages are installed
@@ -158,8 +130,13 @@ jobs:
 
       - name: Run pytest
         run: >
-          uv run
-          -p ${{ matrix.python_version }}
-          --active
-          --no-editable
           pytest
+          --junitxml=junit/test-results-${{ matrix.python_version }}.xml
+
+      - name: Upload pytest test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results-${{ matrix.python_version }}
+          path: junit/test-results-${{ matrix.python_version }}.xml
+        # Use always() to always run this step to publish test results when there are test failures
+        if: ${{ always() }}

@@ -205,7 +205,7 @@ addopts = '''
 
 timeout = 20
 
-[tool.typos]
+[tool.typos.default]
 extend-ignore-re = [
     '(?Rm)^.*(#|//)\\s*spellchecker:disable-line$',
     '(?s)(#|//)\\s*spellchecker: ?off.*?\\n\\s*(#|//)\\s*spellchecker:on',
