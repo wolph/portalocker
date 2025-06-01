@@ -102,7 +102,7 @@ if os.name == 'nt':  # pragma: not-posix
                     'msvcrt is required for _get_os_handle on Windows '
                     'but not found.'
                 ) from e
-            return cast(int, msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined]
+            return cast(int, msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined,redundant-cast]
 
         def lock(self, file_obj: FileArgument, flags: LockFlags) -> None:
             import pywintypes
@@ -363,17 +363,17 @@ else:  # pragma: not-nt
     class FlockLocker(PosixLocker):
         """FlockLocker is a PosixLocker implementation using fcntl.flock."""
 
-        LOCKER = fcntl.flock
+        LOCKER = fcntl.flock  # type: ignore[attr-defined]
 
     class LockfLocker(PosixLocker):
         """LockfLocker is a PosixLocker implementation using fcntl.lockf."""
 
-        LOCKER = fcntl.lockf
+        LOCKER = fcntl.lockf  # type: ignore[attr-defined]
 
     # LOCKER constant for POSIX is fcntl.flock for backward compatibility.
     # Type matches: Callable[[Union[int, HasFileno], int], Any]
     LOCKER_TYPE_POSIX = Callable[[Union[int, HasFileno], int], Any]
-    LOCKER: LOCKER_TYPE_POSIX = fcntl.flock  # type: ignore[no-redef]
+    LOCKER: LOCKER_TYPE_POSIX = fcntl.flock  # type: ignore[no-redef,attr-defined]
 
     _posix_locker_instance = PosixLocker()
 

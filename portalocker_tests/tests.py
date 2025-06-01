@@ -17,8 +17,8 @@ if os.name == 'posix':
     import fcntl
 
     LOCKERS = [
-        fcntl.flock,
-        fcntl.lockf,
+        fcntl.flock,  # type: ignore[attr-defined]
+        fcntl.lockf,  # type: ignore[attr-defined]
     ]
 else:
     LOCKERS = []
@@ -448,7 +448,7 @@ def test_locker_mechanism(tmpfile, locker):
     # locking the same file.
     with portalocker.Lock(tmpfile, 'a+', flags=LockFlags.EXCLUSIVE):
         # If we have lockf(), we cannot get another lock on the same file.
-        if locker is fcntl.lockf:
+        if locker is fcntl.lockf:  # type: ignore[attr-defined]
             portalocker.Lock(
                 tmpfile,
                 'r+',

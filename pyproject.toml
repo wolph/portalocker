@@ -109,7 +109,13 @@ warn_unused_ignores = false
 packages = ['portalocker', 'portalocker_tests']
 ignore_missing_imports = true
 check_untyped_defs = true
-exclude = ['dist', 'docs', '.venv', 'venv', 'build']
+exclude = [
+    'dist',
+    'docs',
+    '.venv',
+    'venv',
+    'build',
+]
 enable_error_code = ['ignore-without-code', 'truthy-bool', 'redundant-expr']
 warn_unreachable = true
 

@@ -36,13 +36,13 @@ elif os.name == 'posix':  # pragma: no cover
     import fcntl
 
     #: exclusive lock
-    LOCK_EX = fcntl.LOCK_EX
+    LOCK_EX = fcntl.LOCK_EX  # type: ignore[attr-defined]
     #: shared lock
-    LOCK_SH = fcntl.LOCK_SH
+    LOCK_SH = fcntl.LOCK_SH  # type: ignore[attr-defined]
     #: non-blocking
-    LOCK_NB = fcntl.LOCK_NB
+    LOCK_NB = fcntl.LOCK_NB  # type: ignore[attr-defined]
     #: unlock
-    LOCK_UN = fcntl.LOCK_UN
+    LOCK_UN = fcntl.LOCK_UN  # type: ignore[attr-defined]
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')
