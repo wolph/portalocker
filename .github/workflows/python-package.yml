@@ -101,7 +101,7 @@ jobs:
           .
 
   tests:
-    name: Test ${{matrix.os}} py${{ matrix.python_version }}
+    name: Test py${{ matrix.python_version }} ${{matrix.os}}
     needs: matrix
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     strategy:
