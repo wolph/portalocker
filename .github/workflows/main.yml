@@ -50,7 +50,7 @@ jobs:
 
   # Job: Perform static type checking across the generated matrix.
   type_checking:
-    name: Type Check (Python ${{ matrix.python_version }}, OS ${{ matrix.os }})
+    name: Type py${{ matrix.python_version }}, ${{ matrix.os }})
     needs: generate_test_matrix
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 10
@@ -75,13 +75,11 @@ jobs:
 
       - name: Run mypy
         run: |
-          mypy \
-            --cache-dir=/dev/null \
-            .
+          mypy --cache-dir=/dev/null .
 
   # Job: Run pytest tests across the generated matrix.
   tests:
-    name: Pytest (Python ${{ matrix.python_version }}, OS ${{ matrix.os }})
+    name: test py${{ matrix.python_version }}, ${{ matrix.os }})
     needs: generate_test_matrix
     runs-on: ${{ matrix.os || 'ubuntu-latest' }}
     timeout-minutes: 15
@@ -109,8 +107,7 @@ jobs:
 
       - name: Run pytest
         run: |
-          pytest \
-            --junitxml=junit/test-results-${{ matrix.os }}-py${{ matrix.python_version }}.xml
+          pytest --junitxml=junit/test-results-${{ matrix.os }}-py${{ matrix.python_version }}.xml
 
       - name: Upload pytest test results
         if: ${{ always() }} # Ensure results are uploaded even if tests fail.
