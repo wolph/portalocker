@@ -1,3 +1,6 @@
+min_version = '4'
+requires = ['tox-uv>=1']
+
 env_list = [
     'py39',
     'py310',
@@ -16,7 +19,17 @@ skip_missing_interpreters = true
 [env_run_base]
 labels = ['python']
 pass_env = ['FORCE_COLOR']
-commands = [['pytest', '{posargs}']]
+commands = [
+    [
+        'mypy',
+        '--cache-dir=/dev/null',
+        '--soft-error-limit=-1',
+        '.',
+    ],
+    ['pyright'],
+    ['pytest', '{posargs}'],
+]
+allowlist_externals = ['pytest', 'mypy', 'pyright']
 extras = ['tests', 'redis']
 
 [env.mypy]
@@ -68,14 +81,13 @@ commands = [
         'docs/_build/doctrees',
         'docs',
         'docs/_build/html',
-        '{posargs}',
     ],
 ]
 
 [env.repo-review]
 labels = ['lint', 'nontest']
-basepython = ['py312']
-deps = ['sp-repo-review[cli]', 'validate-pyproject']
+basepython = ['py313']
+deps = ['sp-repo-review[cli]', 'validate-pyproject', 'tomli', 'packaging']
 commands = [['repo-review']]
 
 [env.codespell]

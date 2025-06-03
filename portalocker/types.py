@@ -5,6 +5,7 @@ import pathlib
 import typing
 from typing import Union
 
+# spellchecker: off
 # fmt: off
 Mode = typing.Literal[
     # Text modes
@@ -47,6 +48,7 @@ Mode = typing.Literal[
     # Universal newline support in binary mode
     'rbU', 'rUb', 'Urb', 'brU', 'bUr', 'Ubr',
 ]
+# spellchecker: on
 Filename = Union[str, pathlib.Path]
 IO = Union[  # type: ignore[name-defined]
     typing.IO[str],

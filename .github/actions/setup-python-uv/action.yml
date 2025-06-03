@@ -1,0 +1,32 @@
+# .github/actions/setup-python-uv/action.yml
+# Composite action to checkout code, setup Python with UV, and install dependencies.
+
+name: 'Setup Python Environment with UV'
+description: 'Checks out code, sets up UV with a specific Python version, installs dependencies, and lists them.'
+
+inputs:
+  python-version:
+    description: 'Python version to set up (e.g., "3.9", "3.11")'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    # Step 1: Setup uv (Python package installer and resolver)
+    - name: Setup uv for Python ${{ inputs.python-version }}
+      uses: astral-sh/setup-uv@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+        activate-environment: true # Makes uv-managed Python available on PATH for subsequent steps.
+
+    # Step 2: Install dependencies using uv sync
+    # This command assumes your project dependencies are defined in a way uv can understand
+    # (e.g., pyproject.toml, requirements.txt).
+    - name: Install dependencies with uv
+      run: |
+        uv sync -p ${{ inputs.python-version }}
+        echo "----------------------------------------"
+        echo "Installed packages for Python ${{ inputs.python-version }}:"
+        uv pip list
+        echo "----------------------------------------"
+      shell: bash

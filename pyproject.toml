@@ -6,15 +6,16 @@ requires = ['setuptools', 'setuptools-scm']
 name = 'portalocker'
 dynamic = ['version']
 authors = [{ name = 'Rick van Hattem', email = 'wolph@wol.ph' }]
-license = { text = 'BSD-3-Clause' }
+license = 'BSD-3-Clause'
+license-files = ['LICENSE']
 description = 'Wraps the portalocker recipe for easy usage'
 keywords = ['locking', 'locks', 'with', 'statement', 'windows', 'linux', 'unix']
 readme = 'README.rst'
+
 classifiers = [
     'Development Status :: 5 - Production/Stable',
     'Development Status :: 6 - Mature',
     'Intended Audience :: Developers',
-    'License :: OSI Approved :: BSD License',
     'Natural Language :: English',
     'Operating System :: MacOS :: MacOS X',
     'Operating System :: MacOS',
@@ -58,18 +59,18 @@ documentation = 'https://portalocker.readthedocs.io/en/latest/'
 repository = 'https://github.com/wolph/portalocker/'
 
 [project.optional-dependencies]
-docs = ['sphinx>=1.7.1']
+docs = ['portalocker[tests]']
 tests = [
-    'pytest>=5.4.1',
+    'coverage-conditional-plugin>=0.9.0',
+    'portalocker[redis]',
     'pytest-cov>=2.8.1',
-    'pytest-timeout>=2.1.0',
-    'sphinx>=6.0.0',
     'pytest-mypy>=0.8.0',
-    'types-redis',
-    'redis',
     'pytest-rerunfailures>=15.0',
-    "types-pywin32>=310.0.0.20250429",
-    "coverage-conditional-plugin>=0.9.0",
+    'pytest-timeout>=2.1.0',
+    'pytest>=5.4.1',
+    'sphinx>=6.0.0',
+    'types-pywin32>=310.0.0.20250429',
+    'types-redis',
 ]
 redis = ['redis']
 
@@ -108,7 +109,13 @@ warn_unused_ignores = false
 packages = ['portalocker', 'portalocker_tests']
 ignore_missing_imports = true
 check_untyped_defs = true
-exclude = ['dist', 'docs', '.venv', 'venv']
+exclude = [
+    'dist',
+    'docs',
+    '.venv',
+    'venv',
+    'build',
+]
 enable_error_code = ['ignore-without-code', 'truthy-bool', 'redundant-expr']
 warn_unreachable = true
 
@@ -118,12 +125,13 @@ disallow_untyped_defs = false
 
 [dependency-groups]
 dev = [
-    'portalocker[tests]',
-    "basedmypy>=2.10.0",
-    "basedpyright>=1.29.1",
-    "tox>=4.26.0",
+    "black>=25.1.0",
+    "lefthook>=1.11.13",
     "mypy>=1.15.0",
+    'portalocker[tests]',
     "pyright>=1.1.401",
+    "ruff>=0.11.11",
+    "tox>=4.26.0",
 ]
 
 [tool.ruff]
@@ -132,14 +140,13 @@ include = ['portalocker/**/*.py', 'portalocker_tests/**/*.py']
 
 [tool.repo-review]
 ignore = [
-    'PY004', # no /docs
-    'PY007', # tox configured in tox.toml
-    'PP301', # pytest is irrelevant
     'PC111', # no blacken-docs because markdown has no code
     'PC140', # manual typecheck pre-commit hooks
     'PC170', # no pygrep-hooks because no rST
-    'RTD',   # no RTD
     'PY005',  # Tests folder is not named tests
+    'PY006', # pre-commit should not be used
+    'PY007', # tox configured in tox.toml
+    'RTD',   # no RTD
 ]
 
 [tool.coverage.run]
@@ -172,11 +179,29 @@ posix = 'os_name == "posix"'
 not-posix = 'os_name != "posix"'
 
 [tool.pytest.ini_options]
+minversion = 8.3
+log_cli_level = 'INFO'
+xfail_strict = true
+filterwarnings = [
+    'error',
+    'ignore::DeprecationWarning',
+    'ignore::PendingDeprecationWarning',
+    'ignore::ImportWarning',
+    'ignore::ResourceWarning',
+]
+testpaths = [
+    'portalocker',
+    'portalocker_tests',
+]
+
 python_files = [
     'portalocker_tests/*.py',
 ]
 
 addopts = '''
+    -ra
+    --strict-markers
+    --strict-config
     --ignore setup.py
     --ignore portalocker/_*.py
     --doctest-modules

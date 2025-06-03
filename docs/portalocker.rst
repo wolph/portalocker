@@ -11,6 +11,7 @@ Submodules
    portalocker.exceptions
    portalocker.portalocker
    portalocker.utils
+   portalocker.types
 
 Module contents
 ---------------
