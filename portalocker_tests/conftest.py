@@ -1,10 +1,14 @@
 import contextlib
 import logging
 import multiprocessing
+import os
 import random
+import typing
+from unittest import mock
 
 import pytest
 
+import portalocker
 from portalocker import utils
 
 logger = logging.getLogger(__name__)
@@ -30,3 +34,25 @@ def reduce_timeouts(monkeypatch):
     "For faster testing we reduce the timeouts."
     monkeypatch.setattr(utils, 'DEFAULT_TIMEOUT', 0.1)
     monkeypatch.setattr(utils, 'DEFAULT_CHECK_INTERVAL', 0.05)
+
+
+# ------------------------------------------------------------------ #
+#  Locker switching helpers (used by many parametrised tests)
+# ------------------------------------------------------------------ #
+if os.name == 'posix':
+    import fcntl  # type: ignore[attr-defined]
+
+    LOCKERS = [fcntl.flock, fcntl.lockf]  # type: ignore[attr-defined]
+else:
+    LOCKERS: list[typing.Any] = []  # type: ignore[no-redef]
+    fcntl = mock.MagicMock()  # makes type-checkers happy
+
+
+@pytest.fixture
+def locker(request, monkeypatch):
+    """Patch the low-level locker that portalocker uses for this test run."""
+    monkeypatch.setattr(portalocker.portalocker, 'LOCKER', request.param)
+    return request.param
+
+
+__all__ = ['LOCKERS']

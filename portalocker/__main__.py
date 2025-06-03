@@ -140,15 +140,12 @@ def combine(args: argparse.Namespace) -> None:
     output_file.close()
 
     logger.info(f'Wrote combined file to {output_file.name}')
-    # Run black and ruff if available. If not then just run the file.
+    # Run ruff if available. If not then just run the file.
     try:  # pragma: no cover
-        subprocess.run(['black', output_file.name])
-    except FileNotFoundError:  # pragma: no cover
-        logger.warning('Black is not installed. Skipping formatting step.')
-    try:  # pragma: no cover
-        subprocess.run(['ruff', 'format', output_file.name])
+        subprocess.run(['ruff', 'format', output_file.name], timeout=3)
         subprocess.run(
-            ['ruff', 'check', '--fix', '--fix-only', output_file.name]
+            ['ruff', 'check', '--fix', '--fix-only', output_file.name],
+            timeout=3,
         )
     except FileNotFoundError:  # pragma: no cover
         logger.warning(

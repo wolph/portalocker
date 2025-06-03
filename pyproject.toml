@@ -87,10 +87,6 @@ include = ['portalocker']
 [tool.setuptools.package-data]
 portalocker = ['py.typed', 'msvcrt.pyi']
 
-[tool.black]
-line-length = 79
-skip-string-normalization = true
-
 [tool.codespell]
 skip = '*/htmlcov,./docs/_build,*.asc'
 
@@ -125,7 +121,6 @@ disallow_untyped_defs = false
 
 [dependency-groups]
 dev = [
-    "black>=25.1.0",
     "lefthook>=1.11.13",
     "mypy>=1.15.0",
     'portalocker[tests]',
