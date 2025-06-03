@@ -19,6 +19,8 @@ if os.name == 'posix':
     LOCKERS = [
         fcntl.flock,  # type: ignore[attr-defined]
         fcntl.lockf,  # type: ignore[attr-defined]
+        # portalocker.portalocker.FlockLocker,
+        # portalocker.portalocker.LockfLocker,
     ]
 else:
     LOCKERS = []
