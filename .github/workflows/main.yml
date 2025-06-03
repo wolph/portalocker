@@ -60,11 +60,15 @@ jobs:
       matrix: ${{ fromJSON(needs.generate_test_matrix.outputs.matrix) }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Setup Python Environment & Install Dependencies
         uses: ./.github/actions/setup-python-uv # Reusable composite action
         with:
           python-version: ${{ matrix.python_version }}
-          # fetch-depth: 0 is the default in the composite action
 
       - name: Run pyright
         run: pyright
@@ -87,6 +91,11 @@ jobs:
       matrix: ${{ fromJSON(needs.generate_test_matrix.outputs.matrix) }}
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Setup Python Environment & Install Dependencies
         uses: ./.github/actions/setup-python-uv
         with:

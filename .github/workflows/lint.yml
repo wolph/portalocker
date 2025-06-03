@@ -26,36 +26,41 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      # Step 1: Setup Python environment, checkout code, and install dependencies.
+      # Step 1: Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Step 2: Setup Python environment, checkout code, and install dependencies.
       # This uses the composite action, ensuring consistency with other Python jobs.
       - name: Setup Python Environment & Install Dependencies
         uses: ./.github/actions/setup-python-uv
         with:
           python-version: ${{ inputs.python-version }}
-          fetch-depth: 1
 
-      # Step 2: Check repository best-practices using Scientific Python's repo-review.
+      # Step 3: Check repository best-practices using Scientific Python's repo-review.
       - name: Check repository best-practices
         uses: scientific-python/repo-review@v0.12.2
         with:
           plugins: sp-repo-review # Uses standard Scientific Python plugins.
 
-      # Step 3: Run ruff linter.
+      # Step 4: Run ruff linter.
       - name: Run ruff linter
         uses: astral-sh/ruff-action@v3
         # Default 'check' command is used.
 
-      # Step 4: Run ruff formatter in check mode.
+      # Step 5: Run ruff formatter in check mode.
       - name: Run ruff formatter (check mode)
         uses: astral-sh/ruff-action@v3
         with:
           args: 'format --check --diff'
 
-      # Step 5: Build Sphinx documentation.
+      # Step 6: Build Sphinx documentation.
       # Assumes a 'docs' environment is configured in tox.ini (or similar for uvx).
       - name: Build sphinx docs
         run: uvx tox -e docs # Ensure your tox.ini or pyproject.toml has a 'docs' env setup for uvx.
 
-      # Step 6: Typo checking using codespell.
+      # Step 7: Typo checking using codespell.
       - name: Typo checking (codespell)
         uses: codespell-project/actions-codespell@v2

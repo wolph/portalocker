@@ -8,22 +8,11 @@ inputs:
   python-version:
     description: 'Python version to set up (e.g., "3.9", "3.11")'
     required: true
-  fetch-depth:
-    description: 'Depth for git checkout. 0 for full history, 1 for latest commit.'
-    required: false
-    default: '0' # Full history is often useful for linters or versioning tools.
 
 runs:
   using: "composite"
   steps:
-    # Step 1: Checkout repository
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: ${{ inputs.fetch-depth }}
-      shell: bash # Specify shell for consistency, though actions/checkout usually handles it.
-
-    # Step 2: Setup uv (Python package installer and resolver)
+    # Step 1: Setup uv (Python package installer and resolver)
     - name: Setup uv for Python ${{ inputs.python-version }}
       uses: astral-sh/setup-uv@v6
       with:
@@ -31,7 +20,7 @@ runs:
         activate-environment: true # Makes uv-managed Python available on PATH for subsequent steps.
       shell: bash
 
-    # Step 3: Install dependencies using uv sync
+    # Step 2: Install dependencies using uv sync
     # This command assumes your project dependencies are defined in a way uv can understand
     # (e.g., pyproject.toml, requirements.txt).
     - name: Install dependencies with uv
