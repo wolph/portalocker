@@ -32,7 +32,7 @@ LockFlags = constants.LockFlags
 
 
 # Type alias for file arguments used in lock/unlock functions
-FileArgument = Union[typing.IO[Any], int, HasFileno]  # CHANGED
+FileArgument = Union[typing.IO[Any], io.TextIOWrapper, int, HasFileno]
 
 
 class BaseLocker:
@@ -267,18 +267,60 @@ if os.name == 'nt':  # pragma: not-posix
                 if not took_fallback_path:
                     _restore_windows_file_pos(io_obj_ctx, pos_ctx)
 
-    _current_locker_instance = MsvcrtLocker()
+    _locker_instances: dict[type[BaseLocker], BaseLocker] = dict()
 
-    LOCKER: tuple[
-        Callable[[FileArgument, LockFlags], None],
-        Callable[[FileArgument], None],
-    ] = (_current_locker_instance.lock, _current_locker_instance.unlock)
+    LOCKER: typing.Union[
+        tuple[
+            Callable[[FileArgument, LockFlags], None],
+            Callable[[FileArgument], None],
+        ],
+        BaseLocker,
+        type[BaseLocker],
+    ] = MsvcrtLocker
 
     def lock(file: FileArgument, flags: LockFlags) -> None:
-        LOCKER[0](file, flags)
+        if isinstance(LOCKER, BaseLocker):
+            # If LOCKER is a BaseLocker instance, use its lock method
+            locker: Callable[[FileArgument, LockFlags], None] = LOCKER.lock
+        elif isinstance(LOCKER, tuple):
+            locker = LOCKER[0]
+        elif issubclass(LOCKER, BaseLocker):  # pyright: ignore [reportUnnecessaryIsInstance]
+            locker_instance = _locker_instances.get(LOCKER)
+            if locker_instance is None:
+                # Create an instance of the locker class if not already done
+                _locker_instances[LOCKER] = locker_instance = LOCKER()
+
+            locker = locker_instance.lock
+        else:
+            raise TypeError(
+                f'LOCKER must be a BaseLocker instance, a tuple of lock and '
+                f'unlock functions, or a subclass of BaseLocker, '
+                f'got {type(LOCKER)}.'
+            )
+
+        locker(file, flags)
 
     def unlock(file: FileArgument) -> None:
-        LOCKER[1](file)
+        if isinstance(LOCKER, BaseLocker):
+            # If LOCKER is a BaseLocker instance, use its lock method
+            unlocker: Callable[[FileArgument], None] = LOCKER.unlock
+        elif isinstance(LOCKER, tuple):
+            unlocker = LOCKER[1]
+        elif issubclass(LOCKER, BaseLocker):  # pyright: ignore [reportUnnecessaryIsInstance]
+            locker_instance = _locker_instances.get(LOCKER)
+            if locker_instance is None:
+                # Create an instance of the locker class if not already done
+                _locker_instances[LOCKER] = locker_instance = LOCKER()
+
+            unlocker = locker_instance.unlock
+        else:
+            raise TypeError(
+                f'LOCKER must be a BaseLocker instance, a tuple of lock and '
+                f'unlock functions, or a subclass of BaseLocker, '
+                f'got {type(LOCKER)}.'
+            )
+
+        unlocker(file)
 
 else:  # pragma: not-nt
     import errno

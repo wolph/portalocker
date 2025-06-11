@@ -1,4 +1,5 @@
-import os
+import types
+import typing
 
 import pytest
 
@@ -7,10 +8,10 @@ from portalocker import LockFlags
 from portalocker_tests.conftest import LOCKERS
 
 
-@pytest.mark.skipif(
-    os.name == 'nt',
-    reason='Locking on Windows requires a file object',
-)
+# @pytest.mark.skipif(
+#     os.name == 'nt',
+#     reason='Locking on Windows requires a file object',
+# )
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
 def test_lock_fileno(tmpfile, locker):
     """Test that locking using fileno() works as expected."""
@@ -25,10 +26,6 @@ def test_lock_fileno(tmpfile, locker):
         portalocker.lock(b.fileno(), flags)
 
 
-@pytest.mark.skipif(
-    os.name != 'posix',
-    reason='Only posix systems have different lockf behaviour',
-)
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
 def test_locker_mechanism(tmpfile, locker):
     """Can we switch the locking mechanism?"""
@@ -36,9 +33,13 @@ def test_locker_mechanism(tmpfile, locker):
     # locking the same file.
     with portalocker.Lock(tmpfile, 'a+', flags=LockFlags.EXCLUSIVE):
         # If we have lockf(), we cannot get another lock on the same file.
-        import fcntl
+        fcntl: typing.Optional[types.ModuleType]
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None
 
-        if locker is fcntl.lockf:  # type: ignore[attr-defined]
+        if fcntl is not None and locker is fcntl.lockf:  # type: ignore[attr-defined]
             portalocker.Lock(
                 tmpfile,
                 'r+',

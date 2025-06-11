@@ -4,12 +4,12 @@ import multiprocessing
 import os
 import random
 import typing
-from unittest import mock
 
 import pytest
 
 import portalocker
 from portalocker import utils
+from portalocker.portalocker import BaseLocker, FileArgument
 
 logger = logging.getLogger(__name__)
 
@@ -36,16 +36,41 @@ def reduce_timeouts(monkeypatch):
     monkeypatch.setattr(utils, 'DEFAULT_CHECK_INTERVAL', 0.05)
 
 
+LOCKERS: list[
+    typing.Union[
+        tuple[
+            typing.Callable[[FileArgument, portalocker.LockFlags], None],
+            typing.Callable[[FileArgument], None],
+        ],
+        BaseLocker,
+        type[BaseLocker],
+    ]
+] = []
 # ------------------------------------------------------------------ #
 #  Locker switching helpers (used by many parametrised tests)
 # ------------------------------------------------------------------ #
 if os.name == 'posix':
-    import fcntl  # type: ignore[attr-defined]
+    from fcntl import flock, lockf  # type: ignore[attr-defined]
 
-    LOCKERS = [fcntl.flock, fcntl.lockf]  # type: ignore[attr-defined]
+    LOCKERS += [flock, lockf]
 else:
-    LOCKERS: list[typing.Any] = []  # type: ignore[no-redef]
-    fcntl = mock.MagicMock()  # makes type-checkers happy
+    win_locker = portalocker.portalocker.Win32Locker()
+    msvcrt_locker = portalocker.portalocker.MsvcrtLocker()
+
+    LOCKERS += [
+        (
+            win_locker.lock,
+            win_locker.unlock,
+        ),
+        (
+            msvcrt_locker.lock,
+            msvcrt_locker.unlock,
+        ),
+        portalocker.portalocker.Win32Locker,
+        portalocker.portalocker.MsvcrtLocker,
+        win_locker,
+        msvcrt_locker,
+    ]
 
 
 @pytest.fixture

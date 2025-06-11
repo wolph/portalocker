@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 import portalocker
@@ -82,6 +84,11 @@ def test_blocking_timeout(tmpfile, locker):
         lock.acquire(timeout=5)
 
 
+@pytest.mark.skipif(
+    os.name == 'nt',
+    reason='Windows uses an entirely different lockmechanism, which does not '
+    'support NON_BLOCKING flag within a single process.',
+)
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
 def test_nonblocking(tmpfile, locker):
     """Test that using NON_BLOCKING flag raises RuntimeError."""
