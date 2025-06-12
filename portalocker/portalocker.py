@@ -301,17 +301,11 @@ if os.name == 'nt':  # pragma: not-posix
             )
         elif isinstance(LOCKER, tuple):
             locker = LOCKER[0]  # type: ignore[reportUnknownVariableType]
-        elif callable(LOCKER):
-            raise TypeError(
-                f'LOCKER must be a BaseLocker instance, a tuple of lock and '
-                f'unlock functions, or a subclass of BaseLocker, '
-                f'got {type(LOCKER)}.'
-            )
-        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable]  # pyright: ignore [reportUnnecessaryIsInstance]
-            locker_instance = _locker_instances.get(LOCKER)
+        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable,arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
+            locker_instance = _locker_instances.get(LOCKER)  # type: ignore[arg-type]
             if locker_instance is None:
                 # Create an instance of the locker class if not already done
-                _locker_instances[LOCKER] = locker_instance = LOCKER()
+                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[ignore,index,call-arg]
 
             locker = locker_instance.lock
         else:
@@ -330,17 +324,11 @@ if os.name == 'nt':  # pragma: not-posix
         elif isinstance(LOCKER, tuple):
             unlocker = LOCKER[1]  # type: ignore[reportUnknownVariableType]
 
-        elif callable(LOCKER):
-            raise TypeError(
-                f'LOCKER must be a BaseLocker instance, a tuple of lock and '
-                f'unlock functions, or a subclass of BaseLocker, '
-                f'got {type(LOCKER)}.'
-            )
-        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable]  # pyright: ignore [reportUnnecessaryIsInstance]
-            locker_instance = _locker_instances.get(LOCKER)
+        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable,arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
+            locker_instance = _locker_instances.get(LOCKER)  # type: ignore[arg-type]
             if locker_instance is None:
                 # Create an instance of the locker class if not already done
-                _locker_instances[LOCKER] = locker_instance = LOCKER()
+                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[ignore,index,call-arg]
 
             unlocker = locker_instance.unlock
         else:
