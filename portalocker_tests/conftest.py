@@ -52,7 +52,7 @@ LOCKERS: list[
 if os.name == 'posix':
     from fcntl import flock, lockf  # type: ignore[attr-defined]
 
-    LOCKERS += [flock, lockf]
+    LOCKERS += [flock, lockf]  # type: ignore[list-item]
 else:
     win_locker = portalocker.portalocker.Win32Locker()
     msvcrt_locker = portalocker.portalocker.MsvcrtLocker()
