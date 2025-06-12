@@ -20,14 +20,27 @@ from typing import (
     Any,
     Callable,
     Optional,
+    Protocol,
+    Type,
     Union,
-    cast,  # NEW
+    cast,
 )
 
 from . import constants, exceptions, types
 
 # Alias for readability
 LockFlags = constants.LockFlags
+
+
+# Define a protocol for callable lockers
+class LockCallable(Protocol):
+    def __call__(
+        self, file_obj: types.FileArgument, flags: LockFlags
+    ) -> None: ...
+
+
+class UnlockCallable(Protocol):
+    def __call__(self, file_obj: types.FileArgument) -> None: ...
 
 
 class BaseLocker:
@@ -42,15 +55,18 @@ class BaseLocker:
         raise NotImplementedError
 
 
-LockerType = typing.Union[
+# Define refined LockerType with more specific types
+LockerType = Union[
+    # POSIX-style fcntl.flock callable
     Callable[[Union[int, types.HasFileno], int], Any],
-    tuple[
-        Callable[[types.FileArgument, LockFlags], None],
-        Callable[[types.FileArgument], None],
-    ],
+    # Tuple of lock and unlock functions
+    tuple[LockCallable, UnlockCallable],
+    # BaseLocker instance
     BaseLocker,
-    type[BaseLocker],
+    # BaseLocker class
+    Type[BaseLocker],
 ]
+
 LOCKER: LockerType
 
 if os.name == 'nt':  # pragma: not-posix
@@ -275,7 +291,7 @@ if os.name == 'nt':  # pragma: not-posix
 
     _locker_instances: dict[type[BaseLocker], BaseLocker] = dict()
 
-    LOCKER = MsvcrtLocker
+    LOCKER = MsvcrtLocker  # type: ignore[reportConstantRedefinition]
 
     def lock(file: types.FileArgument, flags: LockFlags) -> None:
         if isinstance(LOCKER, BaseLocker):
@@ -284,8 +300,14 @@ if os.name == 'nt':  # pragma: not-posix
                 LOCKER.lock
             )
         elif isinstance(LOCKER, tuple):
-            locker = LOCKER[0]
-        elif issubclass(LOCKER, BaseLocker):  # pyright: ignore [reportUnnecessaryIsInstance]
+            locker = LOCKER[0]  # type: ignore[reportUnknownVariableType]
+        elif callable(LOCKER):
+            raise TypeError(
+                f'LOCKER must be a BaseLocker instance, a tuple of lock and '
+                f'unlock functions, or a subclass of BaseLocker, '
+                f'got {type(LOCKER)}.'
+            )
+        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable]  # pyright: ignore [reportUnnecessaryIsInstance]
             locker_instance = _locker_instances.get(LOCKER)
             if locker_instance is None:
                 # Create an instance of the locker class if not already done
@@ -306,8 +328,15 @@ if os.name == 'nt':  # pragma: not-posix
             # If LOCKER is a BaseLocker instance, use its lock method
             unlocker: Callable[[types.FileArgument], None] = LOCKER.unlock
         elif isinstance(LOCKER, tuple):
-            unlocker = LOCKER[1]
-        elif issubclass(LOCKER, BaseLocker):  # pyright: ignore [reportUnnecessaryIsInstance]
+            unlocker = LOCKER[1]  # type: ignore[reportUnknownVariableType]
+
+        elif callable(LOCKER):
+            raise TypeError(
+                f'LOCKER must be a BaseLocker instance, a tuple of lock and '
+                f'unlock functions, or a subclass of BaseLocker, '
+                f'got {type(LOCKER)}.'
+            )
+        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable]  # pyright: ignore [reportUnnecessaryIsInstance]
             locker_instance = _locker_instances.get(LOCKER)
             if locker_instance is None:
                 # Create an instance of the locker class if not already done
@@ -417,7 +446,7 @@ else:  # pragma: not-nt
 
     # LOCKER constant for POSIX is fcntl.flock for backward compatibility.
     # Type matches: Callable[[Union[int, HasFileno], int], Any]
-    LOCKER = fcntl.flock  # type: ignore[reportConstantRedefinition]
+    LOCKER = fcntl.flock  # type: ignore[attr-defined,reportConstantRedefinition]
 
     _posix_locker_instance = PosixLocker()
 
