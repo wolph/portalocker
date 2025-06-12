@@ -1,6 +1,7 @@
 # noqa: A005
 from __future__ import annotations
 
+import io
 import pathlib
 import typing
 from typing import Union
@@ -69,3 +70,6 @@ class FileOpenKwargs(typing.TypedDict):
 # Used for type-hinting fcntl.flock.
 class HasFileno(typing.Protocol):
     def fileno(self) -> int: ...
+
+# Type alias for file arguments used in lock/unlock functions
+FileArgument = Union[typing.IO[typing.Any], io.TextIOWrapper, int, HasFileno]

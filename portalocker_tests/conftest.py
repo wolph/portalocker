@@ -3,13 +3,11 @@ import logging
 import multiprocessing
 import os
 import random
-import typing
 
 import pytest
 
 import portalocker
 from portalocker import utils
-from portalocker.portalocker import BaseLocker, FileArgument
 
 logger = logging.getLogger(__name__)
 
@@ -36,16 +34,7 @@ def reduce_timeouts(monkeypatch):
     monkeypatch.setattr(utils, 'DEFAULT_CHECK_INTERVAL', 0.05)
 
 
-LOCKERS: list[
-    typing.Union[
-        tuple[
-            typing.Callable[[FileArgument, portalocker.LockFlags], None],
-            typing.Callable[[FileArgument], None],
-        ],
-        BaseLocker,
-        type[BaseLocker],
-    ]
-] = []
+LOCKERS: list[portalocker.portalocker.LockerType] = []
 # ------------------------------------------------------------------ #
 #  Locker switching helpers (used by many parametrised tests)
 # ------------------------------------------------------------------ #
