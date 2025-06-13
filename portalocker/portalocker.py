@@ -20,7 +20,6 @@ from typing import (
     Any,
     Callable,
     Optional,
-    Protocol,
     Type,
     Union,
     cast,
@@ -33,13 +32,13 @@ LockFlags = constants.LockFlags
 
 
 # Define a protocol for callable lockers
-class LockCallable(Protocol):
+class LockCallable(typing.Protocol):
     def __call__(
         self, file_obj: types.FileArgument, flags: LockFlags
     ) -> None: ...
 
 
-class UnlockCallable(Protocol):
+class UnlockCallable(typing.Protocol):
     def __call__(self, file_obj: types.FileArgument) -> None: ...
 
 
