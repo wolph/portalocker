@@ -20,7 +20,6 @@ from typing import (
     Any,
     Callable,
     Optional,
-    Type,
     Union,
     cast,
 )
@@ -63,7 +62,7 @@ LockerType = Union[
     # BaseLocker instance
     BaseLocker,
     # BaseLocker class
-    Type[BaseLocker],
+    type[BaseLocker],
 ]
 
 LOCKER: LockerType
