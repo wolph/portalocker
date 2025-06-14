@@ -20,7 +20,7 @@ __author__ = __about__.__author__
 #: Current author's email address
 __email__ = __about__.__email__
 #: Version number
-__version__ = '3.1.1'
+__version__ = '3.2.0'
 #: Package description for Pypi
 __description__ = __about__.__description__
 #: Package homepage
