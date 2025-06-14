@@ -1,0 +1,30 @@
+#pre-push:
+#  parallel: true
+
+templates:
+  ruff: 'uvx ruff'
+
+pre-commit:
+  parallel: true
+  commands:
+    uv-lock-sort:
+      glob: 'pyproject.toml'
+      run: uv lock
+      stage_fixed: true
+    uv-sort:
+      glob: 'pyproject.toml'
+      run: uvx uv-sort pyproject.toml
+      stage_fixed: true
+    validate-pyproject:
+      glob: 'pyproject.toml'
+      run: uvx --with=tomli --with=packaging validate-pyproject pyproject.toml
+    ruff:
+      glob: '*.py'
+      run: |
+        {ruff} check --exit-zero --fix {staged_files}
+        {ruff} format {staged_files}
+      stage_fixed: true
+    nbstripout:
+      glob: '*.ipynb'
+      run: uv run nbstripout {staged_files}
+      stage_fixed: true

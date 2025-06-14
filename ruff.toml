@@ -1,9 +1,7 @@
 # We keep the ruff configuration separate so it can easily be shared across
 # all projects
-
 target-version = 'py39'
 
-src = ['portalocker']
 exclude = [
     'docs',
     '.tox',
@@ -13,7 +11,6 @@ exclude = [
 ]
 
 line-length = 79
-
 
 [lint]
 ignore = [
@@ -36,7 +33,6 @@ ignore = [
     'Q002', # Remove bad quotes
     'FA100', # Missing `from __future__ import annotations`, but uses `typing.Optional`
     'COM812', # Missing trailing comma in a list
-    'ISC001', # String concatenation with implicit str conversion
     'SIM108', # Ternary operators are not always more readable
     'RUF100', # Unused noqa directives. Due to multiple Python versions, we need to keep them
 ]
@@ -58,7 +54,6 @@ select = [
     'I', # isort
     'ICN', # flake8-import-conventions
     'INP', # flake8-no-pep420
-    'ISC', # flake8-implicit-str-concat
     'N', # pep8-naming
     'NPY', # NumPy-specific rules
     'PERF', # perflint,

@@ -416,8 +416,7 @@ class TemporaryFileLock(Lock):
         fail_when_locked: bool = True,
         flags: constants.LockFlags = LOCK_METHOD,
     ) -> None:
-        Lock.__init__(
-            self,
+        super().__init__(
             filename=filename,
             mode='w',
             timeout=timeout,

@@ -1,6 +1,9 @@
+# ruff: skip-file
 build/
 locked_file
 dist
 htmlcov
 *.egg-info
 .cache
+.aider*
+.env

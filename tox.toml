@@ -1,3 +1,6 @@
+min_version = '4'
+requires = ['tox-uv>=1']
+
 env_list = [
     'py39',
     'py310',
@@ -14,22 +17,37 @@ env_list = [
 skip_missing_interpreters = true
 
 [env_run_base]
+labels = ['python']
 pass_env = ['FORCE_COLOR']
-commands = [['pytest', '{posargs}']]
+commands = [
+    [
+        'mypy',
+        '--cache-dir=/dev/null',
+        '--soft-error-limit=-1',
+        '.',
+    ],
+    ['pyright'],
+    ['pytest', '{posargs}'],
+]
+allowlist_externals = ['pytest', 'mypy', 'pyright']
 extras = ['tests', 'redis']
 
 [env.mypy]
+labels = ['lint', 'nontest']
 commands = [['mypy']]
 
 [env.pyright]
+labels = ['lint', 'nontest']
 deps  = ['pyright']
 commands = [['pyright']]
 
 [env.ruff]
+labels = ['lint', 'nontest']
 deps = ['ruff']
 commands = [['ruff', 'check'], ['ruff', 'format', '--check']]
 
 [env.docs]
+labels = ['docs', 'nontest']
 extras = ['docs']
 allowlist_externals = ['rm', 'cd', 'mkdir']
 commands = [
@@ -63,16 +81,17 @@ commands = [
         'docs/_build/doctrees',
         'docs',
         'docs/_build/html',
-        '{posargs}',
     ],
 ]
 
 [env.repo-review]
-basepython = ['py312']
-deps = ['sp-repo-review[cli]', 'validate-pyproject']
+labels = ['lint', 'nontest']
+basepython = ['py313']
+deps = ['sp-repo-review[cli]', 'validate-pyproject', 'tomli', 'packaging']
 commands = [['repo-review']]
 
 [env.codespell]
+labels = ['lint', 'nontest']
 commands = [['codespell']]
 deps = ['codespell', 'tomli']
 skip_install = true

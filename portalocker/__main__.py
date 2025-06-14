@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import pathlib
 import re
+import subprocess
 import typing
 
 base_path = pathlib.Path(__file__).parent.parent
@@ -48,7 +48,7 @@ def main(argv: typing.Sequence[str] | None = None) -> None:
     args.func(args)
 
 
-def _read_file(
+def _read_file(  # noqa: C901
     path: pathlib.Path,
     seen_files: set[pathlib.Path],
 ) -> typing.Iterator[str]:
@@ -59,35 +59,49 @@ def _read_file(
     seen_files.add(path)
     paren = False
     from_ = None
-    for line in path.open():
-        if '__future__' in line:
-            continue
-
-        if paren:
-            if ')' in line:
-                line = line.split(')', 1)[1]
-                paren = False
+    try:
+        for line in path.open(encoding='ascii'):
+            if '__future__' in line:
                 continue
 
-            match = _NAMES_RE.match(line)
-        else:
-            match = _RELATIVE_IMPORT_RE.match(line)
+            if paren:
+                if ')' in line:
+                    line = line.split(')', 1)[1]
+                    paren = False
+                    continue
 
-        if match:
-            if not paren:
-                paren = bool(match.group('paren'))
-                from_ = match.group('from')
-
-            if from_:
-                names.add(from_)
-                yield from _read_file(src_path / f'{from_}.py', seen_files)
+                match = _NAMES_RE.match(line)
             else:
-                for name in match.group('names').split(','):
-                    name = name.strip()
-                    names.add(name)
-                    yield from _read_file(src_path / f'{name}.py', seen_files)
-        else:
-            yield _clean_line(line, names)
+                match = _RELATIVE_IMPORT_RE.match(line)
+
+            if match:
+                if not paren:
+                    paren = bool(match.group('paren'))
+                    from_ = match.group('from')
+
+                if from_:
+                    names.add(from_)
+                    yield from _read_file(src_path / f'{from_}.py', seen_files)
+                else:
+                    for name in match.group('names').split(','):
+                        name = name.strip()
+                        names.add(name)
+                        yield from _read_file(
+                            src_path / f'{name}.py', seen_files
+                        )
+            else:
+                yield _clean_line(line, names)
+    except UnicodeDecodeError as exception:  # pragma: no cover
+        _, text, start_byte, end_byte, error = exception.args
+
+        offset = 100
+        snippet = text[start_byte - offset : end_byte + offset]
+        logger.error(  # noqa: TRY400
+            f'Invalid encoding for {path}: {error} at byte '
+            f'({start_byte}:{end_byte})\n'
+            f'Snippet: {snippet!r}'
+        )
+        raise
 
 
 def _clean_line(line: str, names: set[str]) -> str:
@@ -108,10 +122,14 @@ def combine(args: argparse.Namespace) -> None:
     output_file.write('from __future__ import annotations\n')
 
     output_file.write(
-        _TEXT_TEMPLATE.format((base_path / 'README.rst').read_text()),
+        _TEXT_TEMPLATE.format(
+            (base_path / 'README.rst').read_text(encoding='ascii')
+        ),
     )
     output_file.write(
-        _TEXT_TEMPLATE.format((base_path / 'LICENSE').read_text()),
+        _TEXT_TEMPLATE.format(
+            (base_path / 'LICENSE').read_text(encoding='ascii')
+        ),
     )
 
     seen_files: set[pathlib.Path] = set()
@@ -122,11 +140,18 @@ def combine(args: argparse.Namespace) -> None:
     output_file.close()
 
     logger.info(f'Wrote combined file to {output_file.name}')
-    # Run black and ruff if available. If not then just run the file.
-    os.system(f'black {output_file.name}')
-    os.system(f'ruff format {output_file.name}')
-    os.system(f'ruff check --fix --fix-only {output_file.name}')
-    os.system(f'python3 {output_file.name}')
+    # Run ruff if available. If not then just run the file.
+    try:  # pragma: no cover
+        subprocess.run(['ruff', 'format', output_file.name], timeout=3)
+        subprocess.run(
+            ['ruff', 'check', '--fix', '--fix-only', output_file.name],
+            timeout=3,
+        )
+    except FileNotFoundError:  # pragma: no cover
+        logger.warning(
+            'Ruff is not installed. Skipping linting and formatting step.'
+        )
+    subprocess.run(['python3', output_file.name])
 
 
 if __name__ == '__main__':

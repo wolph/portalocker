@@ -1,154 +1,444 @@
-from __future__ import annotations
+# pyright: reportUnknownMemberType=false, reportAttributeAccessIssue=false
+"""Module portalocker.
 
+This module provides cross-platform file locking functionality.
+The Windows implementation now supports two variants:
+
+  1. A default method using the Win32 API (win32file.LockFileEx/UnlockFileEx).
+  2. An alternative that uses msvcrt.locking for exclusive locks (shared
+     locks still use the Win32 API).
+
+This version uses classes to encapsulate locking logic, while maintaining
+the original external API, including the LOCKER constant for specific
+backwards compatibility (POSIX) and Windows behavior.
+"""
+
+import io
 import os
 import typing
+from typing import (
+    Any,
+    Callable,
+    Optional,
+    Union,
+    cast,
+)
 
 from . import constants, exceptions, types
 
-# Alias for readability. Due to import recursion issues we cannot do:
-# from .constants import LockFlags
+# Alias for readability
 LockFlags = constants.LockFlags
 
 
-class HasFileno(typing.Protocol):
-    def fileno(self) -> int: ...
+# Define a protocol for callable lockers
+class LockCallable(typing.Protocol):
+    def __call__(
+        self, file_obj: types.FileArgument, flags: LockFlags
+    ) -> None: ...
 
 
-LOCKER: typing.Callable[[int | HasFileno, int], typing.Any] | None = None
+class UnlockCallable(typing.Protocol):
+    def __call__(self, file_obj: types.FileArgument) -> None: ...
 
-if os.name == 'nt':  # pragma: no cover
-    import msvcrt
 
-    import pywintypes
-    import win32con
-    import win32file
-    import winerror
+class BaseLocker:
+    """Base class for locker implementations."""
 
-    __overlapped = pywintypes.OVERLAPPED()
+    def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
+        """Lock the file."""
+        raise NotImplementedError
 
-    def lock(file_: types.IO | int, flags: LockFlags) -> None:
-        # Windows locking does not support locking through `fh.fileno()` so
-        # we cast it to make mypy and pyright happy
-        file_ = typing.cast(types.IO, file_)
+    def unlock(self, file_obj: types.FileArgument) -> None:
+        """Unlock the file."""
+        raise NotImplementedError
 
-        mode = 0
-        if flags & LockFlags.NON_BLOCKING:
-            mode |= win32con.LOCKFILE_FAIL_IMMEDIATELY
 
-        if flags & LockFlags.EXCLUSIVE:
-            mode |= win32con.LOCKFILE_EXCLUSIVE_LOCK
+# Define refined LockerType with more specific types
+LockerType = Union[
+    # POSIX-style fcntl.flock callable
+    Callable[[Union[int, types.HasFileno], int], Any],
+    # Tuple of lock and unlock functions
+    tuple[LockCallable, UnlockCallable],
+    # BaseLocker instance
+    BaseLocker,
+    # BaseLocker class
+    type[BaseLocker],
+]
 
-        # Save the old position so we can go back to that position but
-        # still lock from the beginning of the file
-        savepos = file_.tell()
-        if savepos:
-            file_.seek(0)
+LOCKER: LockerType
 
-        os_fh = msvcrt.get_osfhandle(file_.fileno())  # type: ignore[attr-defined]
-        try:
-            win32file.LockFileEx(os_fh, mode, 0, -0x10000, __overlapped)
-        except pywintypes.error as exc_value:
-            # error: (33, 'LockFileEx', 'The process cannot access the file
-            # because another process has locked a portion of the file.')
-            if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
-                raise exceptions.AlreadyLocked(
-                    exceptions.LockException.LOCK_FAILED,
-                    exc_value.strerror,
-                    fh=file_,
-                ) from exc_value
-            else:
-                # Q:  Are there exceptions/codes we should be dealing with
-                # here?
-                raise
-        finally:
-            if savepos:
-                file_.seek(savepos)
+if os.name == 'nt':  # pragma: not-posix
+    # Windows-specific helper functions
+    def _prepare_windows_file(
+        file_obj: types.FileArgument,
+    ) -> tuple[int, Optional[typing.IO[Any]], Optional[int]]:
+        """Prepare file for Windows: get fd, optionally seek and save pos."""
+        if isinstance(file_obj, int):
+            # Plain file descriptor
+            return file_obj, None, None
 
-    def unlock(file_: types.IO) -> None:
-        try:
-            savepos = file_.tell()
-            if savepos:
-                file_.seek(0)
+        # Full IO objects (have tell/seek) -> preserve and restore position
+        if isinstance(file_obj, io.IOBase):
+            fd: int = file_obj.fileno()
+            original_pos = file_obj.tell()
+            if original_pos != 0:
+                file_obj.seek(0)
+            return fd, typing.cast(typing.IO[Any], file_obj), original_pos
+            # cast satisfies mypy: IOBase -> IO[Any]
 
-            os_fh = msvcrt.get_osfhandle(file_.fileno())  # type: ignore[attr-defined]
+        # Fallback: an object that only implements fileno() (HasFileno)
+        fd = typing.cast(types.HasFileno, file_obj).fileno()  # type: ignore[redundant-cast]
+        return fd, None, None
+
+    def _restore_windows_file_pos(
+        file_io_obj: Optional[typing.IO[Any]],
+        original_pos: Optional[int],
+    ) -> None:
+        """Restore file position if it was an IO object and pos was saved."""
+        if file_io_obj and original_pos is not None and original_pos != 0:
+            file_io_obj.seek(original_pos)
+
+    class Win32Locker(BaseLocker):
+        """Locker using Win32 API (LockFileEx/UnlockFileEx)."""
+
+        _overlapped: Any  # pywintypes.OVERLAPPED
+        _lock_bytes_low: int = -0x10000
+
+        def __init__(self) -> None:
             try:
-                win32file.UnlockFileEx(
-                    os_fh,
-                    0,
-                    -0x10000,
-                    __overlapped,
+                import pywintypes
+            except ImportError as e:
+                raise ImportError(
+                    'pywintypes is required for Win32Locker but not '
+                    'found. Please install pywin32.'
+                ) from e
+            self._overlapped = pywintypes.OVERLAPPED()
+
+        def _get_os_handle(self, fd: int) -> int:
+            try:
+                import msvcrt
+            except ImportError as e:
+                raise ImportError(
+                    'msvcrt is required for _get_os_handle on Windows '
+                    'but not found.'
+                ) from e
+            return cast(int, msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined,redundant-cast]
+
+        def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
+            import pywintypes
+            import win32con
+            import win32file
+            import winerror
+
+            fd, io_obj_ctx, pos_ctx = _prepare_windows_file(file_obj)
+            os_fh = self._get_os_handle(fd)
+
+            mode = 0
+            if flags & LockFlags.NON_BLOCKING:
+                mode |= win32con.LOCKFILE_FAIL_IMMEDIATELY
+            if flags & LockFlags.EXCLUSIVE:
+                mode |= win32con.LOCKFILE_EXCLUSIVE_LOCK
+
+            try:
+                win32file.LockFileEx(
+                    os_fh, mode, 0, self._lock_bytes_low, self._overlapped
                 )
-            except pywintypes.error as exc:
-                if exc.winerror != winerror.ERROR_NOT_LOCKED:
-                    # Q:  Are there exceptions/codes we should be
-                    # dealing with here?
+            except pywintypes.error as exc_value:  # type: ignore[misc]
+                if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
+                    raise exceptions.AlreadyLocked(
+                        exceptions.LockException.LOCK_FAILED,
+                        exc_value.strerror,
+                        fh=file_obj,  # Pass original file_obj
+                    ) from exc_value
+                else:
                     raise
             finally:
-                if savepos:
-                    file_.seek(savepos)
-        except OSError as exc:
-            raise exceptions.LockException(
-                exceptions.LockException.LOCK_FAILED,
-                exc.strerror,
-                fh=file_,
-            ) from exc
+                _restore_windows_file_pos(io_obj_ctx, pos_ctx)
 
-elif os.name == 'posix':  # pragma: no cover
+        def unlock(self, file_obj: types.FileArgument) -> None:
+            import pywintypes
+            import win32file
+            import winerror
+
+            fd, io_obj_ctx, pos_ctx = _prepare_windows_file(file_obj)
+            os_fh = self._get_os_handle(fd)
+
+            try:
+                win32file.UnlockFileEx(
+                    os_fh, 0, self._lock_bytes_low, self._overlapped
+                )
+            except pywintypes.error as exc:  # type: ignore[misc]
+                if exc.winerror != winerror.ERROR_NOT_LOCKED:
+                    raise exceptions.LockException(
+                        exceptions.LockException.LOCK_FAILED,
+                        exc.strerror,
+                        fh=file_obj,  # Pass original file_obj
+                    ) from exc
+            except OSError as exc:
+                raise exceptions.LockException(
+                    exceptions.LockException.LOCK_FAILED,
+                    exc.strerror,
+                    fh=file_obj,  # Pass original file_obj
+                ) from exc
+            finally:
+                _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+
+    class MsvcrtLocker(BaseLocker):
+        _win32_locker: Win32Locker
+        _msvcrt_lock_length: int = 0x10000
+
+        def __init__(self) -> None:
+            self._win32_locker = Win32Locker()
+            try:
+                import msvcrt
+            except ImportError as e:
+                raise ImportError(
+                    'msvcrt is required for MsvcrtLocker but not found.'
+                ) from e
+
+            attrs = ['LK_LOCK', 'LK_RLCK', 'LK_NBLCK', 'LK_UNLCK', 'LK_NBRLCK']
+            defaults = [0, 1, 2, 3, 2]  # LK_NBRLCK often same as LK_NBLCK (2)
+            for attr, default_val in zip(attrs, defaults):
+                if not hasattr(msvcrt, attr):
+                    setattr(msvcrt, attr, default_val)
+
+        def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
+            import msvcrt
+
+            if flags & LockFlags.SHARED:
+                win32_api_flags = LockFlags(0)
+                if flags & LockFlags.NON_BLOCKING:
+                    win32_api_flags |= LockFlags.NON_BLOCKING
+                self._win32_locker.lock(file_obj, win32_api_flags)
+                return
+
+            fd, io_obj_ctx, pos_ctx = _prepare_windows_file(file_obj)
+            mode = (
+                msvcrt.LK_NBLCK  # type: ignore[attr-defined]
+                if flags & LockFlags.NON_BLOCKING
+                else msvcrt.LK_LOCK  # type: ignore[attr-defined]
+            )
+
+            try:
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    fd,
+                    mode,
+                    self._msvcrt_lock_length,
+                )
+            except OSError as exc_value:
+                if exc_value.errno in (13, 16, 33, 36):
+                    raise exceptions.AlreadyLocked(
+                        exceptions.LockException.LOCK_FAILED,
+                        str(exc_value),
+                        fh=file_obj,  # Pass original file_obj
+                    ) from exc_value
+                raise exceptions.LockException(
+                    exceptions.LockException.LOCK_FAILED,
+                    str(exc_value),
+                    fh=file_obj,  # Pass original file_obj
+                ) from exc_value
+            finally:
+                _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+
+        def unlock(self, file_obj: types.FileArgument) -> None:
+            import msvcrt
+
+            fd, io_obj_ctx, pos_ctx = _prepare_windows_file(file_obj)
+            took_fallback_path = False
+
+            try:
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    fd,
+                    msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+                    self._msvcrt_lock_length,
+                )
+            except OSError as exc:
+                if exc.errno == 13:  # EACCES (Permission denied)
+                    took_fallback_path = True
+                    # Restore position before calling win32_locker,
+                    # as it will re-prepare.
+                    _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+                    try:
+                        self._win32_locker.unlock(
+                            file_obj
+                        )  # win32_locker handles its own seeking
+                    except exceptions.LockException as win32_exc:
+                        raise exceptions.LockException(
+                            exceptions.LockException.LOCK_FAILED,
+                            f'msvcrt unlock failed ({exc.strerror}), and '
+                            f'win32 fallback failed ({win32_exc.strerror})',
+                            fh=file_obj,
+                        ) from win32_exc
+                    except Exception as final_exc:
+                        raise exceptions.LockException(
+                            exceptions.LockException.LOCK_FAILED,
+                            f'msvcrt unlock failed ({exc.strerror}), and '
+                            f'win32 fallback failed with unexpected error: '
+                            f'{final_exc!s}',
+                            fh=file_obj,
+                        ) from final_exc
+                else:
+                    raise exceptions.LockException(
+                        exceptions.LockException.LOCK_FAILED,
+                        exc.strerror,
+                        fh=file_obj,
+                    ) from exc
+            finally:
+                if not took_fallback_path:
+                    _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+
+    _locker_instances: dict[type[BaseLocker], BaseLocker] = dict()
+
+    LOCKER = MsvcrtLocker  # type: ignore[reportConstantRedefinition]
+
+    def lock(file: types.FileArgument, flags: LockFlags) -> None:
+        if isinstance(LOCKER, BaseLocker):
+            # If LOCKER is a BaseLocker instance, use its lock method
+            locker: Callable[[types.FileArgument, LockFlags], None] = (
+                LOCKER.lock
+            )
+        elif isinstance(LOCKER, tuple):
+            locker = LOCKER[0]  # type: ignore[reportUnknownVariableType]
+        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable,arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
+            locker_instance = _locker_instances.get(LOCKER)  # type: ignore[arg-type]
+            if locker_instance is None:
+                # Create an instance of the locker class if not already done
+                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[ignore,index,call-arg]
+
+            locker = locker_instance.lock
+        else:
+            raise TypeError(
+                f'LOCKER must be a BaseLocker instance, a tuple of lock and '
+                f'unlock functions, or a subclass of BaseLocker, '
+                f'got {type(LOCKER)}.'
+            )
+
+        locker(file, flags)
+
+    def unlock(file: types.FileArgument) -> None:
+        if isinstance(LOCKER, BaseLocker):
+            # If LOCKER is a BaseLocker instance, use its lock method
+            unlocker: Callable[[types.FileArgument], None] = LOCKER.unlock
+        elif isinstance(LOCKER, tuple):
+            unlocker = LOCKER[1]  # type: ignore[reportUnknownVariableType]
+
+        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable,arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
+            locker_instance = _locker_instances.get(LOCKER)  # type: ignore[arg-type]
+            if locker_instance is None:
+                # Create an instance of the locker class if not already done
+                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[ignore,index,call-arg]
+
+            unlocker = locker_instance.unlock
+        else:
+            raise TypeError(
+                f'LOCKER must be a BaseLocker instance, a tuple of lock and '
+                f'unlock functions, or a subclass of BaseLocker, '
+                f'got {type(LOCKER)}.'
+            )
+
+        unlocker(file)
+
+else:  # pragma: not-nt
     import errno
     import fcntl
 
-    # The locking implementation.
-    # Expected values are either fcntl.flock() or fcntl.lockf(),
-    # but any callable that matches the syntax will be accepted.
-    LOCKER = fcntl.flock  # pyright: ignore[reportConstantRedefinition]
+    # PosixLocker methods accept FileArgument | HasFileno
+    PosixFileArgument = Union[types.FileArgument, types.HasFileno]
 
-    def lock(file: int | types.IO, flags: LockFlags) -> None:  # type: ignore[misc]
-        assert LOCKER is not None, 'We need a locking function in `LOCKER` '
-        # Locking with NON_BLOCKING without EXCLUSIVE or SHARED enabled
-        # results in an error
-        if (flags & LockFlags.NON_BLOCKING) and not flags & (
-            LockFlags.SHARED | LockFlags.EXCLUSIVE
-        ):
-            raise RuntimeError(
-                'When locking in non-blocking mode the SHARED '
-                'or EXCLUSIVE flag must be specified as well',
-            )
+    class PosixLocker(BaseLocker):
+        """Locker implementation using the `LOCKER` constant"""
 
-        try:
-            LOCKER(file, flags)
-        except OSError as exc_value:
-            # Python can use one of several different exception classes to
-            # represent timeout (most likely is BlockingIOError and IOError),
-            # but these errors may also represent other failures. On some
-            # systems, `IOError is OSError` which means checking for either
-            # IOError or OSError can mask other errors.
-            # The safest check is to catch OSError (from which the others
-            # inherit) and check the errno (which should be EACCESS or EAGAIN
-            # according to the spec).
-            if exc_value.errno in (errno.EACCES, errno.EAGAIN):
-                # A timeout exception, wrap this so the outer code knows to try
-                # again (if it wants to).
-                raise exceptions.AlreadyLocked(
-                    exc_value,
-                    fh=file,
-                ) from exc_value
+        _locker: Optional[
+            Callable[[Union[int, types.HasFileno], int], Any]
+        ] = None
+
+        @property
+        def locker(self) -> Callable[[Union[int, types.HasFileno], int], Any]:
+            if self._locker is None:
+                # On POSIX systems ``LOCKER`` is a callable (fcntl.flock) but
+                # mypy also sees the Windows-only tuple assignment.  Explicitly
+                # cast so mypy knows we are returning the callable variant
+                # here.
+                return cast(
+                    Callable[[Union[int, types.HasFileno], int], Any], LOCKER
+                )  # pyright: ignore[reportUnnecessaryCast]
+
+            # mypy does not realise ``self._locker`` is non-None after the
+            # check
+            assert self._locker is not None
+            return self._locker
+
+        def _get_fd(self, file_obj: PosixFileArgument) -> int:
+            if isinstance(file_obj, int):
+                return file_obj
+            # Check for fileno() method; covers typing.IO and HasFileno
+            elif hasattr(file_obj, 'fileno') and callable(file_obj.fileno):
+                return file_obj.fileno()
             else:
-                # Something else went wrong; don't wrap this so we stop
-                # immediately.
+                # Should not be reached if PosixFileArgument is correct.
+                # isinstance(file_obj, io.IOBase) could be an
+                # alternative check
+                # but hasattr is more general for HasFileno.
+                raise TypeError(
+                    "Argument 'file_obj' must be an int, an IO object "
+                    'with fileno(), or implement HasFileno.'
+                )
+
+        def lock(self, file_obj: PosixFileArgument, flags: LockFlags) -> None:
+            if (flags & LockFlags.NON_BLOCKING) and not flags & (
+                LockFlags.SHARED | LockFlags.EXCLUSIVE
+            ):
+                raise RuntimeError(
+                    'When locking in non-blocking mode on POSIX, '
+                    'the SHARED or EXCLUSIVE flag must be specified as well.'
+                )
+
+            fd = self._get_fd(file_obj)
+            try:
+                self.locker(fd, flags)
+            except OSError as exc_value:
+                if exc_value.errno in (errno.EACCES, errno.EAGAIN):
+                    raise exceptions.AlreadyLocked(
+                        exc_value,
+                        strerror=str(exc_value),
+                        fh=file_obj,  # Pass original file_obj
+                    ) from exc_value
+                else:
+                    raise exceptions.LockException(
+                        exc_value,
+                        strerror=str(exc_value),
+                        fh=file_obj,  # Pass original file_obj
+                    ) from exc_value
+            except EOFError as exc_value:  # NFS specific
                 raise exceptions.LockException(
                     exc_value,
-                    fh=file,
+                    strerror=str(exc_value),
+                    fh=file_obj,  # Pass original file_obj
                 ) from exc_value
-        except EOFError as exc_value:
-            # On NFS filesystems, flock can raise an EOFError
-            raise exceptions.LockException(
-                exc_value,
-                fh=file,
-            ) from exc_value
 
-    def unlock(file: types.IO) -> None:  # type: ignore[misc]
-        assert LOCKER is not None, 'We need a locking function in `LOCKER` '
-        LOCKER(file.fileno(), LockFlags.UNBLOCK)
+        def unlock(self, file_obj: PosixFileArgument) -> None:
+            fd = self._get_fd(file_obj)
+            self.locker(fd, LockFlags.UNBLOCK)
 
-else:  # pragma: no cover
-    raise RuntimeError('PortaLocker only defined for nt and posix platforms')
+    class FlockLocker(PosixLocker):
+        """FlockLocker is a PosixLocker implementation using fcntl.flock."""
+
+        LOCKER = fcntl.flock  # type: ignore[attr-defined]
+
+    class LockfLocker(PosixLocker):
+        """LockfLocker is a PosixLocker implementation using fcntl.lockf."""
+
+        LOCKER = fcntl.lockf  # type: ignore[attr-defined]
+
+    # LOCKER constant for POSIX is fcntl.flock for backward compatibility.
+    # Type matches: Callable[[Union[int, HasFileno], int], Any]
+    LOCKER = fcntl.flock  # type: ignore[attr-defined,reportConstantRedefinition]
+
+    _posix_locker_instance = PosixLocker()
+
+    # Public API for POSIX uses the PosixLocker instance
+    def lock(file: types.FileArgument, flags: LockFlags) -> None:
+        _posix_locker_instance.lock(file, flags)
+
+    def unlock(file: types.FileArgument) -> None:
+        _posix_locker_instance.unlock(file)

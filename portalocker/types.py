@@ -1,9 +1,12 @@
+# noqa: A005
 from __future__ import annotations
 
+import io
 import pathlib
 import typing
 from typing import Union
 
+# spellchecker: off
 # fmt: off
 Mode = typing.Literal[
     # Text modes
@@ -46,8 +49,9 @@ Mode = typing.Literal[
     # Universal newline support in binary mode
     'rbU', 'rUb', 'Urb', 'brU', 'bUr', 'Ubr',
 ]
+# spellchecker: on
 Filename = Union[str, pathlib.Path]
-IO: typing.TypeAlias = Union[  # type: ignore[name-defined]
+IO = Union[  # type: ignore[name-defined]
     typing.IO[str],
     typing.IO[bytes],
 ]
@@ -60,3 +64,12 @@ class FileOpenKwargs(typing.TypedDict):
     newline: str | None
     closefd: bool | None
     opener: typing.Callable[[str, int], int] | None
+
+
+# Protocol for objects with a fileno() method.
+# Used for type-hinting fcntl.flock.
+class HasFileno(typing.Protocol):
+    def fileno(self) -> int: ...
+
+# Type alias for file arguments used in lock/unlock functions
+FileArgument = Union[typing.IO[typing.Any], io.TextIOWrapper, int, HasFileno]

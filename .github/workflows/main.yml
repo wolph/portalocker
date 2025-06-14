@@ -1,0 +1,115 @@
+# .github/workflows/main-ci.yml
+# Main CI workflow: orchestrates linting, documentation, and tests.
+
+name: CI Checks and Tests
+
+on:
+  push:
+  pull_request:
+    branches:
+      - develop
+
+env:
+  FORCE_COLOR: 1 # Ensures colored output for tools that support it.
+
+permissions:
+  contents: read          # Required to checkout the repository.
+  pull-requests: write    # For actions that might comment on PRs (e.g., repo-review if configured, or future coverage).
+  # Add other permissions if specific actions require them (e.g., id-token: write for OIDC).
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Job: Call the reusable linting and documentation workflow.
+  linting_and_documentation:
+    name: Lint, Docs, & Repo Review
+    uses: ./.github/workflows/lint.yml
+    secrets: inherit # Pass down secrets like GITHUB_TOKEN if needed by the callable workflow.
+
+  # Job: Generate the test matrix for different OS and Python versions.
+  generate_test_matrix:
+    name: Generate Test Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate-matrix.outputs.matrix }}
+    steps:
+      - name: Generate Matrix for Tests
+        id: generate-matrix
+        uses: coactions/dynamic-matrix@v3
+        with:
+          platforms: 'linux,macos,windows'
+          min_python: '3.9'
+          linux: full
+          windows: full
+          macos: full
+
+  # Job: Perform static type checking across the generated matrix.
+  type_checking:
+    name: Type py${{ matrix.python_version }}, ${{ matrix.os }})
+    needs: generate_test_matrix
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.generate_test_matrix.outputs.matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python Environment & Install Dependencies
+        uses: ./.github/actions/setup-python-uv # Reusable composite action
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Run pyright
+        run: pyright
+
+      - name: Run mypy
+        run: |
+          mypy --cache-dir=/dev/null .
+
+  # Job: Run pytest tests across the generated matrix.
+  tests:
+    name: test py${{ matrix.python_version }}, ${{ matrix.os }})
+    needs: generate_test_matrix
+    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.generate_test_matrix.outputs.matrix) }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python Environment & Install Dependencies
+        uses: ./.github/actions/setup-python-uv
+        with:
+          python-version: ${{ matrix.python_version }}
+
+      - name: Start Redis (if applicable)
+        uses: supercharge/redis-github-action@1.8.0
+        with:
+          redis-version: 'latest'
+        continue-on-error: true # Allow failure if Redis isn't critical or supported on all OS.
+
+      - name: Run pytest
+        run: |
+          pytest --junitxml=junit/test-results-${{ matrix.os }}-py${{ matrix.python_version }}.xml
+
+      - name: Upload pytest test results
+        if: ${{ always() }} # Ensure results are uploaded even if tests fail.
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results-${{ matrix.os }}-py${{ matrix.python_version }}
+          path: junit/test-results-${{ matrix.os }}-py${{ matrix.python_version }}.xml
+          retention-days: 7

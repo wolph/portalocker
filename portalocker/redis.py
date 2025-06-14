@@ -134,6 +134,26 @@ class RedisLock(utils.LockBase):
     def client_name(self) -> str:
         return f'{self.channel}-lock'
 
+    def _timeout_generator(
+        self, timeout: float | None, check_interval: float | None
+    ) -> typing.Iterator[int]:
+        if timeout is None:
+            timeout = 0.0
+        if check_interval is None:
+            check_interval = self.thread_sleep_time
+        deadline = time.monotonic() + timeout
+        first = True
+        while first or time.monotonic() < deadline:
+            first = False
+            effective_interval = (
+                check_interval
+                if check_interval > 0
+                else self.thread_sleep_time
+            )
+            sleep_time = effective_interval * (0.5 + random.random())
+            time.sleep(sleep_time)
+            yield 0
+
     def acquire(  # type: ignore[override]
         self,
         timeout: float | None = None,
@@ -184,7 +204,7 @@ class RedisLock(utils.LockBase):
                     sleep_time=self.thread_sleep_time,
                 )
                 self.thread.start()
-
+                time.sleep(0.01)
                 subscribers = connection.pubsub_numsub(self.channel)[0][1]
                 if subscribers == 1:  # pragma: no branch
                     return self
@@ -193,9 +213,9 @@ class RedisLock(utils.LockBase):
                     self.release()
 
             if fail_when_locked:  # pragma: no cover
-                raise exceptions.AlreadyLocked(exceptions)
+                raise exceptions.AlreadyLocked()
 
-        raise exceptions.AlreadyLocked(exceptions)
+        raise exceptions.AlreadyLocked()
 
     def check_or_kill_lock(
         self,
