@@ -37,7 +37,7 @@ jobs:
     steps:
       - name: Generate Matrix for Tests
         id: generate-matrix
-        uses: coactions/dynamic-matrix@v3
+        uses: coactions/dynamic-matrix@v4
         with:
           platforms: 'linux,macos,windows'
           min_python: '3.9'
