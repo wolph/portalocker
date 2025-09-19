@@ -2,6 +2,8 @@ from . import __about__, constants, exceptions, portalocker
 from .utils import (
     BoundedSemaphore,
     Lock,
+    NamedBoundedSemaphore,
+    PidFileLock,
     RLock,
     TemporaryFileLock,
     open_atomic,
@@ -70,6 +72,8 @@ __all__ = [
     'Lock',
     'LockException',
     'LockFlags',
+    'NamedBoundedSemaphore',
+    'PidFileLock',
     'RLock',
     'RedisLock',
     'TemporaryFileLock',

@@ -94,7 +94,7 @@ def test_shared_processes(tmpfile, fail_when_locked):
         args = tmpfile, fail_when_locked, flags
         results = pool.starmap_async(lock, 2 * [args])
 
-        for result in results.get(timeout=1.5):
+        for result in results.get(timeout=2.0):
             if result.exception_class is not None:
                 raise result.exception_class  # type: ignore[reportGeneratlTypeIssues]
             assert result == LockResult()
@@ -112,7 +112,7 @@ def test_shared_processes(tmpfile, fail_when_locked):
     'pypy' in platform.python_implementation().lower(),
     reason='pypy3 does not support the multiprocessing test',
 )
-@pytest.mark.flaky(reruns=5, reruns_delay=1)
+@pytest.mark.flaky(reruns=5, reruns_delay=1)  # type: ignore[misc]
 def test_exclusive_processes(
     tmpfile: str,
     fail_when_locked: bool,

@@ -11,6 +11,7 @@ import tempfile
 import time
 import typing
 import warnings
+from typing import AnyStr
 
 from . import constants, exceptions, portalocker, types
 from .types import Filename, Mode
@@ -432,6 +433,93 @@ class TemporaryFileLock(Lock):
             os.unlink(self.filename)
 
 
+class PidFileLock(TemporaryFileLock):
+    """
+    A lock that writes the current process PID to the file and can read
+    the PID of the process that currently holds the lock.
+
+    When used as a context manager:
+    - Returns None if we successfully acquired the lock
+    - Returns the PID (int) if another process holds the lock
+    """
+
+    def __init__(
+        self,
+        filename: str = '.pid',
+        timeout: float = DEFAULT_TIMEOUT,
+        check_interval: float = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: bool = True,
+        flags: constants.LockFlags = LOCK_METHOD,
+    ) -> None:
+        super().__init__(
+            filename=filename,
+            timeout=timeout,
+            check_interval=check_interval,
+            fail_when_locked=fail_when_locked,
+            flags=flags,
+        )
+        self._acquired_lock = False
+
+    def acquire(
+        self,
+        timeout: float | None = None,
+        check_interval: float | None = None,
+        fail_when_locked: bool | None = None,
+    ) -> typing.IO[typing.AnyStr]:
+        """Acquire the lock and write the current PID to the file"""
+        fh: typing.IO[AnyStr] = super().acquire(
+            timeout, check_interval, fail_when_locked
+        )
+
+        # Write the current process PID to the file
+        current_pos = fh.tell()
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()))  # type: ignore[arg-type,call-overload]
+        fh.flush()
+        fh.seek(current_pos)
+
+        self._acquired_lock = True
+        return fh
+
+    def read_pid(self) -> int | None:
+        """Read the PID from the lock file if it exists and is readable"""
+        try:
+            if os.path.exists(self.filename):
+                with open(self.filename) as f:
+                    content = f.read().strip()
+                    if content:
+                        return int(content)
+        except (ValueError, OSError):
+            pass
+        return None
+
+    def __enter__(self) -> int | None:  # type: ignore[override]
+        """
+        Context manager entry that returns:
+        - None if we successfully acquired the lock
+        - PID (int) if another process holds the lock
+        """
+        try:
+            self.acquire()
+        except exceptions.AlreadyLocked:
+            # Another process holds the lock, try to read its PID
+            return self.read_pid()
+
+        return None  # We successfully acquired the lock
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: typing.Any,
+    ) -> bool | None:
+        if self._acquired_lock:
+            self.release()
+            self._acquired_lock = False
+        return None
+
+
 class BoundedSemaphore(LockBase):
     """
     Bounded semaphore to prevent too many parallel processes from running
@@ -503,7 +591,7 @@ class BoundedSemaphore(LockBase):
 
         filenames = self.get_filenames()
 
-        for n in self._timeout_generator(timeout, check_interval):  # pragma:
+        for n in self._timeout_generator(timeout, check_interval):
             logger.debug('trying lock (attempt %d) %r', n, filenames)
             # no branch
             if self.try_lock(filenames):  # pragma: no branch
