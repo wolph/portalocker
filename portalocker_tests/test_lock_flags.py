@@ -7,8 +7,9 @@ from portalocker import LockFlags
 from portalocker_tests.conftest import LOCKERS
 
 
-def test_exclusive(tmpfile):
+def test_exclusive(tmpdir):
     """Test that exclusive lock prevents reading and writing by others."""
+    tmpfile = tmpdir.join('test_exclusive.lock')
     text_0 = 'spam and eggs'
     with open(tmpfile, 'w') as fh:
         fh.write(text_0)
@@ -42,8 +43,9 @@ def test_exclusive(tmpfile):
         portalocker.unlock(fh)
 
 
-def test_shared(tmpfile):
+def test_shared(tmpdir):
     """Test that shared lock allows reading but not writing by others."""
+    tmpfile = tmpdir.join('test_shared.lock')
     with open(tmpfile, 'w') as fh:
         fh.write('spam and eggs')
 
@@ -71,8 +73,9 @@ def test_shared(tmpfile):
 
 
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
-def test_blocking_timeout(tmpfile, locker):
+def test_blocking_timeout(tmpdir, locker):
     """Test that a warning is raised when using a blocking timeout."""
+    tmpfile = tmpdir.join('test_blocking_timeout.lock')
     flags = LockFlags.SHARED
 
     with pytest.warns(UserWarning):  # noqa: SIM117
@@ -90,7 +93,8 @@ def test_blocking_timeout(tmpfile, locker):
     'support NON_BLOCKING flag within a single process.',
 )
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
-def test_nonblocking(tmpfile, locker):
+def test_nonblocking(tmpdir, locker):
     """Test that using NON_BLOCKING flag raises RuntimeError."""
+    tmpfile = tmpdir.join('test_nonblocking.lock')
     with open(tmpfile, 'w') as fh, pytest.raises(RuntimeError):
         portalocker.lock(fh, LockFlags.NON_BLOCKING)

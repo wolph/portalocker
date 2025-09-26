@@ -14,7 +14,7 @@ from portalocker import utils
 def test_pidfilelock_creation():
     """Test basic PidFileLock creation."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'test.lock'
+        lock_file = Path(tmpdir) / 'test_pidfilelock_creation.lock'
         lock = utils.PidFileLock(str(lock_file))
         assert lock.filename == str(lock_file)
         assert not lock._acquired_lock
@@ -23,7 +23,7 @@ def test_pidfilelock_creation():
 def test_pidfilelock_acquire_writes_pid():
     """Test that acquiring the lock writes the current PID."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'test.lock'
+        lock_file = Path(tmpdir) / 'test_pidfilelock_acquire_writes_pid.lock'
         lock = utils.PidFileLock(str(lock_file))
 
         try:
@@ -41,7 +41,7 @@ def test_pidfilelock_acquire_writes_pid():
 def test_pidfilelock_context_manager_success():
     """Test context manager when we successfully acquire the lock."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'test.lock'
+        lock_file = Path(tmpdir) / 'test_pidfilelock_context_manager_success.lock'
         lock = utils.PidFileLock(str(lock_file))
 
         with lock as result:
@@ -65,7 +65,7 @@ def test_pidfilelock_context_manager_success():
 def test_pidfilelock_context_manager_already_locked():
     """Test context manager when another process holds the lock."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'test.lock'
+        lock_file = Path(tmpdir) / 'test_pidfilelock_context_manager_already_locked.lock'
 
         # Create a lock file with a fake PID
         fake_pid = 99999
@@ -88,7 +88,7 @@ def test_pidfilelock_context_manager_already_locked():
 def test_read_pid_nonexistent_file():
     """Test reading PID from non-existent file."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'nonexistent.lock'
+        lock_file = Path(tmpdir) / 'test_read_pid_nonexistent_file.lock'
         lock = utils.PidFileLock(str(lock_file))
         assert lock.read_pid() is None
 
@@ -96,7 +96,7 @@ def test_read_pid_nonexistent_file():
 def test_read_pid_empty_file():
     """Test reading PID from empty file."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'empty.lock'
+        lock_file = Path(tmpdir) / 'test_read_pid_empty_file.lock'
         lock_file.touch()  # Create empty file
 
         lock = utils.PidFileLock(str(lock_file))
@@ -106,7 +106,7 @@ def test_read_pid_empty_file():
 def test_read_pid_invalid_content():
     """Test reading PID from file with invalid content."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'invalid.lock'
+        lock_file = Path(tmpdir) / 'test_read_pid_invalid_content.lock'
         with open(lock_file, 'w') as f:
             f.write('not_a_number')
 
@@ -117,7 +117,7 @@ def test_read_pid_invalid_content():
 def test_read_pid_valid_content():
     """Test reading PID from file with valid content."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'valid.lock'
+        lock_file = Path(tmpdir) / 'test_read_pid_valid_content.lock'
         test_pid = 12345
         with open(lock_file, 'w') as f:
             f.write(str(test_pid))
@@ -129,14 +129,14 @@ def test_read_pid_valid_content():
 @mock.patch('builtins.open', side_effect=OSError('Permission denied'))
 def test_read_pid_permission_error(mock_open):
     """Test reading PID when file cannot be opened."""
-    lock = utils.PidFileLock('test.lock')
+    lock = utils.PidFileLock('test_read_pid_permission_error.lock')
     assert lock.read_pid() is None
 
 
 def test_release_without_acquire():
     """Test releasing without acquiring first."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'test.lock'
+        lock_file = Path(tmpdir) / 'test_release_without_acquire.lock'
         lock = utils.PidFileLock(str(lock_file))
 
         # Should not raise an error
@@ -147,7 +147,7 @@ def test_release_without_acquire():
 def test_multiple_context_manager_entries():
     """Test multiple context manager entries."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'test.lock'
+        lock_file = Path(tmpdir) / 'test_multiple_context_manager_entries.lock'
         lock = utils.PidFileLock(str(lock_file))
 
         with lock as result1:
@@ -170,7 +170,7 @@ def test_inheritance_from_temporaryfilelock():
 def test_custom_parameters():
     """Test PidFileLock with custom parameters."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'custom.lock'
+        lock_file = Path(tmpdir) / 'test_custom_parameters.lock'
         lock = utils.PidFileLock(
             filename=str(lock_file),
             timeout=10.0,
@@ -203,7 +203,7 @@ def _worker_function(lock_file_path, result_queue, should_succeed):
 def test_multiprocess_locking():
     """Test that PidFileLock works correctly across processes."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / 'multiprocess.lock'
+        lock_file = Path(tmpdir) / 'test_multiprocess_locking.lock'
         result_queue: multiprocessing.Queue[tuple[str, Optional[int], int]] = (
             multiprocessing.Queue()
         )

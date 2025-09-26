@@ -87,8 +87,9 @@ def exclusive_lock(filename, **kwargs):
     reason='pypy3 does not support the multiprocessing test',
 )
 @pytest.mark.flaky(reruns=5, reruns_delay=1)
-def test_shared_processes(tmpfile, fail_when_locked):
+def test_shared_processes(tmpdir, fail_when_locked):
     """Test that shared locks work correctly across processes."""
+    tmpfile = tmpdir.join('test_shared_processes.lock')
     flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
     with multiprocessing.Pool(processes=2) as pool:
         args = tmpfile, fail_when_locked, flags
@@ -114,11 +115,12 @@ def test_shared_processes(tmpfile, fail_when_locked):
 )
 @pytest.mark.flaky(reruns=5, reruns_delay=1)  # type: ignore[misc]
 def test_exclusive_processes(
-    tmpfile: str,
+    tmpdir: str,
     fail_when_locked: bool,
     locker: typing.Callable[..., typing.Any],
 ) -> None:
     """Test that exclusive locks work correctly across processes."""
+    tmpfile = tmpdir.join('test_exclusive_processes.lock')
     flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING
 
     with multiprocessing.Pool(processes=2) as pool:

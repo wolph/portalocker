@@ -11,8 +11,9 @@ def test_utils_base():
         pass
 
 
-def test_exceptions(tmpfile):
+def test_exceptions(tmpdir):
     """Test that locking a file twice raises LockException."""
+    tmpfile = tmpdir.join('test_exceptions.lock')
     with open(tmpfile, 'a') as a, open(tmpfile, 'a') as b:
         # Lock exclusive non-blocking
         lock_flags = portalocker.LOCK_EX | portalocker.LOCK_NB
@@ -25,8 +26,9 @@ def test_exceptions(tmpfile):
             portalocker.lock(b, lock_flags)
 
 
-def test_simple(tmpfile):
+def test_simple(tmpdir):
     """Test that locking and writing to a file works as expected."""
+    tmpfile = tmpdir.join('test_simple.lock')
     with open(tmpfile, 'w') as fh:
         fh.write('spam and eggs')
 
@@ -43,8 +45,9 @@ def test_simple(tmpfile):
         portalocker.unlock(fh)
 
 
-def test_truncate(tmpfile):
+def test_truncate(tmpdir):
     """Test that truncating a file works as expected."""
+    tmpfile = tmpdir.join('test_truncate.lock')
     with open(tmpfile, 'w') as fh:
         fh.write('spam and eggs')
 
@@ -58,8 +61,9 @@ def test_truncate(tmpfile):
         assert fh.read() == ''
 
 
-def test_class(tmpfile):
+def test_class(tmpdir):
     """Test that Lock context manager works as expected."""
+    tmpfile = tmpdir.join('test_class.lock')
     lock = portalocker.Lock(tmpfile)
     lock2 = portalocker.Lock(tmpfile, fail_when_locked=False, timeout=0.01)
 
@@ -73,8 +77,9 @@ def test_class(tmpfile):
         pass
 
 
-def test_acquire_release(tmpfile):
+def test_acquire_release(tmpdir):
     """Test that acquire and release work as expected."""
+    tmpfile = tmpdir.join('test_acquire_release.lock')
     lock = portalocker.Lock(tmpfile)
     lock2 = portalocker.Lock(tmpfile, fail_when_locked=False)
 
@@ -90,14 +95,16 @@ def test_acquire_release(tmpfile):
     lock.release()  # second release does nothing
 
 
-def test_release_unacquired(tmpfile):
+def test_release_unacquired(tmpdir):
     """Test that releasing an unacquired RLock raises LockException."""
+    tmpfile = tmpdir.join('test_release_unacquired.lock')
     with pytest.raises(portalocker.LockException):
         portalocker.RLock(tmpfile).release()
 
 
-def test_exception(monkeypatch, tmpfile):
+def test_exception(monkeypatch, tmpdir):
     """Do we stop immediately if the locking fails, even with a timeout?"""
+    tmpfile = tmpdir.join('test_exception.lock')
 
     def patched_lock(*args, **kwargs):
         raise ValueError('Test exception')

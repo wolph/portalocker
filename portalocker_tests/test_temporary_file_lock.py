@@ -1,4 +1,5 @@
 import os
+import pathlib
 
 import portalocker
 
@@ -14,3 +15,5 @@ def test_temporary_file_lock(tmpfile):
     lock = portalocker.TemporaryFileLock(tmpfile)
     lock.acquire()
     del lock
+    assert not pathlib.Path(tmpfile).exists(), \
+        "Lock file should be removed on lock object deletion"
