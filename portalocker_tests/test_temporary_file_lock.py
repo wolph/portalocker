@@ -16,4 +16,4 @@ def test_temporary_file_lock(tmpfile):
     lock.acquire()
     del lock
     assert not pathlib.Path(tmpfile).exists(), \
-        "Lock file should be removed on lock object deletion"
+        'Lock file should be removed on lock object deletion'
