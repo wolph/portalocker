@@ -41,8 +41,9 @@ def test_pidfilelock_acquire_writes_pid():
 def test_pidfilelock_context_manager_success():
     """Test context manager when we successfully acquire the lock."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / \
-                    'test_pidfilelock_context_manager_success.lock'
+        lock_file = (
+            Path(tmpdir) / 'test_pidfilelock_context_manager_success.lock'
+        )
         lock = utils.PidFileLock(str(lock_file))
 
         with lock as result:
@@ -66,8 +67,10 @@ def test_pidfilelock_context_manager_success():
 def test_pidfilelock_context_manager_already_locked():
     """Test context manager when another process holds the lock."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        lock_file = Path(tmpdir) / \
-                    'test_pidfilelock_context_manager_already_locked.lock'
+        lock_file = (
+            Path(tmpdir)
+            / 'test_pidfilelock_context_manager_already_locked.lock'
+        )
 
         # Create a lock file with a fake PID
         fake_pid = 99999

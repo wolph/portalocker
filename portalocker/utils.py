@@ -440,6 +440,7 @@ class TemporaryFileLock(Lock):
         # Avoid keeping a strong reference to self, otherwise GC can't
         # collect and tests expecting deletion won't pass.
         wr = weakref.ref(self)
+
         def _finalize_release(
             ref: weakref.ReferenceType[TemporaryFileLock] = wr,  # type: ignore[arg-type]
         ) -> None:  # pragma: no cover - best effort
@@ -447,6 +448,7 @@ class TemporaryFileLock(Lock):
             if obj is not None:
                 with contextlib.suppress(Exception):
                     obj.release()
+
         atexit.register(_finalize_release)
 
     def release(self) -> None:  # pragma: no cover - platform-specific cleanup
@@ -537,13 +539,17 @@ class PidFileLock(TemporaryFileLock):
                 os.lseek(fd2, 0, os.SEEK_SET)
                 try:
                     os.ftruncate(fd2, 0)
-                except Exception:
+                except Exception:  # pragma: no cover - rare
+                    # Fallback for platforms without os.ftruncate (e.g.
+                    # Windows)
                     f.seek(0)
                     f.truncate()
                 os.write(fd2, str(os.getpid()).encode('ascii'))
                 with contextlib.suppress(Exception):
                     os.fsync(fd2)
-            except Exception:
+            except Exception:  # pragma: no cover - rare
+                # Fallback for platforms without os.write/os.lseek (e.g.
+                # Jython)
                 f.seek(0)
                 f.truncate()
                 f.write(str(os.getpid()))  # type: ignore[arg-type,call-overload]
