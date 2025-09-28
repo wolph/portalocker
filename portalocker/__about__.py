@@ -4,20 +4,18 @@ __email__ = 'wolph@wol.ph'
 __description__ = """Wraps the portalocker recipe for easy usage"""
 __url__ = 'https://github.com/WoLpH/portalocker'
 
+import re
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Optional
-
-try:  # Python 3.8+
-    import importlib.metadata as importlib_metadata
-except Exception:  # pragma: no cover
-    import importlib_metadata  # type: ignore[no-redef]
 
 
 def _read_pyproject_version(path: Path) -> Optional[str]:  # pragma: no cover
     """Read the version from a pyproject.toml file if available.
 
-    This is a lightweight helper used when the package is executed from a
-    source checkout where distribution metadata is unavailable.
+    This uses a small regex parser that looks for the [project] table and
+    extracts the version value. It's intentionally minimal to avoid runtime
+    dependencies while keeping types precise.
 
     Args:
         path: Path to the pyproject.toml file.
@@ -26,27 +24,15 @@ def _read_pyproject_version(path: Path) -> Optional[str]:  # pragma: no cover
         The version string if it could be determined, otherwise None.
     """
     try:
-        try:
-            import tomllib  # type: ignore
-
-            data = tomllib.loads(path.read_text(encoding='utf-8'))
-            project = data.get('project', {})
-            version = project.get('version')
-            if isinstance(version, str):
-                return version
-        except Exception:
-            import re
-
-            content = path.read_text(encoding='utf-8')
-            match = re.search(
-                r"(?ms)\[project\].*?^version\s*=\s*['\"]([^'\"]+)['\"]",
-                content,
-            )
-            if match:
-                return match.group(1)
+        content = path.read_text(encoding='utf-8')
     except Exception:
         return None
-    return None
+
+    match = re.search(
+        r"(?ms)^\[project\].*?^version\s*=\s*['\"]([^'\"]+)['\"]",
+        content,
+    )
+    return match.group(1) if match else None
 
 
 def get_version() -> str:  # pragma: no cover
