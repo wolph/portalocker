@@ -73,6 +73,7 @@ tests = [
     'types-redis',
 ]
 redis = ['redis']
+win32 = ['pywin32>=226']
 
 [tool.setuptools]
 platforms = ['any']
