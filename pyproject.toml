@@ -4,7 +4,8 @@ requires = ['setuptools', 'setuptools-scm']
 
 [project]
 name = 'portalocker'
-dynamic = ['version']
+version = "3.3.0"
+dynamic = []
 authors = [{ name = 'Rick van Hattem', email = 'wolph@wol.ph' }]
 license = 'BSD-3-Clause'
 license-files = ['LICENSE']
@@ -79,9 +80,6 @@ win32 = ['pywin32>=226']
 platforms = ['any']
 include-package-data = false
 
-[tool.setuptools.dynamic]
-version = { attr = 'portalocker.__about__.__version__' }
-
 [tool.setuptools.packages.find]
 include = ['portalocker']
 
@@ -122,12 +120,12 @@ disallow_untyped_defs = false
 
 [dependency-groups]
 dev = [
-    "lefthook>=1.11.13",
-    "mypy>=1.15.0",
+    'lefthook>=1.11.13',
+    'mypy>=1.15.0',
     'portalocker[tests]',
-    "pyright>=1.1.401",
-    "ruff>=0.11.11",
-    "tox>=4.26.0",
+    'pyright>=1.1.401',
+    'ruff>=0.11.11',
+    'tox>=4.26.0',
 ]
 
 [tool.ruff]
