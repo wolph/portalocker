@@ -41,7 +41,7 @@ jobs:
 
       # Step 3: Check repository best-practices using Scientific Python's repo-review.
       - name: Check repository best-practices
-        uses: scientific-python/repo-review@v0.12.2
+        uses: scientific-python/repo-review@v0.12.3
         with:
           plugins: sp-repo-review # Uses standard Scientific Python plugins.
 
