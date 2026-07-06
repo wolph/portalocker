@@ -1,5 +1,6 @@
-# Several redis-py methods (`pubsub`, `subscribe`, `unsubscribe`, ...) are
-# unannotated, so their members and return values are unknown to pyright.
+# Several redis-py methods (`pubsub`, `unsubscribe`, `client_list`, ...) are
+# unannotated or take untyped `**kwargs`, so their types are (partially)
+# unknown to pyright.
 # pyright: reportUnknownMemberType=false
 from __future__ import annotations
 
@@ -126,17 +127,8 @@ class RedisLock(utils.LockBase['RedisLock']):
         )
 
     def _get_subscriber_count(self, connection: redis.client.Redis) -> int:
-        """Get the subscriber count for our channel, with a usable type.
-
-        `Redis.pubsub_numsub()` is declared as returning `ResponseT` (a
-        union with `Awaitable`), but a synchronous client always answers
-        with a list of `(channel, count)` pairs.
-        """
-        numsub: list[tuple[str, int]] = typing.cast(
-            'list[tuple[str, int]]',
-            connection.pubsub_numsub(self.channel),
-        )
-        return numsub[0][1]
+        """Get the subscriber count for our channel."""
+        return connection.pubsub_numsub(self.channel)[0][1]
 
     def channel_handler(self, message: dict[str, str]) -> None:
         if message.get('type') != 'message':  # pragma: no cover
@@ -224,10 +216,7 @@ class RedisLock(utils.LockBase['RedisLock']):
                 connection.client_setname(self.client_name)
                 pubsub = self._get_pubsub(connection)
                 self.pubsub = pubsub
-                # `PubSub.subscribe()` is unannotated in redis-py
-                pubsub.subscribe(  # type: ignore[no-untyped-call]
-                    **{self.channel: self.channel_handler},
-                )
+                pubsub.subscribe(**{self.channel: self.channel_handler})
                 self.thread = PubSubWorkerThread(
                     pubsub,
                     sleep_time=self.thread_sleep_time,
@@ -255,8 +244,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         response_channel = f'{self.channel}-{random.random()}'
 
         pubsub = self._get_pubsub(connection)
-        # `PubSub.subscribe()` is unannotated in redis-py
-        pubsub.subscribe(response_channel)  # type: ignore[no-untyped-call]
+        pubsub.subscribe(response_channel)
         connection.publish(
             self.channel,
             json.dumps(
@@ -276,12 +264,7 @@ class RedisLock(utils.LockBase['RedisLock']):
                 pubsub.close()
                 return True
 
-        # `Redis.client_list()` is declared as returning `ResponseT`, the
-        # synchronous client always answers with a list of client dicts.
-        clients: list[dict[str, str]] = typing.cast(
-            'list[dict[str, str]]',
-            connection.client_list('pubsub'),
-        )
+        clients: list[dict[str, str]] = connection.client_list('pubsub')
         for client_ in clients:  # pragma: no cover
             if client_.get('name') == self.client_name:
                 logger.warning('Killing unavailable redis client: %r', client_)
