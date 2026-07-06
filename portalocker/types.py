@@ -50,7 +50,7 @@ Mode = typing.Literal[
 ]
 # spellchecker: on
 Filename = str | pathlib.Path
-IO = typing.IO[str] | typing.IO[bytes]  # type: ignore[name-defined]
+IO = typing.IO[str] | typing.IO[bytes]
 
 
 class FileOpenKwargs(typing.TypedDict):

@@ -14,7 +14,7 @@ from portalocker import LockFlags
 class LockResult:
     """Helper dataclass for multiprocessing lock results."""
 
-    exception_class: type | None = None
+    exception_class: type[BaseException] | None = None
     exception_message: str | None = None
     exception_repr: str | None = None
 
@@ -97,7 +97,7 @@ def test_shared_processes(tmpdir, fail_when_locked):
 
         for result in results.get(timeout=2.0):
             if result.exception_class is not None:
-                raise result.exception_class  # type: ignore[reportGeneratlTypeIssues]
+                raise result.exception_class
             assert result == LockResult()
 
 
@@ -113,7 +113,7 @@ def test_shared_processes(tmpdir, fail_when_locked):
     'pypy' in platform.python_implementation().lower(),
     reason='pypy3 does not support the multiprocessing test',
 )
-@pytest.mark.flaky(reruns=5, reruns_delay=1)  # type: ignore[misc]
+@pytest.mark.flaky(reruns=5, reruns_delay=1)
 def test_exclusive_processes(
     tmpdir: str,
     fail_when_locked: bool,
@@ -150,9 +150,8 @@ def test_exclusive_processes(
             assert b is not None
 
             assert not a.exception_class or not b.exception_class
-            assert issubclass(
-                a.exception_class or b.exception_class,  # type: ignore[arg-type]
-                portalocker.LockException,
-            )
+            exception_class = a.exception_class or b.exception_class
+            assert exception_class is not None
+            assert issubclass(exception_class, portalocker.LockException)
         else:
             assert not a.exception_class

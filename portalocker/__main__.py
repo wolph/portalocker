@@ -39,8 +39,8 @@ def main(argv: typing.Sequence[str] | None = None) -> None:
     combine_parser.add_argument(
         '--output-file',
         '-o',
-        type=argparse.FileType('w'),
-        default=str(_default_output_path),
+        type=pathlib.Path,
+        default=_default_output_path,
     )
 
     combine_parser.set_defaults(func=combine)
@@ -115,43 +115,42 @@ def _clean_line(line: str, names: set[str]) -> str:
 
 
 def combine(args: argparse.Namespace) -> None:
-    output_file = args.output_file
-    pathlib.Path(output_file.name).parent.mkdir(parents=True, exist_ok=True)
+    output_path: pathlib.Path = args.output_file
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # We're handling this separately because it has to be the first import.
-    output_file.write('from __future__ import annotations\n')
+    with output_path.open('w') as output_file:
+        # We're handling this separately because it has to be the first
+        # import.
+        output_file.write('from __future__ import annotations\n')
 
-    output_file.write(
-        _TEXT_TEMPLATE.format(
-            (base_path / 'README.rst').read_text(encoding='ascii')
-        ),
-    )
-    output_file.write(
-        _TEXT_TEMPLATE.format(
-            (base_path / 'LICENSE').read_text(encoding='ascii')
-        ),
-    )
+        output_file.write(
+            _TEXT_TEMPLATE.format(
+                (base_path / 'README.rst').read_text(encoding='ascii')
+            ),
+        )
+        output_file.write(
+            _TEXT_TEMPLATE.format(
+                (base_path / 'LICENSE').read_text(encoding='ascii')
+            ),
+        )
 
-    seen_files: set[pathlib.Path] = set()
-    for line in _read_file(src_path / '__init__.py', seen_files):
-        output_file.write(line)
+        seen_files: set[pathlib.Path] = set()
+        for line in _read_file(src_path / '__init__.py', seen_files):
+            output_file.write(line)
 
-    output_file.flush()
-    output_file.close()
-
-    logger.info(f'Wrote combined file to {output_file.name}')
+    logger.info(f'Wrote combined file to {output_path}')
     # Run ruff if available. If not then just run the file.
     try:  # pragma: no cover
-        subprocess.run(['ruff', 'format', output_file.name], timeout=3)
+        subprocess.run(['ruff', 'format', str(output_path)], timeout=3)
         subprocess.run(
-            ['ruff', 'check', '--fix', '--fix-only', output_file.name],
+            ['ruff', 'check', '--fix', '--fix-only', str(output_path)],
             timeout=3,
         )
     except FileNotFoundError:  # pragma: no cover
         logger.warning(
             'Ruff is not installed. Skipping linting and formatting step.'
         )
-    subprocess.run(['python3', output_file.name])
+    subprocess.run(['python3', str(output_path)])
 
 
 if __name__ == '__main__':

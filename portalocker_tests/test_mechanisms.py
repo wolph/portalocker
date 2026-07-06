@@ -1,4 +1,4 @@
-import types
+import typing
 
 import pytest
 
@@ -34,13 +34,15 @@ def test_locker_mechanism(tmpdir, locker):
     # locking the same file.
     with portalocker.Lock(tmpfile, 'a+', flags=LockFlags.EXCLUSIVE):
         # If we have lockf(), we cannot get another lock on the same file.
-        fcntl: types.ModuleType | None
+        lockf: typing.Callable[..., typing.Any] | None
         try:
             import fcntl
-        except ImportError:
-            fcntl = None
 
-        if fcntl is not None and locker is fcntl.lockf:  # type: ignore[attr-defined]
+            lockf = fcntl.lockf
+        except ImportError:
+            lockf = None
+
+        if lockf is not None and locker is lockf:
             portalocker.Lock(
                 tmpfile,
                 'r+',

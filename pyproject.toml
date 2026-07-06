@@ -142,23 +142,13 @@ omit = [
 [tool.mypy]
 python_version = '3.10'
 strict = true
-warn_unused_ignores = false # temporarily relaxed, removed in the type-checker task
-ignore_missing_imports = true # temporarily relaxed, removed in the type-checker task
 warn_unreachable = true
 enable_error_code = ['ignore-without-code', 'truthy-bool', 'redundant-expr']
 packages = ['portalocker', 'portalocker_tests']
 
 [[tool.mypy.overrides]]
-module = 'portalocker.redis'
-# temporarily relaxed, removed in the type-checker task (the dropped
-# types-redis stubs made Redis generic; redis-py's inline types do not)
-disable_error_code = ['type-arg', 'index', 'no-untyped-call', 'union-attr']
-
-[[tool.mypy.overrides]]
 module = 'portalocker_tests.*'
 disallow_untyped_defs = false
-# temporarily relaxed, removed in the type-checker task
-disable_error_code = ['type-arg']
 
 [tool.pyright]
 pythonVersion = '3.10'
@@ -177,3 +167,12 @@ python-version = '3.10'
 
 [tool.ty.src]
 include = ['portalocker', 'portalocker_tests']
+
+# False positive: pytest's `skip` is a function object whose `__call__` is
+# declared as a plain attribute (`_WithException`); ty binds it like a
+# method and miscounts the positional arguments of `pytest.skip(...)`.
+[[tool.ty.overrides]]
+include = ['portalocker_tests/test_redis.py']
+
+[tool.ty.overrides.rules]
+too-many-positional-arguments = 'ignore'

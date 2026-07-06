@@ -1,4 +1,8 @@
+# The msvcrt/pywin32 modules are unavailable outside Windows, and `LOCKER`
+# is assigned exactly once per platform-specific branch while pyright
+# analyzes all branches.
 # pyright: reportUnknownMemberType=false, reportAttributeAccessIssue=false
+# pyright: reportConstantRedefinition=false
 """Module portalocker.
 
 This module provides cross-platform file locking functionality.
@@ -120,7 +124,7 @@ if os.name == 'nt':  # pragma: not-posix
                     'msvcrt is required for _get_os_handle on Windows '
                     'but not found.'
                 ) from e
-            return cast(int, msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined,redundant-cast]
+            return cast(int, msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined]
 
         def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
             import pywintypes
@@ -141,7 +145,7 @@ if os.name == 'nt':  # pragma: not-posix
                 win32file.LockFileEx(
                     os_fh, mode, 0, self._lock_bytes_low, self._overlapped
                 )
-            except pywintypes.error as exc_value:  # type: ignore[misc]
+            except pywintypes.error as exc_value:
                 if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
                     raise exceptions.AlreadyLocked(
                         exceptions.LockException.LOCK_FAILED,
@@ -165,7 +169,7 @@ if os.name == 'nt':  # pragma: not-posix
                 win32file.UnlockFileEx(
                     os_fh, 0, self._lock_bytes_low, self._overlapped
                 )
-            except pywintypes.error as exc:  # type: ignore[misc]
+            except pywintypes.error as exc:
                 if exc.winerror != winerror.ERROR_NOT_LOCKED:
                     raise exceptions.LockException(
                         exceptions.LockException.LOCK_FAILED,
@@ -287,7 +291,7 @@ if os.name == 'nt':  # pragma: not-posix
 
     _locker_instances: dict[type[BaseLocker], BaseLocker] = dict()
 
-    LOCKER = MsvcrtLocker  # type: ignore[reportConstantRedefinition]
+    LOCKER = MsvcrtLocker
 
     def lock(file: types.FileArgument, flags: LockFlags) -> None:
         if isinstance(LOCKER, BaseLocker):
@@ -296,12 +300,13 @@ if os.name == 'nt':  # pragma: not-posix
                 LOCKER.lock
             )
         elif isinstance(LOCKER, tuple):
-            locker = LOCKER[0]  # type: ignore[reportUnknownVariableType]
-        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable,arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
+            # pyright infers `Unknown` for the narrowed tuple element here
+            locker = LOCKER[0]  # pyright: ignore[reportUnknownVariableType]
+        elif issubclass(LOCKER, BaseLocker):  # type: ignore[arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
             locker_instance = _locker_instances.get(LOCKER)  # type: ignore[arg-type]
             if locker_instance is None:
                 # Create an instance of the locker class if not already done
-                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[ignore,index,call-arg]
+                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[index,call-arg]
 
             locker = locker_instance.lock
         else:
@@ -318,13 +323,14 @@ if os.name == 'nt':  # pragma: not-posix
             # If LOCKER is a BaseLocker instance, use its lock method
             unlocker: Callable[[types.FileArgument], None] = LOCKER.unlock
         elif isinstance(LOCKER, tuple):
-            unlocker = LOCKER[1]  # type: ignore[reportUnknownVariableType]
+            # pyright infers `Unknown` for the narrowed tuple element here
+            unlocker = LOCKER[1]  # pyright: ignore[reportUnknownVariableType]
 
-        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable,arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
+        elif issubclass(LOCKER, BaseLocker):  # type: ignore[arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
             locker_instance = _locker_instances.get(LOCKER)  # type: ignore[arg-type]
             if locker_instance is None:
                 # Create an instance of the locker class if not already done
-                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[ignore,index,call-arg]
+                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[index,call-arg]
 
             unlocker = locker_instance.unlock
         else:
@@ -419,16 +425,16 @@ else:  # pragma: not-nt
     class FlockLocker(PosixLocker):
         """FlockLocker is a PosixLocker implementation using fcntl.flock."""
 
-        LOCKER = fcntl.flock  # type: ignore[attr-defined]
+        LOCKER = fcntl.flock
 
     class LockfLocker(PosixLocker):
         """LockfLocker is a PosixLocker implementation using fcntl.lockf."""
 
-        LOCKER = fcntl.lockf  # type: ignore[attr-defined]
+        LOCKER = fcntl.lockf
 
     # LOCKER constant for POSIX is fcntl.flock for backward compatibility.
     # Type matches: Callable[[int | HasFileno, int], Any]
-    LOCKER = fcntl.flock  # type: ignore[attr-defined,reportConstantRedefinition]
+    LOCKER = fcntl.flock
 
     _posix_locker_instance = PosixLocker()
 

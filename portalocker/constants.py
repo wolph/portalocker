@@ -14,6 +14,10 @@ Manually unlock, only needed internally
 
 - `UNBLOCK` unlock
 """
+# The platform-specific `if os.name == ...` branches each assign the module
+# constants exactly once, but pyright analyzes all branches and reports the
+# assignments as redefinitions.
+# pyright: reportConstantRedefinition=false
 
 import enum
 import os
@@ -36,13 +40,13 @@ elif os.name == 'posix':  # pragma: no cover
     import fcntl
 
     #: exclusive lock
-    LOCK_EX = fcntl.LOCK_EX  # type: ignore[attr-defined]
+    LOCK_EX = fcntl.LOCK_EX
     #: shared lock
-    LOCK_SH = fcntl.LOCK_SH  # type: ignore[attr-defined]
+    LOCK_SH = fcntl.LOCK_SH
     #: non-blocking
-    LOCK_NB = fcntl.LOCK_NB  # type: ignore[attr-defined]
+    LOCK_NB = fcntl.LOCK_NB
     #: unlock
-    LOCK_UN = fcntl.LOCK_UN  # type: ignore[attr-defined]
+    LOCK_UN = fcntl.LOCK_UN
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')
