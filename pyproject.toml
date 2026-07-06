@@ -1,181 +1,103 @@
 [build-system]
-build-backend = 'setuptools.build_meta'
-requires = ['setuptools', 'setuptools-scm']
+build-backend = 'uv_build'
+requires = ['uv_build>=0.11,<0.12']
 
 [project]
 name = 'portalocker'
-version = "3.3.0"
+version = '4.0.0'
 dynamic = []
-authors = [{ name = 'Rick van Hattem', email = 'wolph@wol.ph' }]
-license = 'BSD-3-Clause'
-license-files = ['LICENSE']
 description = 'Wraps the portalocker recipe for easy usage'
-keywords = ['locking', 'locks', 'with', 'statement', 'windows', 'linux', 'unix']
 readme = 'README.rst'
-
+requires-python = '>=3.10'
+license = 'BSD-3-Clause'
+authors = [{ name = 'Rick van Hattem', email = 'wolph@wol.ph' }]
+keywords = ['locking', 'locks', 'with', 'statement', 'windows', 'linux', 'unix']
 classifiers = [
     'Development Status :: 5 - Production/Stable',
-    'Development Status :: 6 - Mature',
     'Intended Audience :: Developers',
-    'Natural Language :: English',
     'Operating System :: MacOS :: MacOS X',
-    'Operating System :: MacOS',
-    'Operating System :: Microsoft :: MS-DOS',
     'Operating System :: Microsoft :: Windows',
-    'Operating System :: Microsoft',
-    'Operating System :: POSIX :: BSD :: FreeBSD',
-    'Operating System :: POSIX :: BSD',
     'Operating System :: POSIX :: Linux',
-    'Operating System :: POSIX :: SunOS/Solaris',
-    'Operating System :: POSIX',
-    'Operating System :: Unix',
     'Programming Language :: Python :: 3 :: Only',
-    'Programming Language :: Python :: 3',
-    'Programming Language :: Python :: 3.9',
     'Programming Language :: Python :: 3.10',
     'Programming Language :: Python :: 3.11',
     'Programming Language :: Python :: 3.12',
     'Programming Language :: Python :: 3.13',
+    'Programming Language :: Python :: 3.14',
     'Programming Language :: Python :: Implementation :: CPython',
-    'Programming Language :: Python :: Implementation :: IronPython',
     'Programming Language :: Python :: Implementation :: PyPy',
-    'Programming Language :: Python :: Implementation',
-    'Programming Language :: Python',
-    'Topic :: Education :: Testing',
-    'Topic :: Office/Business',
-    'Topic :: Other/Nonlisted Topic',
     'Topic :: Software Development :: Libraries :: Python Modules',
-    'Topic :: Software Development :: Libraries',
-    'Topic :: System :: Monitoring',
-    'Typing :: Typed',
 ]
-requires-python = '>=3.9'
-dependencies = [
-    'pywin32>=226; platform_system == "Windows"',
-]
+dependencies = []
 
 [project.urls]
-bugs = 'https://github.com/wolph/portalocker/issues'
+homepage = 'https://github.com/wolph/portalocker/'
 documentation = 'https://portalocker.readthedocs.io/en/latest/'
 repository = 'https://github.com/wolph/portalocker/'
 
 [project.optional-dependencies]
-docs = ['portalocker[tests]']
-tests = [
-    'coverage-conditional-plugin>=0.9.0',
-    'portalocker[redis]',
-    'pytest-cov>=2.8.1',
-    'pytest-mypy>=0.8.0',
-    'pytest-rerunfailures>=15.0',
-    'pytest-timeout>=2.1.0',
-    'pytest>=5.4.1',
-    'sphinx>=6.0.0',
-    'types-pywin32>=310.0.0.20250429',
-    'types-redis',
-]
 redis = ['redis']
-win32 = ['pywin32>=226']
-
-[tool.setuptools]
-platforms = ['any']
-include-package-data = false
-
-[tool.setuptools.packages.find]
-include = ['portalocker']
-
-[tool.setuptools.package-data]
-portalocker = ['py.typed', 'msvcrt.pyi']
-
-[tool.codespell]
-skip = '*/htmlcov,./docs/_build,*.asc'
-
-[tool.pyright]
-pythonVersion = '3.9'
-include = ['portalocker', 'portalocker_tests']
-exclude = ['dist/*']
-strict = ['portalocker']
-
-[tool.mypy]
-python_version = '3.9'
-strict = true
-warn_return_any = true
-warn_unused_configs = true
-warn_unused_ignores = false
-packages = ['portalocker', 'portalocker_tests']
-ignore_missing_imports = true
-check_untyped_defs = true
-exclude = [
-    'dist',
-    'docs',
-    '.venv',
-    'venv',
-    'build',
+win32 = ["pywin32>=226; platform_system == 'Windows'"]
+tests = [
+    'portalocker[redis]',
+    'fakeredis>=2.31.0',
+    'pytest>=5.4.1',
+    'pytest-cov>=2.8.1',
+    'pytest-timeout>=2.1.0',
+    'pytest-rerunfailures>=15.1',
+    'types-pywin32>=310.0.0.20250429',
 ]
-enable_error_code = ['ignore-without-code', 'truthy-bool', 'redundant-expr']
-warn_unreachable = true
-
-[[tool.mypy.overrides]]
-module = ['portalocker_tests.*']
-disallow_untyped_defs = false
+docs = [
+    'sphinx>=7',
+    'furo',
+]
 
 [dependency-groups]
 dev = [
-    'lefthook>=1.11.13',
-    'mypy>=1.15.0',
-    'portalocker[tests]',
-    'pyright>=1.1.401',
-    'ruff>=0.11.11',
-    'tox>=4.26.0',
+    'portalocker[tests,docs]',
+    'ruff',
+    'mypy',
+    'basedpyright',
+    'pyrefly',
+    'ty',
+    'codespell',
+    'tox>=4.21',
+    'tox-uv',
 ]
 
-[tool.ruff]
-src = ['portalocker', 'portalocker_tests']
-include = ['portalocker/**/*.py', 'portalocker_tests/**/*.py']
+[tool.uv.build-backend]
+module-name = 'portalocker'
+module-root = ''
+
+[tool.codespell]
+skip = '*.css,*.js,*.lock,./docs/_build,./htmlcov,./.git,./.tox,./.venv'
 
 [tool.repo-review]
 ignore = [
-    'PC111', # no blacken-docs because markdown has no code
-    'PC140', # manual typecheck pre-commit hooks
-    'PC170', # no pygrep-hooks because no rST
-    'PY005',  # Tests folder is not named tests
-    'PY006', # pre-commit should not be used
-    'PY007', # tox configured in tox.toml
-    'RTD',   # no RTD
+    'PY004', # no /docs with markdown - we use RST
+    'PY005', # tests folder is portalocker_tests (public import path for downstream)
+    'PC110', # no black, we use ruff
+    'PC111', # no blacken-docs, we use ruff
+    'PC140', # manual mypy instead of pre-commit
+    'PC160', # manual codespell instead of pre-commit
+    'PC170', # no pygrep
+    'PC180', # no css/js to format
+    'PC190', # manual ruff instead of pre-commit
+    'PC901', # no pre-commit CI; lefthook is used instead
+    'MY103', # mypy strict = true is set in [tool.mypy]
 ]
-
-[tool.coverage.run]
-plugins = ['coverage_conditional_plugin']
-branch = true
-source = ['portalocker', 'portalocker_tests']
-
-[tool.coverage.report]
-ignore_errors = true
-fail_under = 100
-exclude_also = [
-    'def __repr__',
-    'if self.debug:',
-    'if settings.DEBUG',
-    'if typing.TYPE_CHECKING',
-    'raise AssertionError',
-    'raise NotImplementedError',
-    'if 0:',
-    'if __name__ == .__main__.:',
-    'typing.Protocol',
-]
-omit = [
-    'portalocker/redis.py',
-]
-
-[tool.coverage.coverage_conditional_plugin.rules]
-nt = 'os_name == "nt"'
-not-nt = 'os_name != "nt"'
-posix = 'os_name == "posix"'
-not-posix = 'os_name != "posix"'
 
 [tool.pytest.ini_options]
-minversion = 8.3
-log_cli_level = 'INFO'
-xfail_strict = true
+minversion = '6.0'
+addopts = [
+    '--doctest-modules',
+    '--cov=portalocker',
+    '--cov-report=term-missing',
+    '--cov-fail-under=100',
+    '--timeout=20',
+    '-p', 'no:cacheprovider',
+]
+testpaths = ['portalocker', 'portalocker_tests']
 filterwarnings = [
     'error',
     'ignore::DeprecationWarning',
@@ -183,24 +105,63 @@ filterwarnings = [
     'ignore::ImportWarning',
     'ignore::ResourceWarning',
 ]
-testpaths = [
-    'portalocker',
-    'portalocker_tests',
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ['portalocker', 'portalocker_tests']
+
+[tool.coverage.report]
+fail_under = 100
+ignore_errors = true
+exclude_also = [
+    'pragma: no cover',
+    'pragma: not-nt', # posix-only implementation excluded on this OS job
+    'pragma: not-posix', # nt-only implementation excluded on this OS job
+    'def __repr__',
+    'if self.debug:',
+    'if settings.DEBUG',
+    'if typing.TYPE_CHECKING:',
+    'if TYPE_CHECKING:',
+    '@(typing\.)?overload',
+    'raise AssertionError',
+    'raise NotImplementedError',
+    'except ImportError:',
+    'if 0:',
+    'if __name__ == .__main__.:', # CLI entry-point guard, not exercised by imports
+    'typing.Protocol',
+    'if os\.name', # platform-specific branches combine across OS jobs
+    'if sys\.platform',
+]
+omit = [
+    'portalocker/redis.py',
 ]
 
-python_files = [
-    'portalocker_tests/*.py',
-]
+[tool.mypy]
+python_version = '3.10'
+strict = true
+warn_unreachable = true
+enable_error_code = ['ignore-without-code', 'truthy-bool', 'redundant-expr']
+packages = ['portalocker', 'portalocker_tests']
 
-addopts = '''
-    -ra
-    --strict-markers
-    --strict-config
-    --ignore setup.py
-    --ignore portalocker/_*.py
-    --doctest-modules
-    --cov portalocker
-    --cov-report term-missing
-'''
+[[tool.mypy.overrides]]
+module = 'portalocker_tests.*'
+disallow_untyped_defs = false
 
-timeout = 20
+[tool.pyright]
+pythonVersion = '3.10'
+typeCheckingMode = 'standard'
+strict = ['portalocker']
+include = ['portalocker', 'portalocker_tests']
+exclude = ['.venv', '.tox', 'build', 'dist', 'docs']
+
+[tool.pyrefly]
+project-includes = ['portalocker', 'portalocker_tests']
+project-excludes = ['.venv', '.tox', 'build', 'dist']
+python-version = '3.10'
+
+[tool.ty.environment]
+python-version = '3.10'
+
+[tool.ty.src]
+include = ['portalocker', 'portalocker_tests']
