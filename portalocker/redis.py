@@ -265,7 +265,7 @@ class RedisLock(utils.LockBase['RedisLock']):
                 return True
 
         clients: list[dict[str, str]] = connection.client_list('pubsub')
-        for client_ in clients:  # pragma: no cover
+        for client_ in clients:
             if client_.get('name') == self.client_name:
                 logger.warning('Killing unavailable redis client: %r', client_)
                 connection.client_kill_filter(client_.get('id'))

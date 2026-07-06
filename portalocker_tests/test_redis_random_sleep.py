@@ -3,6 +3,8 @@
 import time
 from typing import Any
 
+import pytest
+
 from portalocker import redis
 
 
@@ -53,6 +55,28 @@ def test_timeout_generator_with_zero_check_interval(monkeypatch):
     assert len(sleep_times) == 1
     sleep_time = sleep_times[0]
     assert 0.025 <= sleep_time <= 0.075
+
+
+def test_timeout_generator_with_none_values(monkeypatch):
+    """`None` timeout means 0.0 (one attempt); `None` check_interval falls
+    back to thread_sleep_time."""
+    sleep_times = []
+
+    def fake_sleep(t):
+        sleep_times.append(t)
+
+    monkeypatch.setattr(time, 'sleep', fake_sleep)
+
+    lock = FakeLock(thread_sleep_time=0.05)
+    gen = lock._timeout_generator(timeout=None, check_interval=None)
+    next(gen)
+    # Expected sleep time is 0.05 * (0.5 + random_value) in [0.025, 0.075].
+    assert len(sleep_times) == 1
+    sleep_time = sleep_times[0]
+    assert 0.025 <= sleep_time <= 0.075
+    # A timeout of None coalesces to 0.0, so only one attempt is yielded.
+    with pytest.raises(StopIteration):
+        next(gen)
 
 
 def test_timeout_generator_with_negative_check_interval(monkeypatch):
