@@ -1,9 +1,39 @@
-# ruff: skip-file
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Build / dist
 build/
+dist/
+
+# Tooling caches / envs
+.venv/
+.tox/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.cache/
+.lprof/
+
+# Coverage / test artifacts
+.coverage
+.coverage.*
+htmlcov/
 locked_file
-dist
-htmlcov
-*.egg-info
-.cache
-.aider*
+*.lock_file
+
+# uv (deps intentionally unlocked — always test newest)
+uv.lock
+
+# Editors / local
+.vscode/
+.idea/
+.project
 .env
+.zshhistory
+.aider*
+.aider-desk/
+.superpowers/
+gpgit/
+docs/_build/
