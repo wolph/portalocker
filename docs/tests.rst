@@ -4,23 +4,17 @@ tests package
 Module contents
 ---------------
 
-.. automodule:: portalocker_tests.tests
-    :members:
-    :private-members:
-    :special-members:
-    :inherited-members:
-    :undoc-members:
-    :show-inheritance:
-
 .. automodule:: portalocker_tests.test_combined
     :members:
     :undoc-members:
     :show-inheritance:
 
-.. automodule:: portalocker_tests.temporary_file_lock
+.. automodule:: portalocker_tests.test_pidfilelock
     :members:
-    :private-members:
-    :special-members:
-    :inherited-members:
+    :undoc-members:
+    :show-inheritance:
+
+.. automodule:: portalocker_tests.test_temporary_file_lock
+    :members:
     :undoc-members:
     :show-inheritance:
