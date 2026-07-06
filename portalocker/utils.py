@@ -534,11 +534,21 @@ class PidFileLock(TemporaryFileLock):
             inner_lock.acquire(
                 timeout=timeout,
                 check_interval=check_interval,
-                fail_when_locked=True,
+                fail_when_locked=fail_when_locked,
             )
-        except Exception:
-            # Propagate so __enter__ can return PID of holder
+        except Exception as exc:
+            # Don't leak the (failed) sidecar reference on any error.
             self._inner_lock = None
+            # `fail_when_locked=True` raises `AlreadyLocked` on the first
+            # contention, while a timed-out `fail_when_locked=False` acquire
+            # re-raises the last plain `LockException`. Normalize a plain
+            # contention `LockException` to `AlreadyLocked` so `__enter__` and
+            # callers see one predictable surface; anything else propagates.
+            if isinstance(exc, exceptions.LockException) and not isinstance(
+                exc,
+                exceptions.AlreadyLocked,
+            ):
+                raise exceptions.AlreadyLocked(*exc.args) from exc
             raise
 
         # Write the current process PID to the public PID file

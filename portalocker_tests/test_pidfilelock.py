@@ -7,6 +7,9 @@ import time
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
+import portalocker
 from portalocker import utils
 
 
@@ -250,3 +253,51 @@ def test_multiprocess_locking():
                 p1.terminate()
             if p2.is_alive():
                 p2.terminate()
+
+
+def test_pidfilelock_timeout_waits_when_not_fail_when_locked(tmp_path):
+    """A1: with ``fail_when_locked=False`` a contended acquire must honour
+    the timeout (block, then raise ``AlreadyLocked``); with
+    ``fail_when_locked=True`` it must fail fast."""
+    lock_file = tmp_path / 'pidfilelock_timeout.pid'
+    holder = utils.PidFileLock(str(lock_file))
+    holder.acquire()
+    try:
+        contender = utils.PidFileLock(str(lock_file))
+
+        # fail_when_locked=False must actually wait out the timeout.
+        start = time.perf_counter()
+        with pytest.raises(portalocker.AlreadyLocked):
+            contender.acquire(fail_when_locked=False, timeout=0.5)
+        waited = time.perf_counter() - start
+        assert waited >= 0.3, f'expected a ~0.5s wait, waited {waited:.3f}s'
+
+        # fail_when_locked=True must fail (almost) immediately.
+        start = time.perf_counter()
+        with pytest.raises(portalocker.AlreadyLocked):
+            contender.acquire(fail_when_locked=True, timeout=0.5)
+        fast = time.perf_counter() - start
+        assert fast < 0.2, f'expected a fast failure, took {fast:.3f}s'
+    finally:
+        holder.release()
+
+
+def test_pidfilelock_normalizes_plain_lockexception(tmp_path, monkeypatch):
+    """A1: when a timed-out sidecar acquire re-raises a plain ``LockException``
+    (rather than ``AlreadyLocked``, as can happen on Windows), ``acquire`` must
+    normalize it to ``AlreadyLocked`` so ``__enter__`` and callers see one
+    predictable surface."""
+    lock_file = tmp_path / 'pidfilelock_normalize.pid'
+
+    def boom(self, *args, **kwargs):
+        raise portalocker.LockException('boom')
+
+    # Patch the sidecar ``Lock.acquire`` (not ``PidFileLock.acquire``) so the
+    # inner lock raises a non-``AlreadyLocked`` ``LockException``.
+    monkeypatch.setattr(utils.Lock, 'acquire', boom)
+
+    lock = utils.PidFileLock(str(lock_file))
+    with pytest.raises(portalocker.AlreadyLocked):
+        lock.acquire()
+    # The failed sidecar reference must not leak.
+    assert lock._inner_lock is None
