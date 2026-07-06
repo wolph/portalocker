@@ -5,7 +5,6 @@ import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
 from unittest import mock
 
 from portalocker import utils
@@ -209,7 +208,7 @@ def test_multiprocess_locking():
     """Test that PidFileLock works correctly across processes."""
     with tempfile.TemporaryDirectory() as tmpdir:
         lock_file = Path(tmpdir) / 'test_multiprocess_locking.lock'
-        result_queue: multiprocessing.Queue[tuple[str, Optional[int], int]] = (
+        result_queue: multiprocessing.Queue[tuple[str, int | None, int]] = (
             multiprocessing.Queue()
         )
 

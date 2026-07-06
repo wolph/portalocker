@@ -16,11 +16,9 @@ backwards compatibility (POSIX) and Windows behavior.
 import io
 import os
 import typing
+from collections.abc import Callable
 from typing import (
     Any,
-    Callable,
-    Optional,
-    Union,
     cast,
 )
 
@@ -54,16 +52,16 @@ class BaseLocker:
 
 
 # Define refined LockerType with more specific types
-LockerType = Union[
+LockerType = (
     # POSIX-style fcntl.flock callable
-    Callable[[Union[int, types.HasFileno], int], Any],
+    Callable[[int | types.HasFileno, int], Any]
     # Tuple of lock and unlock functions
-    tuple[LockCallable, UnlockCallable],
+    | tuple[LockCallable, UnlockCallable]
     # BaseLocker instance
-    BaseLocker,
+    | BaseLocker
     # BaseLocker class
-    type[BaseLocker],
-]
+    | type[BaseLocker]
+)
 
 LOCKER: LockerType
 
@@ -71,7 +69,7 @@ if os.name == 'nt':  # pragma: not-posix
     # Windows-specific helper functions
     def _prepare_windows_file(
         file_obj: types.FileArgument,
-    ) -> tuple[int, Optional[typing.IO[Any]], Optional[int]]:
+    ) -> tuple[int, typing.IO[Any] | None, int | None]:
         """Prepare file for Windows: get fd, optionally seek and save pos."""
         if isinstance(file_obj, int):
             # Plain file descriptor
@@ -91,8 +89,8 @@ if os.name == 'nt':  # pragma: not-posix
         return fd, None, None
 
     def _restore_windows_file_pos(
-        file_io_obj: Optional[typing.IO[Any]],
-        original_pos: Optional[int],
+        file_io_obj: typing.IO[Any] | None,
+        original_pos: int | None,
     ) -> None:
         """Restore file position if it was an IO object and pos was saved."""
         if file_io_obj and original_pos is not None and original_pos != 0:
@@ -198,7 +196,7 @@ if os.name == 'nt':  # pragma: not-posix
 
             attrs = ['LK_LOCK', 'LK_RLCK', 'LK_NBLCK', 'LK_UNLCK', 'LK_NBRLCK']
             defaults = [0, 1, 2, 3, 2]  # LK_NBRLCK often same as LK_NBLCK (2)
-            for attr, default_val in zip(attrs, defaults):
+            for attr, default_val in zip(attrs, defaults, strict=True):
                 if not hasattr(msvcrt, attr):
                     setattr(msvcrt, attr, default_val)
 
@@ -343,24 +341,22 @@ else:  # pragma: not-nt
     import fcntl
 
     # PosixLocker methods accept FileArgument | HasFileno
-    PosixFileArgument = Union[types.FileArgument, types.HasFileno]
+    PosixFileArgument = types.FileArgument | types.HasFileno
 
     class PosixLocker(BaseLocker):
         """Locker implementation using the `LOCKER` constant"""
 
-        _locker: Optional[
-            Callable[[Union[int, types.HasFileno], int], Any]
-        ] = None
+        _locker: Callable[[int | types.HasFileno, int], Any] | None = None
 
         @property
-        def locker(self) -> Callable[[Union[int, types.HasFileno], int], Any]:
+        def locker(self) -> Callable[[int | types.HasFileno, int], Any]:
             if self._locker is None:
                 # On POSIX systems ``LOCKER`` is a callable (fcntl.flock) but
                 # mypy also sees the Windows-only tuple assignment.  Explicitly
                 # cast so mypy knows we are returning the callable variant
                 # here.
                 return cast(
-                    Callable[[Union[int, types.HasFileno], int], Any], LOCKER
+                    Callable[[int | types.HasFileno, int], Any], LOCKER
                 )  # pyright: ignore[reportUnnecessaryCast]
 
             # mypy does not realise ``self._locker`` is non-None after the
@@ -431,7 +427,7 @@ else:  # pragma: not-nt
         LOCKER = fcntl.lockf  # type: ignore[attr-defined]
 
     # LOCKER constant for POSIX is fcntl.flock for backward compatibility.
-    # Type matches: Callable[[Union[int, HasFileno], int], Any]
+    # Type matches: Callable[[int | HasFileno, int], Any]
     LOCKER = fcntl.flock  # type: ignore[attr-defined,reportConstantRedefinition]
 
     _posix_locker_instance = PosixLocker()

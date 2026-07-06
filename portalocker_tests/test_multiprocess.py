@@ -14,9 +14,9 @@ from portalocker import LockFlags
 class LockResult:
     """Helper dataclass for multiprocessing lock results."""
 
-    exception_class: typing.Union[type, None] = None
-    exception_message: typing.Union[str, None] = None
-    exception_repr: typing.Union[str, None] = None
+    exception_class: type | None = None
+    exception_message: str | None = None
+    exception_repr: str | None = None
 
 
 def lock(

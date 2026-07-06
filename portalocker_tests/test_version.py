@@ -7,8 +7,8 @@ parser for pyproject.
 """
 
 import importlib
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 import pytest
 
@@ -66,7 +66,7 @@ def test_get_version_fallback_pyproject(
     monkeypatch.setattr('importlib.metadata.version', _raise, raising=True)
 
     def fake_read_text(
-        _self: Path, encoding: str = 'utf-8', errors: Optional[str] = None
+        _self: Path, encoding: str = 'utf-8', errors: str | None = None
     ) -> str:
         return "[project]\nname = 'portalocker'\nversion = '1.2.3'\n"
 
