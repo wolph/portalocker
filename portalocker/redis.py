@@ -1,3 +1,5 @@
+# Several redis-py methods (`pubsub`, `subscribe`, `unsubscribe`, ...) are
+# unannotated, so their members and return values are unknown to pyright.
 # pyright: reportUnknownMemberType=false
 from __future__ import annotations
 
@@ -8,7 +10,7 @@ import random
 import time
 import typing
 
-import redis
+import redis.client
 
 from . import exceptions, utils
 
@@ -27,7 +29,7 @@ class PubSubWorkerThread(redis.client.PubSubWorkerThread):
             raise
 
 
-class RedisLock(utils.LockBase):
+class RedisLock(utils.LockBase['RedisLock']):
     """
     An extremely reliable Redis lock based on pubsub with a keep-alive thread
 
@@ -68,7 +70,7 @@ class RedisLock(utils.LockBase):
     thread: PubSubWorkerThread | None
     channel: str
     timeout: float
-    connection: redis.client.Redis[str] | None
+    connection: redis.client.Redis | None
     pubsub: redis.client.PubSub | None = None
     close_connection: bool
 
@@ -80,7 +82,7 @@ class RedisLock(utils.LockBase):
     def __init__(
         self,
         channel: str,
-        connection: redis.client.Redis[str] | None = None,
+        connection: redis.client.Redis | None = None,
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = False,
@@ -107,11 +109,34 @@ class RedisLock(utils.LockBase):
             fail_when_locked=fail_when_locked,
         )
 
-    def get_connection(self) -> redis.client.Redis[str]:
+    def get_connection(self) -> redis.client.Redis:
         if not self.connection:
             self.connection = redis.client.Redis(**self.redis_kwargs)
 
         return self.connection
+
+    def _get_pubsub(
+        self,
+        connection: redis.client.Redis,
+    ) -> redis.client.PubSub:
+        """Typed wrapper, `Redis.pubsub()` is unannotated in redis-py."""
+        return typing.cast(
+            'redis.client.PubSub',
+            connection.pubsub(),  # type: ignore[no-untyped-call]
+        )
+
+    def _get_subscriber_count(self, connection: redis.client.Redis) -> int:
+        """Get the subscriber count for our channel, with a usable type.
+
+        `Redis.pubsub_numsub()` is declared as returning `ResponseT` (a
+        union with `Awaitable`), but a synchronous client always answers
+        with a list of `(channel, count)` pairs.
+        """
+        numsub: list[tuple[str, int]] = typing.cast(
+            'list[tuple[str, int]]',
+            connection.pubsub_numsub(self.channel),
+        )
+        return numsub[0][1]
 
     def channel_handler(self, message: dict[str, str]) -> None:
         if message.get('type') != 'message':  # pragma: no cover
@@ -154,7 +179,7 @@ class RedisLock(utils.LockBase):
             time.sleep(sleep_time)
             yield 0
 
-    def acquire(  # type: ignore[override]
+    def acquire(
         self,
         timeout: float | None = None,
         check_interval: float | None = None,
@@ -176,7 +201,7 @@ class RedisLock(utils.LockBase):
 
         timeout_generator = self._timeout_generator(timeout, check_interval)
         for _ in timeout_generator:  # pragma: no branch
-            subscribers = connection.pubsub_numsub(self.channel)[0][1]
+            subscribers = self._get_subscriber_count(connection)
 
             if subscribers:
                 logger.debug(
@@ -197,15 +222,19 @@ class RedisLock(utils.LockBase):
             # above can still end up here
             if not subscribers:
                 connection.client_setname(self.client_name)
-                self.pubsub = connection.pubsub()
-                self.pubsub.subscribe(**{self.channel: self.channel_handler})
+                pubsub = self._get_pubsub(connection)
+                self.pubsub = pubsub
+                # `PubSub.subscribe()` is unannotated in redis-py
+                pubsub.subscribe(  # type: ignore[no-untyped-call]
+                    **{self.channel: self.channel_handler},
+                )
                 self.thread = PubSubWorkerThread(
-                    self.pubsub,
+                    pubsub,
                     sleep_time=self.thread_sleep_time,
                 )
                 self.thread.start()
                 time.sleep(0.01)
-                subscribers = connection.pubsub_numsub(self.channel)[0][1]
+                subscribers = self._get_subscriber_count(connection)
                 if subscribers == 1:  # pragma: no branch
                     return self
                 else:  # pragma: no cover
@@ -219,14 +248,15 @@ class RedisLock(utils.LockBase):
 
     def check_or_kill_lock(
         self,
-        connection: redis.client.Redis[str],
+        connection: redis.client.Redis,
         timeout: float,
     ) -> bool | None:
         # Random channel name to get messages back from the lock
         response_channel = f'{self.channel}-{random.random()}'
 
-        pubsub = connection.pubsub()
-        pubsub.subscribe(response_channel)
+        pubsub = self._get_pubsub(connection)
+        # `PubSub.subscribe()` is unannotated in redis-py
+        pubsub.subscribe(response_channel)  # type: ignore[no-untyped-call]
         connection.publish(
             self.channel,
             json.dumps(
@@ -246,12 +276,16 @@ class RedisLock(utils.LockBase):
                 pubsub.close()
                 return True
 
-        for client_ in connection.client_list('pubsub'):  # pragma: no cover
+        # `Redis.client_list()` is declared as returning `ResponseT`, the
+        # synchronous client always answers with a list of client dicts.
+        clients: list[dict[str, str]] = typing.cast(
+            'list[dict[str, str]]',
+            connection.client_list('pubsub'),
+        )
+        for client_ in clients:  # pragma: no cover
             if client_.get('name') == self.client_name:
                 logger.warning('Killing unavailable redis client: %r', client_)
-                connection.client_kill_filter(  # pyright: ignore
-                    client_.get('id'),
-                )
+                connection.client_kill_filter(client_.get('id'))
         return None
 
     def release(self) -> None:
@@ -262,7 +296,10 @@ class RedisLock(utils.LockBase):
             time.sleep(0.01)
 
         if self.pubsub:  # pragma: no branch
-            self.pubsub.unsubscribe(self.channel)
+            # `PubSub.unsubscribe()` is unannotated in redis-py
+            self.pubsub.unsubscribe(  # type: ignore[no-untyped-call]
+                self.channel,
+            )
             self.pubsub.close()
             self.pubsub = None
 
