@@ -186,11 +186,18 @@ if os.name == 'nt':  # pragma: not-posix
                 _restore_windows_file_pos(io_obj_ctx, pos_ctx)
 
     class MsvcrtLocker(BaseLocker):
-        _win32_locker: Win32Locker
+        _win32_locker: Win32Locker | None
         _msvcrt_lock_length: int = 0x10000
 
         def __init__(self) -> None:
-            self._win32_locker = Win32Locker()
+            try:
+                self._win32_locker = Win32Locker()
+            except ImportError:
+                # pywin32 is an optional extra since 4.0.0. Without it,
+                # exclusive locks still work via the pure-msvcrt path
+                # below; shared locks and the unlock() fallback raise
+                # informative errors instead of crashing here.
+                self._win32_locker = None
             try:
                 import msvcrt
             except ImportError as e:
@@ -208,10 +215,17 @@ if os.name == 'nt':  # pragma: not-posix
             import msvcrt
 
             if flags & LockFlags.SHARED:
+                win32_locker = self._win32_locker
+                if win32_locker is None:
+                    raise ImportError(
+                        'Shared locks on Windows require the win32 extra '
+                        '(pywin32); msvcrt provides no true shared lock. '
+                        'Install it with: pip install portalocker[win32]'
+                    )
                 win32_api_flags = LockFlags(0)
                 if flags & LockFlags.NON_BLOCKING:
                     win32_api_flags |= LockFlags.NON_BLOCKING
-                self._win32_locker.lock(file_obj, win32_api_flags)
+                win32_locker.lock(file_obj, win32_api_flags)
                 return
 
             fd, io_obj_ctx, pos_ctx = _prepare_windows_file(file_obj)
@@ -256,12 +270,21 @@ if os.name == 'nt':  # pragma: not-posix
                 )
             except OSError as exc:
                 if exc.errno == 13:  # EACCES (Permission denied)
+                    win32_locker = self._win32_locker
+                    if win32_locker is None:
+                        # No pywin32 to fall back to; surface the
+                        # original msvcrt unlock failure instead.
+                        raise exceptions.LockException(
+                            exceptions.LockException.LOCK_FAILED,
+                            exc.strerror,
+                            fh=file_obj,
+                        ) from exc
                     took_fallback_path = True
                     # Restore position before calling win32_locker,
                     # as it will re-prepare.
                     _restore_windows_file_pos(io_obj_ctx, pos_ctx)
                     try:
-                        self._win32_locker.unlock(
+                        win32_locker.unlock(
                             file_obj
                         )  # win32_locker handles its own seeking
                     except exceptions.LockException as win32_exc:
