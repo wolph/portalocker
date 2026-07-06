@@ -1,4 +1,5 @@
 import contextlib
+import importlib.util
 import logging
 import multiprocessing
 import os
@@ -10,6 +11,13 @@ import portalocker
 from portalocker import utils
 
 logger = logging.getLogger(__name__)
+
+# `win32file` is only importable when the `pywin32` package (the `win32`
+# extra) is installed. Since 4.0.0 that package is optional, so CI runs
+# Windows cells both with and without it (msvcrt-only). Guard every
+# Windows-specific locker below on its availability so collection succeeds
+# either way.
+_HAS_PYWIN32: bool = importlib.util.find_spec('win32file') is not None
 
 
 @pytest.fixture(scope='function')
@@ -42,7 +50,14 @@ if os.name == 'posix':
     from fcntl import flock, lockf
 
     LOCKERS += [flock, lockf]
-else:
+elif _HAS_PYWIN32:
+    # `MsvcrtLocker.__init__` unconditionally constructs a `Win32Locker`
+    # (for its shared-lock delegation and unlock() fallback), and
+    # `Win32Locker.__init__` unconditionally imports `pywintypes`. That
+    # means *both* the pure win32 entries and the msvcrt hybrid entries
+    # below require pywin32 just to construct, not only when the unlock
+    # fallback path is actually exercised. So the whole block is gated,
+    # not only the win32-only entries.
     win_locker = portalocker.portalocker.Win32Locker()
     msvcrt_locker = portalocker.portalocker.MsvcrtLocker()
 
