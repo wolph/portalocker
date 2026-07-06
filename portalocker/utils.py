@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import atexit
+import collections.abc
 import contextlib
 import logging
 import os
@@ -58,7 +59,7 @@ def coalesce(*args: typing.Any, test_value: typing.Any = None) -> typing.Any:
 def open_atomic(
     filename: Filename,
     binary: bool = True,
-) -> typing.Iterator[types.IO]:
+) -> collections.abc.Generator[types.IO]:
     """Open a file for atomic writing. Instead of locking this method allows
     you to write the entire file and move it to the actual location. Note that
     this makes the assumption that a rename is atomic on your platform which
@@ -111,7 +112,16 @@ def open_atomic(
             os.remove(temp_fh.name)
 
 
-class LockBase(abc.ABC):  # pragma: no cover
+#: The type returned by `LockBase.acquire` and, through it, by
+#: `LockBase.__enter__`. Locks that guard a file return the opened
+#: filehandle, others return whatever fits their locking model.
+AcquireReturnT = typing.TypeVar('AcquireReturnT')
+
+
+class LockBase(  # pragma: no cover
+    abc.ABC,
+    typing.Generic[AcquireReturnT],
+):
     #: timeout when trying to acquire a lock
     timeout: float
     #: check interval while waiting for `timeout`
@@ -138,7 +148,7 @@ class LockBase(abc.ABC):  # pragma: no cover
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.AnyStr]: ...
+    ) -> AcquireReturnT: ...
 
     def _timeout_generator(
         self,
@@ -163,7 +173,7 @@ class LockBase(abc.ABC):  # pragma: no cover
     @abc.abstractmethod
     def release(self) -> None: ...
 
-    def __enter__(self) -> typing.IO[typing.AnyStr]:
+    def __enter__(self) -> AcquireReturnT:
         return self.acquire()
 
     def __exit__(
@@ -175,7 +185,7 @@ class LockBase(abc.ABC):  # pragma: no cover
         self.release()
         return None
 
-    def __delete__(self, instance: LockBase) -> None:
+    def __delete__(self, instance: LockBase[AcquireReturnT]) -> None:
         instance.release()
 
     # Ensure cleanup on garbage collection as tests rely on this behaviour
@@ -184,7 +194,7 @@ class LockBase(abc.ABC):  # pragma: no cover
             self.release()
 
 
-class Lock(LockBase):
+class Lock(LockBase[typing.IO[typing.Any]]):
     """Lock manager with built-in timeout
 
     Args:
@@ -252,7 +262,7 @@ class Lock(LockBase):
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.AnyStr]:
+    ) -> typing.IO[typing.Any]:
         """Acquire the locked filehandle"""
 
         fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
@@ -269,8 +279,7 @@ class Lock(LockBase):
         # If we already have a filehandle, return it
         fh = self.fh
         if fh:
-            # Due to type invariance we need to cast the type
-            return typing.cast(typing.IO[typing.AnyStr], fh)
+            return fh
 
         # Get a new filehandler
         fh = self._get_fh()
@@ -316,9 +325,9 @@ class Lock(LockBase):
         fh = self._prepare_fh(fh)
 
         self.fh = fh
-        return typing.cast(typing.IO[typing.AnyStr], fh)
+        return fh
 
-    def __enter__(self) -> typing.IO[typing.AnyStr]:
+    def __enter__(self) -> typing.IO[typing.Any]:
         return self.acquire()
 
     def release(self) -> None:
@@ -399,14 +408,14 @@ class RLock(Lock):
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.AnyStr]:
-        fh: typing.IO[typing.AnyStr]
+    ) -> typing.IO[typing.Any]:
+        fh: typing.IO[typing.Any]
         if self._acquire_count >= 1:
-            fh = typing.cast(typing.IO[typing.AnyStr], self.fh)
+            assert self.fh is not None
+            fh = self.fh
         else:
             fh = super().acquire(timeout, check_interval, fail_when_locked)
         self._acquire_count += 1
-        assert fh is not None
         return fh
 
     def release(self) -> None:
@@ -442,7 +451,7 @@ class TemporaryFileLock(Lock):
         wr = weakref.ref(self)
 
         def _finalize_release(
-            ref: weakref.ReferenceType[TemporaryFileLock] = wr,  # type: ignore[arg-type]
+            ref: typing.Callable[[], TemporaryFileLock | None] = wr,
         ) -> None:  # pragma: no cover - best effort
             obj = ref()
             if obj is not None:
@@ -504,12 +513,12 @@ class PidFileLock(TemporaryFileLock):
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.AnyStr]:
+    ) -> typing.IO[typing.Any]:
         """Acquire the lock and write the current PID to the file"""
         fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
 
         # Acquire the sidecar lock file using a normal Lock instance.
-        self._inner_lock = Lock(
+        inner_lock = Lock(
             self._lockfile,
             mode='a',
             timeout=timeout if fail_when_locked is False else 0,
@@ -520,8 +529,9 @@ class PidFileLock(TemporaryFileLock):
             fail_when_locked=True,
             flags=LOCK_METHOD,
         )
+        self._inner_lock = inner_lock
         try:
-            self._inner_lock.acquire(
+            inner_lock.acquire(
                 timeout=timeout,
                 check_interval=check_interval,
                 fail_when_locked=True,
@@ -535,7 +545,7 @@ class PidFileLock(TemporaryFileLock):
         # Use unbuffered OS ops where possible
         with open(self.filename, 'a+') as f:
             try:
-                fd2 = f.fileno()  # type: ignore[no-untyped-call]
+                fd2 = f.fileno()
                 os.lseek(fd2, 0, os.SEEK_SET)
                 try:
                     os.ftruncate(fd2, 0)
@@ -552,14 +562,15 @@ class PidFileLock(TemporaryFileLock):
                 # Jython)
                 f.seek(0)
                 f.truncate()
-                f.write(str(os.getpid()))  # type: ignore[arg-type,call-overload]
+                f.write(str(os.getpid()))
                 with contextlib.suppress(Exception):
                     f.flush()
 
         self._acquired_lock = True
         # No need to keep a direct fh on the PID file; return the lock's fh
         # to satisfy the context manager typing contract.
-        return typing.cast(typing.IO[typing.AnyStr], self._inner_lock.fh)
+        assert inner_lock.fh is not None
+        return inner_lock.fh
 
     def read_pid(self) -> int | None:
         """Read the PID from the lock file if it exists and is readable"""
@@ -573,7 +584,9 @@ class PidFileLock(TemporaryFileLock):
             pass
         return None
 
-    def __enter__(self) -> int | None:  # type: ignore[override]
+    # `PidFileLock` deliberately breaks the `Lock.__enter__` contract: it
+    # reports the competing PID instead of returning a filehandle.
+    def __enter__(self) -> int | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]
         """
         Context manager entry that returns:
         - None if we successfully acquired the lock
@@ -613,7 +626,7 @@ class PidFileLock(TemporaryFileLock):
                 os.unlink(self._lockfile)
 
 
-class BoundedSemaphore(LockBase):
+class BoundedSemaphore(LockBase['Lock | None']):
     """
     Bounded semaphore to prevent too many parallel processes from running
 
@@ -645,7 +658,7 @@ class BoundedSemaphore(LockBase):
         self.name = name
         self.filename_pattern = filename_pattern
         self.directory = directory
-        self.lock: Lock | None = None
+        self.lock = None
         super().__init__(
             timeout=timeout,
             check_interval=check_interval,
@@ -674,7 +687,7 @@ class BoundedSemaphore(LockBase):
             number=number,
         )
 
-    def acquire(  # type: ignore[override]
+    def acquire(
         self,
         timeout: float | None = None,
         check_interval: float | None = None,
@@ -702,9 +715,10 @@ class BoundedSemaphore(LockBase):
         filename: Filename
         for filename in filenames:
             logger.debug('trying lock for %r', filename)
-            self.lock = Lock(filename, fail_when_locked=True)
+            lock = Lock(filename, fail_when_locked=True)
+            self.lock = lock
             try:
-                self.lock.acquire()
+                lock.acquire()
             except exceptions.AlreadyLocked:
                 self.lock = None
             else:
