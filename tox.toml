@@ -12,13 +12,13 @@ skip_missing_interpreters = true
 labels = ['test']
 pass_env = ['FORCE_COLOR', 'REDIS_HOST']
 extras = ['tests']
-commands = [['pytest', '{posargs}']]
+commands = [['pytest', { replace = 'posargs', extend = true }]]
 
 [env.win32]
 labels = ['test']
 description = 'windows tests with the pywin32 extra installed'
 extras = ['tests', 'win32']
-commands = [['pytest', '{posargs}']]
+commands = [['pytest', { replace = 'posargs', extend = true }]]
 
 [env.ruff]
 labels = ['check']
