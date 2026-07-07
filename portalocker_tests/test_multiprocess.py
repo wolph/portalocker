@@ -1,8 +1,8 @@
 import dataclasses
 import multiprocessing
+import multiprocessing.synchronize
 import platform
 import time
-import typing
 
 import pytest
 
@@ -103,14 +103,31 @@ def test_shared_processes(tmpdir, fail_when_locked):
             assert result == LockResult()
 
 
+def hold_exclusive_lock(
+    filename: str,
+    flags: LockFlags,
+    locked_event: multiprocessing.synchronize.Event,
+    release_event: multiprocessing.synchronize.Event,
+) -> None:
+    """Acquire an exclusive lock, announce it, and hold until told to stop.
+
+    Signalling ``locked_event`` only after the lock is held lets the parent
+    start the competing acquire deterministically instead of racing on
+    timing.
+    """
+    with portalocker.Lock(
+        filename,
+        timeout=30,
+        fail_when_locked=False,
+        flags=flags,
+    ):
+        locked_event.set()
+        # Keep holding the lock until the parent has finished its (blocked)
+        # attempt. The ceiling is a safety net, not a timing assumption.
+        release_event.wait(timeout=30)
+
+
 @pytest.mark.parametrize('fail_when_locked', [True, False])
-@pytest.mark.parametrize(
-    'locker',
-    [
-        # The actual locker param is handled by the test runner
-    ],
-    indirect=True,
-)
 @pytest.mark.skipif(
     'pypy' in platform.python_implementation().lower(),
     reason='pypy3 does not support the multiprocessing test',
@@ -119,41 +136,44 @@ def test_shared_processes(tmpdir, fail_when_locked):
 def test_exclusive_processes(
     tmpdir: str,
     fail_when_locked: bool,
-    locker: typing.Callable[..., typing.Any],
 ) -> None:
-    """Test that exclusive locks work correctly across processes."""
-    tmpfile = tmpdir.join('test_exclusive_processes.lock')
+    """A second process must not be able to take an exclusive lock while
+    another process holds it.
+
+    Deterministic by construction: the holder signals ``locked`` only once it
+    owns the lock, and keeps holding it until we set ``release``. So our own
+    acquire attempt in between is guaranteed to be contended. Ceilings are
+    generous (30s) because they only guard against a hung child, not the lock
+    logic.
+    """
+    tmpfile = str(tmpdir.join('test_exclusive_processes.lock'))
     flags = LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING
 
-    with multiprocessing.Pool(processes=2) as pool:
-        # Submit tasks individually
-        result_a = pool.apply_async(lock, [tmpfile, fail_when_locked, flags])
-        result_b = pool.apply_async(lock, [tmpfile, fail_when_locked, flags])
+    locked = multiprocessing.Event()
+    release = multiprocessing.Event()
+    holder = multiprocessing.Process(
+        target=hold_exclusive_lock,
+        args=(tmpfile, flags, locked, release),
+    )
+    holder.start()
+    try:
+        assert locked.wait(timeout=30), 'holder never acquired the lock'
 
-        try:
-            a = result_a.get(timeout=1.2)  # Wait for 'a' with timeout
-        except multiprocessing.TimeoutError:
-            a = None
+        # The holder still owns the lock, so this attempt must be blocked and
+        # surface a LockException (AlreadyLocked when fail_when_locked, a plain
+        # timeout otherwise).
+        with (
+            pytest.raises(portalocker.LockException),
+            portalocker.Lock(
+                tmpfile,
+                timeout=0.5,
+                fail_when_locked=fail_when_locked,
+                flags=flags,
+            ),
+        ):
+            pass  # pragma: no cover - lock must never be granted here
+    finally:
+        release.set()
+        holder.join(timeout=30)
 
-        try:
-            # Lower timeout since we already waited with `a`
-            b = result_b.get(timeout=0.6)  # Wait for 'b' with timeout
-        except multiprocessing.TimeoutError:
-            b = None
-
-        assert a or b
-        # Make sure a is always filled
-        if a is None:
-            b, a = a, b
-
-        assert a is not None
-
-        if b:
-            assert b is not None
-
-            assert not a.exception_class or not b.exception_class
-            exception_class = a.exception_class or b.exception_class
-            assert exception_class is not None
-            assert issubclass(exception_class, portalocker.LockException)
-        else:
-            assert not a.exception_class
+    assert holder.exitcode == 0
