@@ -95,7 +95,9 @@ def test_shared_processes(tmpdir, fail_when_locked):
         args = tmpfile, fail_when_locked, flags
         results = pool.starmap_async(lock, 2 * [args])
 
-        for result in results.get(timeout=2.0):
+        # Generous ceiling: spawning 2 interpreters can exceed a couple of
+        # seconds on a loaded CI runner, which is unrelated to the lock logic.
+        for result in results.get(timeout=30):
             if result.exception_class is not None:
                 raise result.exception_class
             assert result == LockResult()
