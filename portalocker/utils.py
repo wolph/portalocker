@@ -825,12 +825,22 @@ class BoundedSemaphore(LockBase['Lock | None']):
         for filename in filenames:
             logger.debug('trying lock for %r', filename)
             lock = Lock(filename, fail_when_locked=True)
-            self.lock = lock
             try:
                 lock.acquire()
             except exceptions.AlreadyLocked:
+                # Taken by someone else; try the next candidate file.
+                continue
+            except Exception:
+                # Any other failure (e.g. a missing directory raising
+                # `FileNotFoundError` from the underlying `open`) must not
+                # leave a half-set lock behind, otherwise the
+                # `assert not self.lock` guard in `acquire` would brick the
+                # instance on the next call. Reset and propagate.
                 self.lock = None
+                raise
             else:
+                # Only record the lock once it is actually held.
+                self.lock = lock
                 logger.debug('locked %r', filename)
                 return True
 
