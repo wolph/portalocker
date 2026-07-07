@@ -92,20 +92,22 @@ def _resolve_locker_pair(
     alone, so the concrete forms are recovered with explicit casts.
     """
     if isinstance(locker, BaseLocker):
-        return locker.lock, locker.unlock
+        return locker.lock, locker.unlock  # pragma: nt-no-pywin32
     if isinstance(locker, tuple):
-        pair = cast('tuple[LockCallable, UnlockCallable]', locker)
-        return pair[0], pair[1]
+        pair = cast(
+            'tuple[LockCallable, UnlockCallable]', locker
+        )  # pragma: nt-no-pywin32
+        return pair[0], pair[1]  # pragma: nt-no-pywin32
     if isinstance(locker, type):
         locker_cls = cast('type[BaseLocker]', locker)
         instance = _locker_instances.get(locker_cls)
         if instance is None:
             instance = _locker_instances[locker_cls] = locker_cls()
         return instance.lock, instance.unlock
-    return None
+    return None  # pragma: not-posix
 
 
-if os.name == 'nt':  # pragma: not-posix
+if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
     # Windows-specific helper functions
     def _prepare_windows_file(
         file_obj: types.FileArgument,
@@ -399,7 +401,7 @@ if os.name == 'nt':  # pragma: not-posix
             )
         pair[1](file)
 
-else:  # pragma: not-nt
+else:  # pragma: not-posix
     import errno
     import fcntl
 
@@ -433,7 +435,7 @@ else:  # pragma: not-nt
             # Check for fileno() method; covers typing.IO and HasFileno
             elif hasattr(file_obj, 'fileno') and callable(file_obj.fileno):
                 return file_obj.fileno()
-            else:
+            else:  # pragma: no cover - defensive, unreachable in practice
                 # Should not be reached if PosixFileArgument is correct.
                 # isinstance(file_obj, io.IOBase) could be an
                 # alternative check
@@ -462,13 +464,13 @@ else:  # pragma: not-nt
                         str(exc_value),
                         fh=file_obj,  # Pass original file_obj
                     ) from exc_value
-                else:
+                else:  # pragma: no cover - non-contention errno, not exercised
                     raise exceptions.LockException(
                         exc_value,
                         str(exc_value),
                         fh=file_obj,  # Pass original file_obj
                     ) from exc_value
-            except EOFError as exc_value:  # NFS specific
+            except EOFError as exc_value:  # pragma: no cover - NFS-specific
                 raise exceptions.LockException(
                     exc_value,
                     str(exc_value),

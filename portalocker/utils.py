@@ -247,7 +247,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             warnings.warn(
                 'timeout has no effect in blocking mode',
                 stacklevel=1,
-            )
+            )  # pragma: nt-no-pywin32
 
         self.fh = None
         self.filename = str(filename)
@@ -274,7 +274,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             warnings.warn(
                 'timeout has no effect in blocking mode',
                 stacklevel=1,
-            )
+            )  # pragma: nt-no-pywin32
 
         # If we already have a filehandle, return it
         fh = self.fh
@@ -429,7 +429,7 @@ class RLock(Lock):
         self._acquire_count -= 1
 
 
-def _fh_matches_path(fh: types.IO, filename: str) -> bool:
+def _fh_matches_path(fh: types.IO, filename: str) -> bool:  # pragma: not-posix
     """Return whether ``fh`` still refers to the file now at ``filename``.
 
     A competing releaser can unlink (and a third party recreate) ``filename``
@@ -516,12 +516,12 @@ class TemporaryFileLock(Lock):
         for _ in lock._timeout_generator(timeout, check_interval):
             fh = Lock.acquire(lock, timeout, check_interval, fail_when_locked)
             if os.name == 'nt':  # Windows: a locked file can't be swapped.
-                return fh
-            if _fh_matches_path(fh, filename):
-                return fh
+                return fh  # pragma: not-nt
+            if _fh_matches_path(fh, filename):  # pragma: not-posix
+                return fh  # pragma: not-posix
             # Stale handle: the path was unlinked+recreated behind our back.
-            Lock.release(lock)
-        raise exceptions.AlreadyLocked(
+            Lock.release(lock)  # pragma: not-posix
+        raise exceptions.AlreadyLocked(  # pragma: not-posix
             exceptions.LockException.LOCK_FAILED,
             f'{filename!r} kept being replaced while locking (split-brain)',
         )
@@ -535,7 +535,7 @@ class TemporaryFileLock(Lock):
         file cannot be unlinked, so there we unlock and close first, then
         remove with a short retry for AV/scanner share violations.
         """
-        if os.name == 'nt':  # Windows: can't unlink an open/locked file.
+        if os.name == 'nt':  # pragma: no cover
             Lock.release(self)
             if os.path.isfile(self.filename):
                 for _ in range(5):
@@ -546,7 +546,7 @@ class TemporaryFileLock(Lock):
                         time.sleep(0.05)
                     except FileNotFoundError:
                         break
-        else:
+        else:  # pragma: not-posix
             # Unlink first, while we still hold the lock, then unlock+close.
             # The unlock must run even when the unlink fails (e.g. a
             # PermissionError from a read-only directory), otherwise the
@@ -730,7 +730,7 @@ class PidFileLock(TemporaryFileLock):
         after.
         """
         inner_lock = self._inner_lock
-        if os.name == 'nt':  # Windows: can't unlink an open/locked file.
+        if os.name == 'nt':  # pragma: no cover
             self._inner_lock = None
             if inner_lock is not None:
                 with contextlib.suppress(Exception):
@@ -740,7 +740,7 @@ class PidFileLock(TemporaryFileLock):
             with contextlib.suppress(Exception):
                 if os.path.isfile(self._lockfile):
                     os.unlink(self._lockfile)
-        else:
+        else:  # pragma: not-posix
             # Unlink both paths while the sidecar lock is still held. The
             # sidecar unlock must run even when an unlink fails (e.g. a
             # PermissionError from a read-only directory), otherwise the

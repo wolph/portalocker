@@ -47,6 +47,7 @@ tests = [
     'pytest-cov>=2.8.1',
     'pytest-timeout>=2.1.0',
     'pytest-rerunfailures>=15.1',
+    'coverage-conditional-plugin>=0.9',
     'types-pywin32>=310.0.0.20250429',
 ]
 docs = [
@@ -118,14 +119,13 @@ filterwarnings = [
 branch = true
 relative_files = true
 source = ['portalocker', 'portalocker_tests']
+plugins = ['coverage_conditional_plugin']
 
 [tool.coverage.report]
 fail_under = 100
 ignore_errors = true
 exclude_also = [
     'pragma: no cover',
-    'pragma: not-nt', # posix-only implementation excluded on this OS job
-    'pragma: not-posix', # nt-only implementation excluded on this OS job
     'def __repr__',
     'if self.debug:',
     'if settings.DEBUG',
@@ -138,9 +138,19 @@ exclude_also = [
     'if 0:',
     'if __name__ == .__main__.:', # CLI entry-point guard, not exercised by imports
     'typing.Protocol',
-    'if os\.name', # platform-specific branches combine across OS jobs
-    'if sys\.platform',
 ]
+
+# The `not-nt` / `not-posix` / `nt-no-pywin32` pragmas above are resolved
+# per-OS by coverage-conditional-plugin (see rules below) rather than the
+# static `exclude_also` list, so a POSIX-only branch stays *measured* on POSIX
+# (and is only excluded on the platforms where it cannot run) instead of being
+# hidden everywhere. `os_name` is `os.name`; `is_installed` probes the optional
+# pywin32 extra so the Win32-only dispatch paths are excluded on the
+# pywin32-less Windows cells where they are unreachable.
+[tool.coverage.coverage_conditional_plugin.rules]
+not-nt = "os_name != 'nt'"
+not-posix = "os_name != 'posix'"
+nt-no-pywin32 = "os_name == 'nt' and not is_installed('win32file')"
 
 [tool.mypy]
 python_version = '3.10'
