@@ -242,34 +242,55 @@ class RedisLock(utils.LockBase['RedisLock']):
     ) -> bool | None:
         # Random channel name to get messages back from the lock
         response_channel = f'{self.channel}-{random.random()}'
+        check_interval = min(self.thread_sleep_time, timeout / 10)
 
         pubsub = self._get_pubsub(connection)
-        pubsub.subscribe(response_channel)
-        connection.publish(
-            self.channel,
-            json.dumps(
-                dict(
-                    response_channel=response_channel,
-                    message='ping',
+        try:
+            pubsub.subscribe(response_channel)
+
+            # Consume the subscribe-confirmation message *before* pinging.
+            # Redis queues a confirmation the moment we subscribe; if it were
+            # left in the buffer the poll below would treat it as a pong and
+            # wrongly report the holder as alive. Waiting for it here also
+            # guarantees the subscription is active before we publish, so the
+            # pong sent in response to our ping cannot be dropped.
+            for _ in self._timeout_generator(timeout, check_interval):
+                confirmation = typing.cast(
+                    'dict[str, typing.Any] | None',
+                    pubsub.get_message(timeout=check_interval),
+                )
+                if confirmation and confirmation.get('type') == 'subscribe':
+                    break
+
+            connection.publish(
+                self.channel,
+                json.dumps(
+                    dict(
+                        response_channel=response_channel,
+                        message='ping',
+                    ),
                 ),
-            ),
-        )
+            )
 
-        check_interval = min(self.thread_sleep_time, timeout / 10)
-        for _ in self._timeout_generator(
-            timeout,
-            check_interval,
-        ):  # pragma: no branch
-            if pubsub.get_message(timeout=check_interval):
-                pubsub.close()
-                return True
+            for _ in self._timeout_generator(timeout, check_interval):
+                message = typing.cast(
+                    'dict[str, typing.Any] | None',
+                    pubsub.get_message(timeout=check_interval),
+                )
+                if message and message.get('type') == 'message':
+                    return True
 
-        clients: list[dict[str, str]] = connection.client_list('pubsub')
-        for client_ in clients:
-            if client_.get('name') == self.client_name:
-                logger.warning('Killing unavailable redis client: %r', client_)
-                connection.client_kill_filter(client_.get('id'))
-        return None
+            clients: list[dict[str, str]] = connection.client_list('pubsub')
+            for client_ in clients:
+                if client_.get('name') == self.client_name:
+                    logger.warning(
+                        'Killing unavailable redis client: %r',
+                        client_,
+                    )
+                    connection.client_kill_filter(client_.get('id'))
+            return None
+        finally:
+            pubsub.close()
 
     def release(self) -> None:
         if self.thread:  # pragma: no branch

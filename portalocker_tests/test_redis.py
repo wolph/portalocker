@@ -256,3 +256,130 @@ def test_redis_check_or_kill_lock_kills_unresponsive_client(
 
     assert lock.check_or_kill_lock(connection, timeout=0.01) is None
     assert killed == ['42']
+
+
+class _RecordingPubSub:
+    """Stand-in pubsub that records the order of calls.
+
+    ``get_message`` returns the subscribe confirmation Redis queues on
+    ``subscribe`` (``type='subscribe'``) while *confirm* is set, then a single
+    pong (``type='message'``) while *pong* is set, then ``None`` forever.
+    """
+
+    def __init__(
+        self,
+        calls: list[str],
+        *,
+        confirm: bool = True,
+        pong: bool = False,
+    ) -> None:
+        self._calls = calls
+        self._confirm = confirm
+        self._pong = pong
+        self._confirmed = False
+        self._ponged = False
+
+    def subscribe(self, *channels: str) -> None:
+        self._calls.append('subscribe')
+
+    def get_message(self, timeout: float) -> dict[str, typing.Any] | None:
+        self._calls.append('get_message')
+        if self._confirm and not self._confirmed:
+            self._confirmed = True
+            return {'type': 'subscribe', 'channel': 'c', 'data': 1}
+        if self._pong and not self._ponged:
+            self._ponged = True
+            return {'type': 'message', 'channel': 'c', 'data': '1.0'}
+        return None
+
+    def close(self) -> None:
+        self._calls.append('close')
+
+
+def test_redis_check_or_kill_lock_pings_after_subscribe_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The subscribe confirmation is consumed before the ping is sent.
+
+    The stub yields the subscribe confirmation first and then stays silent.
+    The confirmation must not be counted as a pong (so an unresponsive holder
+    is reaped instead of reported alive) and the ping must only be published
+    once the subscription has been confirmed active.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.001,
+    )
+    calls: list[str] = []
+    killed: list[str | None] = []
+
+    def recording_pubsub(connection: client.Redis) -> _RecordingPubSub:
+        return _RecordingPubSub(calls, confirm=True, pong=False)
+
+    def client_list(client_type: str) -> list[dict[str, str]]:
+        assert client_type == 'pubsub'
+        return [
+            {'id': '42', 'name': lock.client_name},
+            {'id': '43', 'name': 'unrelated-client'},
+        ]
+
+    def client_kill_filter(client_id: str | None) -> None:
+        killed.append(client_id)
+
+    def publish(channel: str, message: str) -> int:
+        calls.append('publish')
+        return 0
+
+    monkeypatch.setattr(lock, '_get_pubsub', recording_pubsub)
+    monkeypatch.setattr(connection, 'client_list', client_list)
+    monkeypatch.setattr(connection, 'client_kill_filter', client_kill_filter)
+    monkeypatch.setattr(connection, 'publish', publish)
+
+    assert lock.check_or_kill_lock(connection, timeout=0.01) is None
+    assert killed == ['42']
+    # Ping published only after the subscribe confirmation was consumed.
+    assert calls.index('subscribe') < calls.index('publish')
+    assert calls.index('publish') > calls.index('get_message')
+    # Pubsub is closed even on the reap branch.
+    assert 'close' in calls
+
+
+@pytest.mark.parametrize(
+    ('confirm', 'pong', 'expected'),
+    [(True, True, True), (False, False, None)],
+)
+def test_redis_check_or_kill_lock_always_closes_pubsub(
+    confirm: bool,
+    pong: bool,
+    expected: bool | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``pubsub.close()`` runs on both the alive and the reap branch."""
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.001,
+    )
+    calls: list[str] = []
+
+    def recording_pubsub(connection: client.Redis) -> _RecordingPubSub:
+        return _RecordingPubSub(calls, confirm=confirm, pong=pong)
+
+    def publish(channel: str, message: str) -> int:
+        return 0
+
+    monkeypatch.setattr(lock, '_get_pubsub', recording_pubsub)
+    monkeypatch.setattr(connection, 'client_list', lambda client_type: [])
+    monkeypatch.setattr(connection, 'publish', publish)
+
+    assert lock.check_or_kill_lock(connection, timeout=0.01) is expected
+    assert calls.count('close') == 1
