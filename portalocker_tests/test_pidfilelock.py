@@ -1,5 +1,6 @@
 """Tests for PidFileLock class."""
 
+import builtins
 import multiprocessing
 import os
 import tempfile
@@ -345,3 +346,42 @@ def test_pidfilelock_release_without_acquire(tmp_path):
     assert lock._inner_lock is None
     assert not os.path.isfile(lock_file)
     assert not os.path.isfile(f'{lock_file}.lock')
+
+
+def test_pidfilelock_releases_sidecar_on_pid_write_failure(
+    tmp_path,
+    monkeypatch,
+):
+    """A4: if writing the PID file fails after the sidecar lock is taken, the
+    sidecar must be released so a fresh lock on the same path can acquire
+    immediately (otherwise the sidecar stays held forever)."""
+    pid_file = tmp_path / 'pidfilelock_writefail.pid'
+    real_open = builtins.open
+    calls = {'count': 0}
+
+    def failing_open(file, *args, **kwargs):
+        # Fail only the first attempt to open the PID data file; the sidecar
+        # (`<pid>.lock`) and every later open must still work.
+        if str(file) == str(pid_file):
+            calls['count'] += 1
+            if calls['count'] == 1:
+                raise OSError('cannot write pid file')
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, 'open', failing_open)
+
+    failing_lock = utils.PidFileLock(str(pid_file))
+    with pytest.raises(OSError, match='cannot write pid file'):
+        failing_lock.acquire()
+
+    # The sidecar reference and lock must be gone.
+    assert failing_lock._inner_lock is None
+    assert not failing_lock._acquired_lock
+
+    # A fresh lock on the same path must acquire without contention.
+    recovered = utils.PidFileLock(str(pid_file))
+    recovered.acquire()
+    try:
+        assert recovered.read_pid() == os.getpid()
+    finally:
+        recovered.release()

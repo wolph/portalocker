@@ -632,30 +632,40 @@ class PidFileLock(TemporaryFileLock):
                 raise exceptions.AlreadyLocked(*exc.args) from exc
             raise
 
-        # Write the current process PID to the public PID file
+        # Write the current process PID to the public PID file. Anything that
+        # fails here must release the sidecar lock we just acquired, otherwise
+        # it stays held forever: `__enter__` surfaces the error and `__exit__`
+        # only cleans up after a *successful* acquire.
         # Use unbuffered OS ops where possible
-        with open(self.filename, 'a+') as f:
-            try:
-                fd2 = f.fileno()
-                os.lseek(fd2, 0, os.SEEK_SET)
+        try:
+            with open(self.filename, 'a+') as f:
                 try:
-                    os.ftruncate(fd2, 0)
+                    fd2 = f.fileno()
+                    os.lseek(fd2, 0, os.SEEK_SET)
+                    try:
+                        os.ftruncate(fd2, 0)
+                    except Exception:  # pragma: no cover - rare
+                        # Fallback for platforms without os.ftruncate (e.g.
+                        # Windows)
+                        f.seek(0)
+                        f.truncate()
+                    os.write(fd2, str(os.getpid()).encode('ascii'))
+                    with contextlib.suppress(Exception):
+                        os.fsync(fd2)
                 except Exception:  # pragma: no cover - rare
-                    # Fallback for platforms without os.ftruncate (e.g.
-                    # Windows)
+                    # Fallback for platforms without os.write/os.lseek (e.g.
+                    # Jython)
                     f.seek(0)
                     f.truncate()
-                os.write(fd2, str(os.getpid()).encode('ascii'))
-                with contextlib.suppress(Exception):
-                    os.fsync(fd2)
-            except Exception:  # pragma: no cover - rare
-                # Fallback for platforms without os.write/os.lseek (e.g.
-                # Jython)
-                f.seek(0)
-                f.truncate()
-                f.write(str(os.getpid()))
-                with contextlib.suppress(Exception):
-                    f.flush()
+                    f.write(str(os.getpid()))
+                    with contextlib.suppress(Exception):
+                        f.flush()
+        except Exception:
+            # Release the sidecar and reset state before propagating.
+            self._inner_lock = None
+            with contextlib.suppress(Exception):
+                inner_lock.release()
+            raise
 
         self._acquired_lock = True
         # No need to keep a direct fh on the PID file; return the lock's fh
