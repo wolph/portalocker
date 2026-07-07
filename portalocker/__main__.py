@@ -5,6 +5,7 @@ import logging
 import pathlib
 import re
 import subprocess
+import sys
 import typing
 
 base_path = pathlib.Path(__file__).parent.parent
@@ -150,7 +151,7 @@ def combine(args: argparse.Namespace) -> None:
         logger.warning(
             'Ruff is not installed. Skipping linting and formatting step.'
         )
-    subprocess.run(['python3', str(output_path)])
+    subprocess.run([sys.executable, str(output_path)])
 
 
 if __name__ == '__main__':

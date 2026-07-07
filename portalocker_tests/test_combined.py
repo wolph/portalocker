@@ -1,7 +1,26 @@
 import importlib
+import subprocess
 import sys
 
 from portalocker import __main__
+
+
+def test_combine_uses_sys_executable(tmp_path, monkeypatch):
+    """B6: the combined-file smoke run must use ``sys.executable``.
+
+    Hardcoding ``python3`` breaks on Windows venvs (no ``python3.exe``).
+    """
+    calls: list[list[str]] = []
+
+    def spy(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, 'run', spy)
+    output_file = tmp_path / 'combined.py'
+    __main__.main(['combine', '--output-file', str(output_file)])
+
+    assert [sys.executable, str(output_file)] in calls
 
 
 def test_combined(tmpdir):
