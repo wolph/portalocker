@@ -2,14 +2,7 @@
 
 from __future__ import annotations
 
-import sys
 from importlib import metadata
-from pathlib import Path
-
-# `portalocker_tests` (autodoc'd by tests.rst) is not part of the installed
-# `portalocker` distribution, only the repo checkout, so it needs the repo
-# root on `sys.path` to be importable here (RTD builds from a full checkout).
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 project = 'portalocker'
 author = 'Rick van Hattem'
