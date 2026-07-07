@@ -110,11 +110,15 @@ if os.name == 'nt':  # pragma: not-posix
     def _prepare_windows_file(
         file_obj: types.FileArgument,
     ) -> tuple[int, typing.IO[Any] | None, int | None]:
-        """Prepare file for Windows: get fd, optionally seek and save pos."""
-        if isinstance(file_obj, int):
-            # Plain file descriptor
-            return file_obj, None, None
+        """Prepare file for Windows: get fd, seek to 0 and save prior pos.
 
+        ``msvcrt.locking`` and ``LockFileEx`` lock a byte range relative to
+        the *current* file position, so every path must seek to byte 0 first
+        for consistent mutual exclusion (otherwise two locks taken at
+        different positions on files larger than the lock length do not
+        conflict). Full IO objects are seeked/restored via ``seek``/``tell``;
+        raw descriptors (``int`` / ``HasFileno``) via ``os.lseek``.
+        """
         # Full IO objects (have tell/seek) -> preserve and restore position
         if isinstance(file_obj, io.IOBase):
             fd: int = file_obj.fileno()
@@ -124,17 +128,34 @@ if os.name == 'nt':  # pragma: not-posix
             return fd, typing.cast(typing.IO[Any], file_obj), original_pos
             # cast satisfies mypy: IOBase -> IO[Any]
 
-        # Fallback: an object that only implements fileno() (HasFileno)
-        fd = typing.cast(types.HasFileno, file_obj).fileno()  # type: ignore[redundant-cast]
-        return fd, None, None
+        # Raw descriptor (int) or an object that only implements fileno()
+        # (HasFileno). There is no Python-level file object to seek, so use
+        # the fd directly and let the caller restore it with os.lseek.
+        if isinstance(file_obj, int):
+            fd = file_obj
+        else:
+            fd = typing.cast(types.HasFileno, file_obj).fileno()  # type: ignore[redundant-cast]
+        original_pos = os.lseek(fd, 0, os.SEEK_CUR)
+        if original_pos != 0:
+            os.lseek(fd, 0, os.SEEK_SET)
+        return fd, None, original_pos
 
     def _restore_windows_file_pos(
+        fd: int,
         file_io_obj: typing.IO[Any] | None,
         original_pos: int | None,
     ) -> None:
-        """Restore file position if it was an IO object and pos was saved."""
-        if file_io_obj and original_pos is not None and original_pos != 0:
+        """Restore a saved file position after a lock/unlock operation.
+
+        IO objects are restored via ``seek``; raw descriptors (no IO object)
+        via ``os.lseek`` on ``fd``.
+        """
+        if original_pos is None or original_pos == 0:
+            return
+        if file_io_obj is not None:
             file_io_obj.seek(original_pos)
+        else:
+            os.lseek(fd, original_pos, os.SEEK_SET)
 
     class Win32Locker(BaseLocker):
         """Locker using Win32 API (LockFileEx/UnlockFileEx)."""
@@ -189,9 +210,16 @@ if os.name == 'nt':  # pragma: not-posix
                         fh=file_obj,  # Pass original file_obj
                     ) from exc_value
                 else:
-                    raise
+                    # Any other Win32 error must still surface as a
+                    # LockException per the documented contract, not as a
+                    # raw pywintypes.error.
+                    raise exceptions.LockException(
+                        exceptions.LockException.LOCK_FAILED,
+                        exc_value.strerror,
+                        fh=file_obj,  # Pass original file_obj
+                    ) from exc_value
             finally:
-                _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+                _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
         def unlock(self, file_obj: types.FileArgument) -> None:
             import pywintypes
@@ -219,7 +247,7 @@ if os.name == 'nt':  # pragma: not-posix
                     fh=file_obj,  # Pass original file_obj
                 ) from exc
             finally:
-                _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+                _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
     class MsvcrtLocker(BaseLocker):
         _win32_locker: Win32Locker | None
@@ -290,7 +318,7 @@ if os.name == 'nt':  # pragma: not-posix
                     fh=file_obj,  # Pass original file_obj
                 ) from exc_value
             finally:
-                _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+                _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
         def unlock(self, file_obj: types.FileArgument) -> None:
             import msvcrt
@@ -318,7 +346,7 @@ if os.name == 'nt':  # pragma: not-posix
                     took_fallback_path = True
                     # Restore position before calling win32_locker,
                     # as it will re-prepare.
-                    _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+                    _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
                     try:
                         win32_locker.unlock(
                             file_obj
@@ -346,7 +374,7 @@ if os.name == 'nt':  # pragma: not-posix
                     ) from exc
             finally:
                 if not took_fallback_path:
-                    _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+                    _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
     LOCKER = MsvcrtLocker
 
