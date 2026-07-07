@@ -6,10 +6,6 @@ portalocker - Cross-platform locking library
     :alt: CI Test Status
     :target: https://github.com/wolph/portalocker/actions/workflows/ci.yml
 
-.. image:: https://coveralls.io/repos/WoLpH/portalocker/badge.svg?branch=master
-    :alt: Coverage Status
-    :target: https://coveralls.io/r/WoLpH/portalocker?branch=master
-
 Overview
 --------
 
