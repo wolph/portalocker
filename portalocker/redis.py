@@ -328,5 +328,5 @@ class RedisLock(utils.LockBase['RedisLock']):
             self.connection.close()
             self.connection = None
 
-    def __del__(self) -> None:
+    def __del__(self) -> None:  # pragma: no cover - best effort cleanup
         self.release()
