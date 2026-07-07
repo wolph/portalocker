@@ -69,6 +69,42 @@ LockerType = (
 
 LOCKER: LockerType
 
+#: Cache of ``BaseLocker`` subclasses instantiated when ``LOCKER`` is a class
+#: rather than an instance. Shared by the Windows and POSIX dispatchers.
+_locker_instances: dict[type[BaseLocker], BaseLocker] = {}
+
+
+def _resolve_locker_pair(
+    locker: object,
+) -> tuple[LockCallable, UnlockCallable] | None:
+    """Resolve the non-callable ``LockerType`` forms to a ``(lock, unlock)``
+    pair.
+
+    Handles the three high-level forms shared by every platform: a
+    ``BaseLocker`` instance, a ``(lock, unlock)`` tuple, and a ``BaseLocker``
+    subclass (instantiated once and cached in :data:`_locker_instances`).
+
+    Returns ``None`` for the plain POSIX-style ``fcntl`` callable, which each
+    platform resolves itself: POSIX applies its own error translation while
+    Windows rejects it. ``locker`` is typed ``object`` because this is a
+    runtime dispatch over the ``LockerType`` union; the type checkers cannot
+    narrow the parameterised ``tuple`` / ``type`` members from ``isinstance``
+    alone, so the concrete forms are recovered with explicit casts.
+    """
+    if isinstance(locker, BaseLocker):
+        return locker.lock, locker.unlock
+    if isinstance(locker, tuple):
+        pair = cast('tuple[LockCallable, UnlockCallable]', locker)
+        return pair[0], pair[1]
+    if isinstance(locker, type):
+        locker_cls = cast('type[BaseLocker]', locker)
+        instance = _locker_instances.get(locker_cls)
+        if instance is None:
+            instance = _locker_instances[locker_cls] = locker_cls()
+        return instance.lock, instance.unlock
+    return None
+
+
 if os.name == 'nt':  # pragma: not-posix
     # Windows-specific helper functions
     def _prepare_windows_file(
@@ -312,58 +348,28 @@ if os.name == 'nt':  # pragma: not-posix
                 if not took_fallback_path:
                     _restore_windows_file_pos(io_obj_ctx, pos_ctx)
 
-    _locker_instances: dict[type[BaseLocker], BaseLocker] = dict()
-
     LOCKER = MsvcrtLocker
 
     def lock(file: types.FileArgument, flags: LockFlags) -> None:
-        if isinstance(LOCKER, BaseLocker):
-            # If LOCKER is a BaseLocker instance, use its lock method
-            locker: Callable[[types.FileArgument, LockFlags], None] = (
-                LOCKER.lock
-            )
-        elif isinstance(LOCKER, tuple):
-            # pyright infers `Unknown` for the narrowed tuple element here
-            locker = LOCKER[0]  # pyright: ignore[reportUnknownVariableType]
-        elif issubclass(LOCKER, BaseLocker):  # type: ignore[arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
-            locker_instance = _locker_instances.get(LOCKER)  # type: ignore[arg-type]
-            if locker_instance is None:
-                # Create an instance of the locker class if not already done
-                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[index,call-arg]
-
-            locker = locker_instance.lock
-        else:
+        pair = _resolve_locker_pair(LOCKER)
+        if pair is None:
+            # Windows has no ``fcntl``-style callable locker.
             raise TypeError(
                 f'LOCKER must be a BaseLocker instance, a tuple of lock and '
                 f'unlock functions, or a subclass of BaseLocker, '
                 f'got {type(LOCKER)}.'
             )
-
-        locker(file, flags)
+        pair[0](file, flags)
 
     def unlock(file: types.FileArgument) -> None:
-        if isinstance(LOCKER, BaseLocker):
-            # If LOCKER is a BaseLocker instance, use its lock method
-            unlocker: Callable[[types.FileArgument], None] = LOCKER.unlock
-        elif isinstance(LOCKER, tuple):
-            # pyright infers `Unknown` for the narrowed tuple element here
-            unlocker = LOCKER[1]  # pyright: ignore[reportUnknownVariableType]
-
-        elif issubclass(LOCKER, BaseLocker):  # type: ignore[arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
-            locker_instance = _locker_instances.get(LOCKER)  # type: ignore[arg-type]
-            if locker_instance is None:
-                # Create an instance of the locker class if not already done
-                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[index,call-arg]
-
-            unlocker = locker_instance.unlock
-        else:
+        pair = _resolve_locker_pair(LOCKER)
+        if pair is None:
             raise TypeError(
                 f'LOCKER must be a BaseLocker instance, a tuple of lock and '
                 f'unlock functions, or a subclass of BaseLocker, '
                 f'got {type(LOCKER)}.'
             )
-
-        unlocker(file)
+        pair[1](file)
 
 else:  # pragma: not-nt
     import errno
@@ -448,12 +454,21 @@ else:  # pragma: not-nt
     class FlockLocker(PosixLocker):
         """FlockLocker is a PosixLocker implementation using fcntl.flock."""
 
-        LOCKER = fcntl.flock
+        # Bind the callable so this locker uses flock regardless of the
+        # module-level ``LOCKER`` fallback. (``fcntl.flock`` is a builtin and
+        # therefore is not bound as a descriptor on attribute access.) The
+        # explicit annotation keeps the type checkers from treating the
+        # class-level callable as a method (which would bind ``self``).
+        _locker: Callable[[int | types.HasFileno, int], Any] | None = (
+            fcntl.flock
+        )
 
     class LockfLocker(PosixLocker):
         """LockfLocker is a PosixLocker implementation using fcntl.lockf."""
 
-        LOCKER = fcntl.lockf
+        _locker: Callable[[int | types.HasFileno, int], Any] | None = (
+            fcntl.lockf
+        )
 
     # LOCKER constant for POSIX is fcntl.flock for backward compatibility.
     # Type matches: Callable[[int | HasFileno, int], Any]
@@ -461,9 +476,20 @@ else:  # pragma: not-nt
 
     _posix_locker_instance = PosixLocker()
 
-    # Public API for POSIX uses the PosixLocker instance
+    # Public API for POSIX supports every ``LockerType`` form. The plain
+    # ``fcntl`` callable is routed through ``_posix_locker_instance`` (fd
+    # extraction, non-blocking validation and error translation); the tuple,
+    # instance and subclass forms are dispatched via ``_resolve_locker_pair``.
     def lock(file: types.FileArgument, flags: LockFlags) -> None:
-        _posix_locker_instance.lock(file, flags)
+        pair = _resolve_locker_pair(LOCKER)
+        if pair is None:
+            _posix_locker_instance.lock(file, flags)
+        else:
+            pair[0](file, flags)
 
     def unlock(file: types.FileArgument) -> None:
-        _posix_locker_instance.unlock(file)
+        pair = _resolve_locker_pair(LOCKER)
+        if pair is None:
+            _posix_locker_instance.unlock(file)
+        else:
+            pair[1](file)
