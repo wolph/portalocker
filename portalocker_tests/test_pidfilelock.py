@@ -192,17 +192,26 @@ def test_custom_parameters():
         assert lock.fail_when_locked is False
 
 
-def _worker_function(lock_file_path, result_queue, should_succeed):
+def _worker_function(
+    lock_file_path,
+    result_queue,
+    should_succeed,
+    acquired_event,
+    release_event,
+):
     """Worker function for multiprocessing tests."""
     try:
         lock = utils.PidFileLock(lock_file_path)
         with lock as result:
             if should_succeed:
-                # We expect to acquire the lock
+                # We hold the lock: announce it and keep holding until the
+                # parent has observed the second process being blocked. This
+                # replaces a fragile ``time.sleep`` hand-off.
                 result_queue.put(('success', result, os.getpid()))
-                time.sleep(0.5)  # Hold the lock briefly
+                acquired_event.set()
+                release_event.wait(timeout=30)
             else:
-                # We expect to get the PID of another process
+                # We expect to get the PID of the process holding the lock.
                 result_queue.put(('blocked', result, os.getpid()))
     except Exception as e:
         result_queue.put(('error', str(e), os.getpid()))
@@ -215,26 +224,31 @@ def test_multiprocess_locking():
         result_queue: multiprocessing.Queue[tuple[str, int | None, int]] = (
             multiprocessing.Queue()
         )
+        acquired = multiprocessing.Event()
+        release = multiprocessing.Event()
 
         # Start first process that should acquire the lock
         p1 = multiprocessing.Process(
-            target=_worker_function, args=(str(lock_file), result_queue, True)
+            target=_worker_function,
+            args=(str(lock_file), result_queue, True, acquired, release),
         )
         p1.start()
 
-        # Give first process time to acquire lock
-        time.sleep(0.1)
+        # Wait until the first process actually holds the lock instead of
+        # guessing with a sleep.
+        assert acquired.wait(timeout=30), 'first process never acquired lock'
 
         # Start second process that should be blocked
         p2 = multiprocessing.Process(
-            target=_worker_function, args=(str(lock_file), result_queue, False)
+            target=_worker_function,
+            args=(str(lock_file), result_queue, False, acquired, release),
         )
         p2.start()
 
         try:
             # Get results from both processes
-            result1 = result_queue.get(timeout=2)
-            result2 = result_queue.get(timeout=2)
+            result1 = result_queue.get(timeout=30)
+            result2 = result_queue.get(timeout=30)
 
             # First process should succeed
             assert result1[0] == 'success'
@@ -246,8 +260,10 @@ def test_multiprocess_locking():
             assert result2[1] == p1_pid  # Should get PID of first process
 
         finally:
-            p1.join(timeout=2)
-            p2.join(timeout=2)
+            # Let the holder release, then shut both processes down.
+            release.set()
+            p1.join(timeout=30)
+            p2.join(timeout=30)
 
             # Clean up any remaining processes
             if p1.is_alive():
