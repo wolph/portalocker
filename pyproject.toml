@@ -86,6 +86,7 @@ ignore = [
     'PC180', # no css/js to format
     'PC190', # manual ruff instead of pre-commit
     'PC901', # no pre-commit CI; lefthook is used instead
+    'PY006', # no pre-commit config; lefthook is used instead
     'MY103', # mypy strict = true is set in [tool.mypy]
 ]
 
@@ -97,8 +98,13 @@ addopts = [
     '--cov-report=term-missing',
     '--cov-fail-under=100',
     '--timeout=20',
+    '--strict-config',
+    '--strict-markers',
+    '-ra',
     '-p', 'no:cacheprovider',
 ]
+log_level = 'INFO'
+xfail_strict = true
 testpaths = ['portalocker', 'portalocker_tests']
 filterwarnings = [
     'error',
