@@ -429,6 +429,23 @@ class RLock(Lock):
         self._acquire_count -= 1
 
 
+def _fh_matches_path(fh: types.IO, filename: str) -> bool:
+    """Return whether ``fh`` still refers to the file now at ``filename``.
+
+    A competing releaser can unlink (and a third party recreate) ``filename``
+    in the window between our ``open`` and our lock, which would leave two
+    processes each holding a lock on a *different* inode for the same name
+    (split-brain). Comparing the handle's inode with the path's inode detects
+    that swap. This is a POSIX-only concern: on Windows a locked file cannot be
+    unlinked, so no swap is possible.
+    """
+    try:
+        return os.fstat(fh.fileno()).st_ino == os.stat(filename).st_ino
+    except FileNotFoundError:
+        # The path was unlinked and not (yet) recreated.
+        return False
+
+
 class TemporaryFileLock(Lock):
     def __init__(
         self,
@@ -460,20 +477,80 @@ class TemporaryFileLock(Lock):
 
         atexit.register(_finalize_release)
 
-    def release(self) -> None:  # pragma: no cover - platform-specific cleanup
-        """Release the file lock and remove the temporary file."""
-        Lock.release(self)
-        # Try to remove file with a short retry loop to avoid transient
-        # Windows share violations from background scanners.
-        if os.path.isfile(self.filename):  # pragma: no branch
-            for _ in range(5):
-                try:
-                    os.unlink(self.filename)
-                    break
-                except PermissionError:  # pragma: no cover - rare on CI
-                    time.sleep(0.05)  # pragma: no cover - timing dependent
-                except FileNotFoundError:  # pragma: no cover - race
-                    break
+    def acquire(
+        self,
+        timeout: float | None = None,
+        check_interval: float | None = None,
+        fail_when_locked: bool | None = None,
+    ) -> typing.IO[typing.Any]:
+        """Acquire the lock, guarding against split-brain path swaps."""
+        return self._acquire_verified(
+            self,
+            self.filename,
+            timeout,
+            check_interval,
+            fail_when_locked,
+        )
+
+    @staticmethod
+    def _acquire_verified(
+        lock: Lock,
+        filename: str,
+        timeout: float | None,
+        check_interval: float | None,
+        fail_when_locked: bool | None,
+    ) -> typing.IO[typing.Any]:
+        """Acquire ``lock`` and confirm the handle still names ``filename``.
+
+        A competing releaser can unlink (and a third party recreate)
+        ``filename`` between our ``open`` and our lock, so two processes could
+        each hold a lock on a different inode for the same name. After locking
+        we verify the handle still points at the current path; on a mismatch we
+        drop the stale handle and re-acquire, bounded by the timeout (no
+        unbounded spin). No-op on Windows, where a locked file cannot be
+        swapped.
+
+        Shared by ``TemporaryFileLock`` and the ``PidFileLock`` sidecar lock so
+        both surfaces get the same guarantee.
+        """
+        for _ in lock._timeout_generator(timeout, check_interval):
+            fh = Lock.acquire(lock, timeout, check_interval, fail_when_locked)
+            if os.name == 'nt':  # Windows: a locked file can't be swapped.
+                return fh
+            if _fh_matches_path(fh, filename):
+                return fh
+            # Stale handle: the path was unlinked+recreated behind our back.
+            Lock.release(lock)
+        raise exceptions.AlreadyLocked(
+            exceptions.LockException.LOCK_FAILED,
+            f'{filename!r} kept being replaced while locking (split-brain)',
+        )
+
+    def release(self) -> None:
+        """Release the file lock and remove the temporary file.
+
+        On POSIX the file is unlinked while the lock is *still held*, so a
+        competing acquirer cannot grab the freshly created path in the window
+        between unlock and unlink (split-brain). On Windows an open/locked
+        file cannot be unlinked, so there we unlock and close first, then
+        remove with a short retry for AV/scanner share violations.
+        """
+        if os.name == 'nt':  # Windows: can't unlink an open/locked file.
+            Lock.release(self)
+            if os.path.isfile(self.filename):
+                for _ in range(5):
+                    try:
+                        os.unlink(self.filename)
+                        break
+                    except PermissionError:
+                        time.sleep(0.05)
+                    except FileNotFoundError:
+                        break
+        else:
+            # Unlink first, while we still hold the lock, then unlock+close.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.filename)
+            Lock.release(self)
 
 
 class PidFileLock(TemporaryFileLock):
@@ -531,10 +608,14 @@ class PidFileLock(TemporaryFileLock):
         )
         self._inner_lock = inner_lock
         try:
-            inner_lock.acquire(
-                timeout=timeout,
-                check_interval=check_interval,
-                fail_when_locked=fail_when_locked,
+            # Reuse the split-brain guard so the sidecar lock gets the same
+            # inode-verification as a direct `TemporaryFileLock`.
+            self._acquire_verified(
+                inner_lock,
+                self._lockfile,
+                timeout,
+                check_interval,
+                fail_when_locked,
             )
         except Exception as exc:
             # Don't leak the (failed) sidecar reference on any error.
@@ -622,18 +703,36 @@ class PidFileLock(TemporaryFileLock):
         return None
 
     def release(self) -> None:
-        """Release the sidecar lock and remove the PID file."""
-        # Release sidecar first
-        if self._inner_lock is not None:
+        """Release the sidecar lock and remove the PID + sidecar files.
+
+        On POSIX both the PID file and the sidecar lock file are unlinked while
+        the sidecar lock is *still held*, so a competing acquirer cannot grab
+        the sidecar path in the window between unlock and unlink (split-brain).
+        The PID file itself carries no OS lock (the sidecar holds it), but it
+        is removed in the same held window for consistency. On Windows the
+        locked sidecar cannot be unlinked, so it is released first and removed
+        after.
+        """
+        inner_lock = self._inner_lock
+        self._inner_lock = None
+        if os.name == 'nt':  # Windows: can't unlink an open/locked file.
+            if inner_lock is not None:
+                with contextlib.suppress(Exception):
+                    inner_lock.release()
             with contextlib.suppress(Exception):
-                self._inner_lock.release()
-            self._inner_lock = None
-        # Then use default behavior to close/unlock any fh and unlink PID file
-        super().release()
-        # Try to remove sidecar file as well
-        with contextlib.suppress(Exception):
-            if os.path.isfile(self._lockfile):
+                os.unlink(self.filename)
+            with contextlib.suppress(Exception):
+                if os.path.isfile(self._lockfile):
+                    os.unlink(self._lockfile)
+        else:
+            # Unlink both paths while the sidecar lock is still held.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.filename)
+            with contextlib.suppress(FileNotFoundError):
                 os.unlink(self._lockfile)
+            if inner_lock is not None:
+                with contextlib.suppress(Exception):
+                    inner_lock.release()
 
 
 class BoundedSemaphore(LockBase['Lock | None']):

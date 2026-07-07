@@ -1,7 +1,10 @@
 import os
 import pathlib
 
+import pytest
+
 import portalocker
+from portalocker import utils
 
 
 def test_temporary_file_lock(tmpfile):
@@ -18,3 +21,92 @@ def test_temporary_file_lock(tmpfile):
     assert not pathlib.Path(tmpfile).exists(), (
         'Lock file should be removed on lock object deletion'
     )
+
+
+def test_fh_matches_path_detects_swap(tmpfile):
+    """A2: the inode helper must accept a live handle and reject a handle
+    whose path was unlinked or recreated behind its back."""
+    fh = open(tmpfile, 'a')  # noqa: SIM115
+    try:
+        assert utils._fh_matches_path(fh, tmpfile) is True
+        # Unlinked: the path no longer exists.
+        os.unlink(tmpfile)
+        assert utils._fh_matches_path(fh, tmpfile) is False
+        # Recreated: the path exists but points at a different inode.
+        pathlib.Path(tmpfile).write_text('')
+        assert utils._fh_matches_path(fh, tmpfile) is False
+    finally:
+        fh.close()
+
+
+def test_temporaryfilelock_unlinks_before_unlock(tmpfile, monkeypatch):
+    """A2: release must unlink the file while the lock is still held (unlink
+    before unlock) to avoid a split-brain window."""
+    events: list[str] = []
+
+    real_unlink = os.unlink
+    real_unlock = portalocker.portalocker.unlock
+
+    def record_unlink(path, *args, **kwargs):
+        events.append('unlink')
+        return real_unlink(path, *args, **kwargs)
+
+    def record_unlock(file_obj, *args, **kwargs):
+        events.append('unlock')
+        return real_unlock(file_obj, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'unlink', record_unlink)
+    monkeypatch.setattr(portalocker.portalocker, 'unlock', record_unlock)
+
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.acquire()
+    lock.release()
+
+    assert events == ['unlink', 'unlock']
+
+
+def test_temporaryfilelock_recovers_from_stale_handle(tmpfile, monkeypatch):
+    """A2: if the locked handle no longer names the current path, acquire must
+    drop it and re-acquire within the timeout."""
+    calls: list[str] = []
+    real_matches = utils._fh_matches_path
+
+    def flaky(fh, filename):
+        calls.append(filename)
+        # The first acquired handle looks stale, the retry is honoured.
+        if len(calls) == 1:
+            return False
+        return real_matches(fh, filename)
+
+    monkeypatch.setattr(utils, '_fh_matches_path', flaky)
+
+    lock = portalocker.TemporaryFileLock(tmpfile, timeout=1.0)
+    fh = lock.acquire()
+    try:
+        assert fh is not None
+        assert len(calls) == 2, 'expected exactly one stale detection + retry'
+        assert os.path.isfile(tmpfile)
+    finally:
+        lock.release()
+    assert not os.path.isfile(tmpfile)
+
+
+def test_temporaryfilelock_gives_up_on_persistent_swap(tmpfile, monkeypatch):
+    """A2: a path that keeps being replaced must surface as AlreadyLocked
+    within the timeout rather than spinning forever."""
+    monkeypatch.setattr(utils, '_fh_matches_path', lambda fh, filename: False)
+
+    lock = portalocker.TemporaryFileLock(tmpfile, timeout=0)
+    with pytest.raises(portalocker.AlreadyLocked):
+        lock.acquire()
+
+
+def test_temporaryfilelock_sequential_cycles(tmpfile):
+    """A2: two lock/release cycles on the same path must both succeed and
+    clean up the file each time."""
+    for _ in range(2):
+        lock = portalocker.TemporaryFileLock(tmpfile)
+        lock.acquire()
+        assert os.path.isfile(tmpfile)
+        lock.release()
+        assert not os.path.isfile(tmpfile)

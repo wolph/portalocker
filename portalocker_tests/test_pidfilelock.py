@@ -301,3 +301,47 @@ def test_pidfilelock_normalizes_plain_lockexception(tmp_path, monkeypatch):
         lock.acquire()
     # The failed sidecar reference must not leak.
     assert lock._inner_lock is None
+
+
+def test_pidfilelock_unlinks_sidecar_before_unlock(tmp_path, monkeypatch):
+    """A2: release must unlink the sidecar lock file while the sidecar lock is
+    still held (unlink before unlock) to avoid a split-brain window."""
+    lock_file = tmp_path / 'pidfilelock_order.pid'
+    sidecar = f'{lock_file}.lock'
+    events: list[tuple[str, str]] = []
+
+    real_unlink = os.unlink
+    real_unlock = portalocker.portalocker.unlock
+
+    def record_unlink(path, *args, **kwargs):
+        events.append(('unlink', str(path)))
+        return real_unlink(path, *args, **kwargs)
+
+    def record_unlock(file_obj, *args, **kwargs):
+        events.append(('unlock', ''))
+        return real_unlock(file_obj, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'unlink', record_unlink)
+    monkeypatch.setattr(portalocker.portalocker, 'unlock', record_unlock)
+
+    lock = utils.PidFileLock(str(lock_file))
+    lock.acquire()
+    lock.release()
+
+    kinds = [kind for kind, _ in events]
+    assert 'unlock' in kinds, 'sidecar lock should be unlocked on release'
+    assert ('unlink', sidecar) in events, 'sidecar file should be unlinked'
+    # The sidecar file must be unlinked before it is unlocked.
+    assert events.index(('unlink', sidecar)) < kinds.index('unlock')
+
+
+def test_pidfilelock_release_without_acquire(tmp_path):
+    """A2: releasing a never-acquired PidFileLock must be a safe no-op even
+    though no sidecar lock is held."""
+    lock_file = tmp_path / 'pidfilelock_no_acquire.pid'
+    lock = utils.PidFileLock(str(lock_file))
+    # No acquire: ``_inner_lock`` is None and neither file exists.
+    lock.release()
+    assert lock._inner_lock is None
+    assert not os.path.isfile(lock_file)
+    assert not os.path.isfile(f'{lock_file}.lock')
