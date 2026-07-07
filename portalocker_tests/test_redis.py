@@ -38,8 +38,11 @@ _LIVE_REDIS: bool = _live_redis_available()
 def set_redis_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(utils, 'DEFAULT_TIMEOUT', 0.0001)
     monkeypatch.setattr(utils, 'DEFAULT_CHECK_INTERVAL', 0.0005)
-    monkeypatch.setattr(redis, 'DEFAULT_UNAVAILABLE_TIMEOUT', 0.01)
-    monkeypatch.setattr(redis, 'DEFAULT_THREAD_SLEEP_TIME', 0.001)
+    # Keep these above the ~15.6ms Windows timer granularity so the real
+    # ping/pong path (exercised now that check_or_kill_lock no longer returns
+    # a false positive) does not flake on coarse-grained clocks.
+    monkeypatch.setattr(redis, 'DEFAULT_UNAVAILABLE_TIMEOUT', 0.2)
+    monkeypatch.setattr(redis, 'DEFAULT_THREAD_SLEEP_TIME', 0.01)
     monkeypatch.setattr(_thread, 'interrupt_main', lambda: None)
 
 
