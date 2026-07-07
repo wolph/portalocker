@@ -548,9 +548,14 @@ class TemporaryFileLock(Lock):
                         break
         else:
             # Unlink first, while we still hold the lock, then unlock+close.
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(self.filename)
-            Lock.release(self)
+            # The unlock must run even when the unlink fails (e.g. a
+            # PermissionError from a read-only directory), otherwise the
+            # error would leave the lock held forever.
+            try:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.filename)
+            finally:
+                Lock.release(self)
 
 
 class PidFileLock(TemporaryFileLock):
@@ -622,8 +627,9 @@ class PidFileLock(TemporaryFileLock):
             self._inner_lock = None
             # `fail_when_locked=True` raises `AlreadyLocked` on the first
             # contention, while a timed-out `fail_when_locked=False` acquire
-            # re-raises the last plain `LockException`. Normalize a plain
-            # contention `LockException` to `AlreadyLocked` so `__enter__` and
+            # re-raises the last plain `LockException` - from contention or
+            # from repeated lock failures (e.g. ENOLCK, NFS quirks). Normalize
+            # any plain `LockException` to `AlreadyLocked` so `__enter__` and
             # callers see one predictable surface; anything else propagates.
             if isinstance(exc, exceptions.LockException) and not isinstance(
                 exc,
@@ -724,8 +730,8 @@ class PidFileLock(TemporaryFileLock):
         after.
         """
         inner_lock = self._inner_lock
-        self._inner_lock = None
         if os.name == 'nt':  # Windows: can't unlink an open/locked file.
+            self._inner_lock = None
             if inner_lock is not None:
                 with contextlib.suppress(Exception):
                     inner_lock.release()
@@ -735,14 +741,22 @@ class PidFileLock(TemporaryFileLock):
                 if os.path.isfile(self._lockfile):
                     os.unlink(self._lockfile)
         else:
-            # Unlink both paths while the sidecar lock is still held.
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(self.filename)
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(self._lockfile)
-            if inner_lock is not None:
-                with contextlib.suppress(Exception):
-                    inner_lock.release()
+            # Unlink both paths while the sidecar lock is still held. The
+            # sidecar unlock must run even when an unlink fails (e.g. a
+            # PermissionError from a read-only directory), otherwise the
+            # error would leave the sidecar held forever. `_inner_lock` is
+            # only cleared once the unlock actually runs, so a failed
+            # release keeps its reference and can be retried.
+            try:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.filename)
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self._lockfile)
+            finally:
+                self._inner_lock = None
+                if inner_lock is not None:
+                    with contextlib.suppress(Exception):
+                        inner_lock.release()
 
 
 class BoundedSemaphore(LockBase['Lock | None']):

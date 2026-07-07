@@ -6,6 +6,14 @@ import pytest
 import portalocker
 from portalocker import utils
 
+# The unlink-before-unlock ordering (and unlink errors surfacing from
+# release) only applies to the POSIX release path; Windows deliberately
+# unlocks first and tolerates unlink failures.
+posix_release_only = pytest.mark.skipif(
+    os.name == 'nt',
+    reason='POSIX-only release ordering',
+)
+
 
 def test_temporary_file_lock(tmpfile):
     """The lock file must be deleted on context exit and GC must close
@@ -39,6 +47,7 @@ def test_fh_matches_path_detects_swap(tmpfile):
         fh.close()
 
 
+@posix_release_only
 def test_temporaryfilelock_unlinks_before_unlock(tmpfile, monkeypatch):
     """A2: release must unlink the file while the lock is still held (unlink
     before unlock) to avoid a split-brain window."""
@@ -63,6 +72,32 @@ def test_temporaryfilelock_unlinks_before_unlock(tmpfile, monkeypatch):
     lock.release()
 
     assert events == ['unlink', 'unlock']
+
+
+@posix_release_only
+def test_temporaryfilelock_unlocks_even_when_unlink_fails(
+    tmpfile,
+    monkeypatch,
+):
+    """Fix round 1: a non-FileNotFoundError unlink failure must still
+    propagate, but the OS lock must be freed regardless — otherwise the
+    error would leave the lock held forever."""
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.acquire()
+
+    def failing_unlink(path, *args, **kwargs):
+        raise PermissionError(f'unlink denied for {path!r}')
+
+    monkeypatch.setattr(os, 'unlink', failing_unlink)
+    with pytest.raises(PermissionError):
+        lock.release()
+    monkeypatch.undo()
+
+    # The unlock ran: a fresh lock on the same path acquires immediately.
+    fresh = portalocker.TemporaryFileLock(tmpfile, timeout=0)
+    fresh.acquire()
+    fresh.release()
+    assert not os.path.isfile(tmpfile)
 
 
 def test_temporaryfilelock_recovers_from_stale_handle(tmpfile, monkeypatch):

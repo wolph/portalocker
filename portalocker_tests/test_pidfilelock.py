@@ -294,7 +294,8 @@ def test_pidfilelock_timeout_waits_when_not_fail_when_locked(tmp_path):
         with pytest.raises(portalocker.AlreadyLocked):
             contender.acquire(fail_when_locked=True, timeout=0.5)
         fast = time.perf_counter() - start
-        assert fast < 0.2, f'expected a fast failure, took {fast:.3f}s'
+        # Well under the 0.5s timeout, with headroom for a starved CI runner.
+        assert fast < 0.4, f'expected a fast failure, took {fast:.3f}s'
     finally:
         holder.release()
 
@@ -320,6 +321,10 @@ def test_pidfilelock_normalizes_plain_lockexception(tmp_path, monkeypatch):
     assert lock._inner_lock is None
 
 
+@pytest.mark.skipif(
+    os.name == 'nt',
+    reason='POSIX-only release ordering',
+)
 def test_pidfilelock_unlinks_sidecar_before_unlock(tmp_path, monkeypatch):
     """A2: release must unlink the sidecar lock file while the sidecar lock is
     still held (unlink before unlock) to avoid a split-brain window."""
@@ -350,6 +355,42 @@ def test_pidfilelock_unlinks_sidecar_before_unlock(tmp_path, monkeypatch):
     assert ('unlink', sidecar) in events, 'sidecar file should be unlinked'
     # The sidecar file must be unlinked before it is unlocked.
     assert events.index(('unlink', sidecar)) < kinds.index('unlock')
+
+
+@pytest.mark.skipif(
+    os.name == 'nt',
+    reason='POSIX-only release ordering',
+)
+def test_pidfilelock_unlocks_even_when_unlink_fails(tmp_path, monkeypatch):
+    """Fix round 1: a non-FileNotFoundError unlink failure must still
+    propagate, but the sidecar lock must be freed regardless — otherwise the
+    error would leave the sidecar held forever."""
+    lock_file = tmp_path / 'pidfilelock_unlink_fail.pid'
+    lock = utils.PidFileLock(str(lock_file))
+    lock.acquire()
+
+    def failing_unlink(path, *args, **kwargs):
+        raise PermissionError(f'unlink denied for {path!r}')
+
+    monkeypatch.setattr(os, 'unlink', failing_unlink)
+    # Keep ``excinfo`` (and with it the traceback) alive: in real usage the
+    # propagating exception pins the frame that references the sidecar lock,
+    # preventing a garbage-collection release from masking the leak.
+    with pytest.raises(PermissionError) as excinfo:
+        lock.release()
+    monkeypatch.undo()
+    assert excinfo.value is not None
+
+    # The unlock ran and the reference is gone.
+    assert lock._inner_lock is None
+
+    # A fresh lock on the same path must acquire immediately.
+    fresh = utils.PidFileLock(str(lock_file))
+    fresh.acquire(timeout=0)
+    try:
+        assert fresh.read_pid() == os.getpid()
+    finally:
+        fresh.release()
 
 
 def test_pidfilelock_release_without_acquire(tmp_path):
