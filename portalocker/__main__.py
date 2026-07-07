@@ -18,6 +18,7 @@ _RELATIVE_IMPORT_RE = re.compile(
     r'^from \.(?P<from>.*?) import (?P<paren>\(?)(?P<names>[^()]+)$',
 )
 _USELESS_ASSIGNMENT_RE = re.compile(r'^(?P<name>\w+) = \1\n$')
+_TYPE_CHECKING_RE = re.compile(r'if (?:typing\.)?TYPE_CHECKING\s*:')
 
 _TEXT_TEMPLATE = """'''
 {}
@@ -60,9 +61,30 @@ def _read_file(  # noqa: C901
     seen_files.add(path)
     paren = False
     from_ = None
+    in_type_checking = False
+    type_checking_indent = 0
     try:
         for line in path.open(encoding='ascii'):
             if '__future__' in line:
+                continue
+
+            stripped = line.lstrip()
+            indent = line[: len(line) - len(stripped)]
+
+            # ``if TYPE_CHECKING:`` blocks are type-only (never executed at
+            # runtime). Emit them verbatim without inlining: inlining their
+            # relative imports would duplicate a module or break the guard
+            # the else-branch relies on.
+            if in_type_checking and (
+                not stripped.strip() or len(indent) > type_checking_indent
+            ):
+                yield _clean_line(line, names)
+                continue
+            in_type_checking = False
+            if not paren and _TYPE_CHECKING_RE.match(stripped):
+                in_type_checking = True
+                type_checking_indent = len(indent)
+                yield _clean_line(line, names)
                 continue
 
             if paren:
@@ -73,22 +95,29 @@ def _read_file(  # noqa: C901
 
                 match = _NAMES_RE.match(line)
             else:
-                match = _RELATIVE_IMPORT_RE.match(line)
+                match = _RELATIVE_IMPORT_RE.match(stripped)
 
             if match:
                 if not paren:
                     paren = bool(match.group('paren'))
                     from_ = match.group('from')
 
+                # An indented relative import (e.g. the optional-redis guard's
+                # ``try`` block) is inlined re-indented so the module lands
+                # inside the guard; a column-0 import inlines at module level.
                 if from_:
                     names.add(from_)
-                    yield from _read_file(src_path / f'{from_}.py', seen_files)
+                    yield from _reindent(
+                        _read_file(src_path / f'{from_}.py', seen_files),
+                        indent,
+                    )
                 else:
                     for name in match.group('names').split(','):
                         name = name.strip()
                         names.add(name)
-                        yield from _read_file(
-                            src_path / f'{name}.py', seen_files
+                        yield from _reindent(
+                            _read_file(src_path / f'{name}.py', seen_files),
+                            indent,
                         )
             else:
                 yield _clean_line(line, names)
@@ -113,6 +142,22 @@ def _clean_line(line: str, names: set[str]) -> str:
 
     # Replace useless assignments (e.g. `spam = spam`)
     return _USELESS_ASSIGNMENT_RE.sub('', line)
+
+
+def _reindent(
+    lines: typing.Iterator[str], indent: str
+) -> typing.Iterator[str]:
+    """Prefix each non-blank inlined line with ``indent``.
+
+    Used when a relative import is itself indented (e.g. the optional-redis
+    guard's ``try`` block): the inlined module is emitted at that indentation
+    so it stays inside the guard while preserving its own relative structure.
+    """
+    if not indent:
+        yield from lines
+        return
+    for line in lines:
+        yield f'{indent}{line}' if line.strip() else line
 
 
 def combine(args: argparse.Namespace) -> None:

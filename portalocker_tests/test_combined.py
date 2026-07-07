@@ -1,6 +1,9 @@
 import importlib
+import importlib.util
 import subprocess
 import sys
+
+import pytest
 
 from portalocker import __main__
 
@@ -38,3 +41,38 @@ def test_combined(tmpdir):
     combined = importlib.import_module('combined')
 
     assert hasattr(combined, 'lock')
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec('redis') is None,
+    reason='requires the optional redis package (always in the tests extra)',
+)
+def test_combined_includes_redis(tmp_path):
+    """B7: the vendored single file must inline redis and bind RedisLock.
+
+    The indented ``from .redis import RedisLock`` in ``__init__.py`` used to
+    survive verbatim into the combined file, where it always ImportErrored,
+    leaving ``RedisLock`` permanently ``None`` even with redis installed.
+    """
+    output_file = tmp_path / 'combined_redis.py'
+    __main__.main(['combine', '--output-file', str(output_file)])
+
+    # Execute the vendored file in a subprocess exactly as a downstream user
+    # importing the single file would (no package context).
+    script = (
+        'import importlib.util;'
+        'spec = importlib.util.spec_from_file_location('
+        f'"vendored", r"{output_file}");'
+        'mod = importlib.util.module_from_spec(spec);'
+        'spec.loader.exec_module(mod);'
+        'assert mod.RedisLock is not None, "RedisLock is None";'
+        'assert callable(mod.lock), "lock is not callable";'
+        'print("OK")'
+    )
+    result = subprocess.run(
+        [sys.executable, '-c', script],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert 'OK' in result.stdout
