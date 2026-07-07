@@ -43,6 +43,35 @@ def test_combined(tmpdir):
     assert hasattr(combined, 'lock')
 
 
+def test_build_extra_creates_versioned_dist():
+    """``build_extra.py`` must work with the path-based ``combine`` interface.
+
+    The release script runs ``build_extra.py`` to emit the versioned single
+    file. It used to hand ``combine()`` an open file object; after ``combine``
+    switched to a ``pathlib.Path`` ``output_file`` (mkdir/open on it) that
+    crashed with ``AttributeError``. Exercise the script exactly as the
+    release flow does and assert the versioned dist file is produced.
+    """
+    from portalocker import __about__
+
+    dist_file = __main__.dist_path / f'portalocker-{__about__.__version__}.py'
+    pre_existing = dist_file.exists()
+    try:
+        result = subprocess.run(
+            [sys.executable, 'build_extra.py'],
+            cwd=__main__.base_path,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert dist_file.exists(), (
+            f'{dist_file} was not created\n{result.stdout}\n{result.stderr}'
+        )
+    finally:
+        if not pre_existing:
+            dist_file.unlink(missing_ok=True)
+
+
 @pytest.mark.skipif(
     importlib.util.find_spec('redis') is None,
     reason='requires the optional redis package (always in the tests extra)',
