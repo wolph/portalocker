@@ -464,3 +464,52 @@ def test_redis_release_keeps_caller_supplied_connection(
 
     assert closed == []
     assert lock.connection is connection
+
+
+class _SubscribeError(Exception):
+    """Raised by the stub pubsub to simulate a failing subscribe."""
+
+
+class _BoomPubSub:
+    """Pubsub whose ``subscribe`` always raises."""
+
+    def subscribe(self, **channels: typing.Any) -> None:
+        raise _SubscribeError('subscribe failed')
+
+    def unsubscribe(self, *channels: str) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_redis_acquire_rolls_back_pubsub_on_subscribe_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing subscribe must not leave the lock half-initialised.
+
+    If ``self.pubsub`` were left set, the ``assert not self.pubsub`` guard at
+    the top of ``acquire`` would turn every retry into an ``AssertionError``
+    instead of surfacing the real error.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.001,
+    )
+
+    monkeypatch.setattr(lock, '_get_pubsub', lambda conn: _BoomPubSub())
+
+    with pytest.raises(_SubscribeError):
+        lock.acquire()
+    assert lock.pubsub is None
+    assert lock.thread is None
+
+    # Retry on the *same* instance must surface the real error again, not an
+    # AssertionError from a stale ``self.pubsub``.
+    with pytest.raises(_SubscribeError):
+        lock.acquire()

@@ -221,18 +221,28 @@ class RedisLock(utils.LockBase['RedisLock']):
                 connection.client_setname(self.client_name)
                 pubsub = self._get_pubsub(connection)
                 self.pubsub = pubsub
-                pubsub.subscribe(**{self.channel: self.channel_handler})
-                self.thread = PubSubWorkerThread(
-                    pubsub,
-                    sleep_time=self.thread_sleep_time,
-                )
-                self.thread.start()
-                time.sleep(0.01)
-                subscribers = self._get_subscriber_count(connection)
+                try:
+                    pubsub.subscribe(**{self.channel: self.channel_handler})
+                    self.thread = PubSubWorkerThread(
+                        pubsub,
+                        sleep_time=self.thread_sleep_time,
+                    )
+                    self.thread.start()
+                    time.sleep(0.01)
+                    subscribers = self._get_subscriber_count(connection)
+                except Exception:
+                    # Roll back so a partially initialised `self.pubsub` /
+                    # `self.thread` cannot brick a retry via the assertion at
+                    # the top of `acquire` (or leak the worker thread).
+                    self.release()
+                    raise
                 if subscribers == 1:  # pragma: no branch
                     return self
                 else:  # pragma: no cover
-                    # Race condition, let's try again
+                    # NOTE: this retry reuses the outer timeout deadline,
+                    # which may already have expired, so a lost race here can
+                    # end the acquire attempt early instead of retrying within
+                    # a fresh window.
                     self.release()
 
             if fail_when_locked:  # pragma: no cover
