@@ -43,6 +43,13 @@
    ``LockException`` per the documented contract
  * ``RedisLock`` tests now run everywhere via ``fakeredis``, with a live
    Redis server still tested in CI
+ * ``Lock.release()`` no longer propagates unlock errors; the file handle is
+   always closed and cleared so a release can never leave a dangling lock
+ * ``TemporaryFileLock`` no longer keeps a strong ``atexit`` reference to
+   itself, so unused instances can be garbage collected; cleanup at
+   interpreter exit still happens via a weak reference
+ * ``NamedBoundedSemaphore`` is now exported from the top-level
+   ``portalocker`` namespace
 
 For newer changes please look at the comments for the Git tags:
 https://github.com/WoLpH/portalocker/tags

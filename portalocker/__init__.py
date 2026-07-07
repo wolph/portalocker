@@ -21,6 +21,10 @@ else:  # pragma: no cover
         # so `portalocker.RedisLock` fails at use time, not import time.
         RedisLock = None
 
+# Only needed during import; keep `portalocker.typing` out of the public
+# namespace (it did not exist before 4.0.0).
+del typing
+
 
 #: The package name on Pypi
 __package_name__ = __about__.__package_name__
