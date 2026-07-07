@@ -459,19 +459,19 @@ else:  # pragma: not-nt
                 if exc_value.errno in (errno.EACCES, errno.EAGAIN):
                     raise exceptions.AlreadyLocked(
                         exc_value,
-                        strerror=str(exc_value),
+                        str(exc_value),
                         fh=file_obj,  # Pass original file_obj
                     ) from exc_value
                 else:
                     raise exceptions.LockException(
                         exc_value,
-                        strerror=str(exc_value),
+                        str(exc_value),
                         fh=file_obj,  # Pass original file_obj
                     ) from exc_value
             except EOFError as exc_value:  # NFS specific
                 raise exceptions.LockException(
                     exc_value,
-                    strerror=str(exc_value),
+                    str(exc_value),
                     fh=file_obj,  # Pass original file_obj
                 ) from exc_value
 

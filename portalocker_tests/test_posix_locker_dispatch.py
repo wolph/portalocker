@@ -99,6 +99,22 @@ def test_dispatch_instance(set_locker, tmpfile):
     _assert_exclusive_conflict(tmpfile)
 
 
+def test_posix_lockexception_has_strerror(set_locker, tmpfile):
+    # B5: the message passed to the exception must populate ``strerror``.
+    set_locker(fcntl.flock)
+    with open(tmpfile, 'a+') as a, open(tmpfile, 'a+') as b:
+        portalocker.lock(a, LockFlags.EXCLUSIVE)
+        try:
+            with pytest.raises(portalocker.AlreadyLocked) as exc_info:
+                portalocker.lock(
+                    b, LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING
+                )
+            assert isinstance(exc_info.value.strerror, str)
+            assert exc_info.value.strerror
+        finally:
+            portalocker.unlock(a)
+
+
 def test_dispatch_class(set_locker, tmpfile):
     # The class form instantiates lazily and caches: lock() creates the
     # instance, unlock() reuses it (covers both cache branches).
