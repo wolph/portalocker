@@ -383,3 +383,40 @@ def test_redis_check_or_kill_lock_always_closes_pubsub(
 
     assert lock.check_or_kill_lock(connection, timeout=0.01) is expected
     assert calls.count('close') == 1
+
+
+def test_redis_acquire_fail_when_locked_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``fail_when_locked`` raises immediately when the holder is alive.
+
+    It must not keep polling until the timeout expires. ``check_or_kill_lock``
+    is stubbed to report the holder alive and is expected to be consulted
+    exactly once before ``AlreadyLocked`` is raised.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.001,
+    )
+    calls: list[float] = []
+
+    def check_or_kill_lock(conn: client.Redis, timeout: float) -> bool:
+        calls.append(timeout)
+        return True
+
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda conn: 1)
+    monkeypatch.setattr(lock, 'check_or_kill_lock', check_or_kill_lock)
+
+    start: float = time.monotonic()
+    with pytest.raises(portalocker.AlreadyLocked):
+        lock.acquire(timeout=1, fail_when_locked=True)
+    elapsed: float = time.monotonic() - start
+
+    # Raised after a single liveness check, not after polling the timeout.
+    assert calls == [lock.unavailable_timeout]
+    assert elapsed < 0.5

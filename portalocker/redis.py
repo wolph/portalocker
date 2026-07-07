@@ -205,7 +205,12 @@ class RedisLock(utils.LockBase['RedisLock']):
                 if self.check_or_kill_lock(
                     connection,
                     self.unavailable_timeout,
-                ):  # pragma: no branch
+                ):
+                    # The holder is alive. When `fail_when_locked` is set we
+                    # must not keep polling until the timeout expires; fail
+                    # immediately as documented.
+                    if fail_when_locked:
+                        raise exceptions.AlreadyLocked()
                     continue
                 else:  # pragma: no cover
                     subscribers = 0
