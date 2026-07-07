@@ -71,6 +71,7 @@ dev = [
 [tool.uv.build-backend]
 module-name = 'portalocker'
 module-root = ''
+source-include = ['CHANGELOG.rst', 'portalocker_tests/**']
 
 [tool.codespell]
 skip = '*.css,*.js,*.lock,./docs/_build,./htmlcov,./.git,./.tox,./.venv'
