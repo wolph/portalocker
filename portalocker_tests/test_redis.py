@@ -420,3 +420,47 @@ def test_redis_acquire_fail_when_locked_fails_fast(
     # Raised after a single liveness check, not after polling the timeout.
     assert calls == [lock.unavailable_timeout]
     assert elapsed < 0.5
+
+
+def test_redis_release_closes_auto_created_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection the lock created itself is closed on release."""
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    assert lock.close_connection is True
+
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    closed: list[bool] = []
+    monkeypatch.setattr(connection, 'close', lambda: closed.append(True))
+    lock.connection = connection
+
+    lock.release()
+
+    assert closed == [True]
+    # Cleared so a later acquire recreates the connection.
+    assert lock.connection is None
+
+
+def test_redis_release_keeps_caller_supplied_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller-supplied connection is never closed by the lock."""
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    closed: list[bool] = []
+    monkeypatch.setattr(connection, 'close', lambda: closed.append(True))
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+    )
+    assert lock.close_connection is False
+
+    lock.release()
+
+    assert closed == []
+    assert lock.connection is connection

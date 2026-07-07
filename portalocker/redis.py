@@ -312,5 +312,11 @@ class RedisLock(utils.LockBase['RedisLock']):
             self.pubsub.close()
             self.pubsub = None
 
+        # Only close connections we created ourselves; caller-supplied ones
+        # are left untouched. Clear it so a later acquire recreates it.
+        if self.close_connection and self.connection is not None:
+            self.connection.close()
+            self.connection = None
+
     def __del__(self) -> None:
         self.release()
