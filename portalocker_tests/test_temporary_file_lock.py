@@ -1,3 +1,4 @@
+import gc
 import os
 import pathlib
 
@@ -14,6 +15,15 @@ posix_release_only = pytest.mark.skipif(
     reason='POSIX-only release ordering',
 )
 
+# The inode-based split-brain guard (`_fh_matches_path` and the
+# unlink+recreate detection it enables) is POSIX-only: on Windows a locked
+# file cannot be unlinked, so `_fh_matches_path` returns True unconditionally
+# and there is no swap to detect. These tests exercise that POSIX semantics.
+posix_inode_only = pytest.mark.skipif(
+    os.name == 'nt',
+    reason='POSIX-only inode verification; _fh_matches_path is a no-op on nt',
+)
+
 
 def test_temporary_file_lock(tmpfile):
     """The lock file must be deleted on context exit and GC must close
@@ -26,11 +36,15 @@ def test_temporary_file_lock(tmpfile):
     lock = portalocker.TemporaryFileLock(tmpfile)
     lock.acquire()
     del lock
+    # CPython removes the file via refcount-driven `__del__`, but PyPy defers
+    # finalizers, so force a collection to run them before asserting.
+    gc.collect()
     assert not pathlib.Path(tmpfile).exists(), (
         'Lock file should be removed on lock object deletion'
     )
 
 
+@posix_inode_only
 def test_fh_matches_path_detects_swap(tmpfile):
     """A2: the inode helper must accept a live handle and reject a handle
     whose path was unlinked or recreated behind its back."""
@@ -100,6 +114,7 @@ def test_temporaryfilelock_unlocks_even_when_unlink_fails(
     assert not os.path.isfile(tmpfile)
 
 
+@posix_inode_only
 def test_temporaryfilelock_recovers_from_stale_handle(tmpfile, monkeypatch):
     """A2: if the locked handle no longer names the current path, acquire must
     drop it and re-acquire within the timeout."""
@@ -126,6 +141,7 @@ def test_temporaryfilelock_recovers_from_stale_handle(tmpfile, monkeypatch):
     assert not os.path.isfile(tmpfile)
 
 
+@posix_inode_only
 def test_temporaryfilelock_gives_up_on_persistent_swap(tmpfile, monkeypatch):
     """A2: a path that keeps being replaced must surface as AlreadyLocked
     within the timeout rather than spinning forever."""

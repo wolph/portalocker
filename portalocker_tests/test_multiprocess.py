@@ -1,6 +1,8 @@
 import dataclasses
+import importlib.util
 import multiprocessing
 import multiprocessing.synchronize
+import os
 import platform
 import time
 
@@ -8,6 +10,15 @@ import pytest
 
 import portalocker
 from portalocker import LockFlags
+
+# On Windows without the optional pywin32 extra, shared locks are unsupported
+# by design and raise ImportError (in the *spawned* children). Skip in the
+# parent before spawning so the children are never started in that config.
+_needs_win32_extra = pytest.mark.skipif(
+    os.name == 'nt' and importlib.util.find_spec('win32file') is None,
+    reason='shared locks on Windows require the pywin32 extra '
+    '(portalocker[win32])',
+)
 
 
 @dataclasses.dataclass(order=True)
@@ -81,6 +92,7 @@ def exclusive_lock(filename, **kwargs):
         return True
 
 
+@_needs_win32_extra
 @pytest.mark.parametrize('fail_when_locked', [True, False])
 @pytest.mark.skipif(
     'pypy' in platform.python_implementation().lower(),
