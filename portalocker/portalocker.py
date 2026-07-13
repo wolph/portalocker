@@ -6,11 +6,21 @@
 """Module portalocker.
 
 This module provides cross-platform file locking functionality.
-The Windows implementation now supports two variants:
 
-  1. A default method using the Win32 API (win32file.LockFileEx/UnlockFileEx).
-  2. An alternative that uses msvcrt.locking for exclusive locks (shared
-     locks still use the Win32 API).
+On POSIX systems locking is provided by ``fcntl.flock`` (or ``fcntl.lockf``
+via :class:`LockfLocker`), with no extra dependencies.
+
+On Windows the default locker is :class:`MsvcrtLocker`, which needs no
+extra dependencies for *exclusive* locks (it uses the built-in ``msvcrt``
+module). *Shared* locks require the Win32 API
+(``win32file.LockFileEx``/``UnlockFileEx``) provided by the optional
+``pywin32`` package, installable through the ``win32`` extra::
+
+    pip install "portalocker[win32]"
+
+Without ``pywin32``, acquiring a shared lock on Windows raises
+``ImportError``. :class:`Win32Locker` can be used directly to lock through
+the Win32 API exclusively; it always requires ``pywin32``.
 
 This version uses classes to encapsulate locking logic, while maintaining
 the original external API, including the LOCKER constant for specific
@@ -170,8 +180,8 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                 import pywintypes
             except ImportError as e:
                 raise ImportError(
-                    'pywintypes is required for Win32Locker but not '
-                    'found. Please install pywin32.'
+                    'Win32Locker requires the win32 extra (pywin32). '
+                    'Install it with: pip install "portalocker[win32]"'
                 ) from e
             self._overlapped = pywintypes.OVERLAPPED()
 
@@ -252,6 +262,14 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                 _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
     class MsvcrtLocker(BaseLocker):
+        """Default Windows locker, based on ``msvcrt.locking``.
+
+        Exclusive locks work without any extra dependencies. Shared locks
+        are delegated to :class:`Win32Locker` and therefore require the
+        optional ``pywin32`` package (``pip install "portalocker[win32]"``);
+        without it, acquiring a shared lock raises ``ImportError``.
+        """
+
         _win32_locker: Win32Locker | None
         _msvcrt_lock_length: int = 0x10000
 
@@ -286,7 +304,7 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                     raise ImportError(
                         'Shared locks on Windows require the win32 extra '
                         '(pywin32); msvcrt provides no true shared lock. '
-                        'Install it with: pip install portalocker[win32]'
+                        'Install it with: pip install "portalocker[win32]"'
                     )
                 win32_api_flags = LockFlags(0)
                 if flags & LockFlags.NON_BLOCKING:
@@ -342,7 +360,9 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                         # original msvcrt unlock failure instead.
                         raise exceptions.LockException(
                             exceptions.LockException.LOCK_FAILED,
-                            exc.strerror,
+                            f'{exc.strerror} (the win32 unlock fallback '
+                            f'is unavailable without pywin32; install it '
+                            f'with: pip install "portalocker[win32]")',
                             fh=file_obj,
                         ) from exc
                     took_fallback_path = True

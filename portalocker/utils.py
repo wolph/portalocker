@@ -205,6 +205,10 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         check_interval: check interval while waiting
         fail_when_locked: after the initial lock failed, return an error
             or lock the file. This does not wait for the timeout.
+        flags: the locking flags. Note that shared locks
+            (``LockFlags.SHARED``) on Windows require the optional
+            ``pywin32`` package (``pip install "portalocker[win32]"``);
+            without it, acquiring a shared lock raises ``ImportError``.
         **file_open_kwargs: The kwargs for the `open(...)` call
 
     fail_when_locked is useful when multiple threads/processes can race

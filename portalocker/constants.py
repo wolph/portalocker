@@ -4,7 +4,9 @@ Locking constants
 Lock types:
 
 - `EXCLUSIVE` exclusive lock
-- `SHARED` shared lock
+- `SHARED` shared lock. Note: on Windows this requires the optional
+  ``pywin32`` package (``pip install "portalocker[win32]"``); without it,
+  acquiring a shared lock raises ``ImportError``.
 
 Lock flags:
 
@@ -55,7 +57,7 @@ else:  # pragma: no cover
 class LockFlags(enum.IntFlag):
     #: exclusive lock
     EXCLUSIVE = LOCK_EX
-    #: shared lock
+    #: shared lock (on Windows this requires the ``win32`` extra: pywin32)
     SHARED = LOCK_SH
     #: non-blocking
     NON_BLOCKING = LOCK_NB

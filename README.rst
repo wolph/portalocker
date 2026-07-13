@@ -22,13 +22,21 @@ recommended however. For more information about the subject:
  - http://stackoverflow.com/questions/39292051/portalocker-does-not-seem-to-lock
  - https://stackoverflow.com/questions/12062466/mandatory-file-lock-on-linux
 
-On Windows, exclusive locks work out of the box without any extra
-dependencies using the built-in `msvcrt` module. Shared locks on Windows
-require the optional `pywin32` dependency, which can be installed with:
+Windows and the ``pywin32`` dependency
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Since version 4.0.0, ``pywin32`` is no longer installed automatically on
+Windows. Exclusive locks work out of the box without any extra
+dependencies using the built-in `msvcrt` module. Shared locks
+(``LockFlags.SHARED``) on Windows require the optional `pywin32`
+dependency, which can be installed through the ``win32`` extra:
 
 ::
 
     pip install "portalocker[win32]"
+
+Attempting to acquire a shared lock on Windows without `pywin32` raises an
+``ImportError`` explaining this requirement.
 
 The module is currently maintained by Rick van Hattem <Wolph@wol.ph>.
 The project resides at https://github.com/WoLpH/portalocker . Bugs and feature
