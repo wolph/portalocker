@@ -538,7 +538,16 @@ class TemporaryFileLock(Lock):
         between unlock and unlink (split-brain). On Windows an open/locked
         file cannot be unlinked, so there we unlock and close first, then
         remove with a short retry for AV/scanner share violations.
+
+        Releasing an object that holds nothing is a no-op: a stale object
+        (double release, or garbage collection of a failed acquire calling
+        ``__del__``) must never unlink the path out from under the current
+        holder.
         """
+        if self.fh is None:
+            # Not holding the lock; the path (if any) belongs to another
+            # holder now.
+            return
         if os.name == 'nt':  # pragma: no cover
             Lock.release(self)
             if os.path.isfile(self.filename):
@@ -732,13 +741,20 @@ class PidFileLock(TemporaryFileLock):
         is removed in the same held window for consistency. On Windows the
         locked sidecar cannot be unlinked, so it is released first and removed
         after.
+
+        Releasing an object that does not hold the sidecar is a no-op: a
+        stale object (double release, or garbage collection of a failed
+        acquire calling ``__del__``) must never unlink the PID or sidecar
+        files out from under the current holder.
         """
         inner_lock = self._inner_lock
+        if inner_lock is None:
+            # Not holding the sidecar; the files belong to another holder.
+            return
         if os.name == 'nt':  # pragma: no cover
             self._inner_lock = None
-            if inner_lock is not None:
-                with contextlib.suppress(Exception):
-                    inner_lock.release()
+            with contextlib.suppress(Exception):
+                inner_lock.release()
             with contextlib.suppress(Exception):
                 os.unlink(self.filename)
             with contextlib.suppress(Exception):
@@ -758,9 +774,8 @@ class PidFileLock(TemporaryFileLock):
                     os.unlink(self._lockfile)
             finally:
                 self._inner_lock = None
-                if inner_lock is not None:
-                    with contextlib.suppress(Exception):
-                        inner_lock.release()
+                with contextlib.suppress(Exception):
+                    inner_lock.release()
 
 
 class BoundedSemaphore(LockBase['Lock | None']):

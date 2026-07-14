@@ -161,3 +161,30 @@ def test_temporaryfilelock_sequential_cycles(tmpfile):
         assert os.path.isfile(tmpfile)
         lock.release()
         assert not os.path.isfile(tmpfile)
+
+
+def test_temporaryfilelock_release_without_ownership_keeps_file(tmpfile):
+    """#115: releasing a lock object that holds nothing must not unlink the
+    path - a stale object (double release or GC of a failed acquire) would
+    otherwise destroy the current holder's lock file."""
+    stale = portalocker.TemporaryFileLock(tmpfile)
+    stale.acquire()
+    stale.release()
+
+    holder = portalocker.TemporaryFileLock(tmpfile)
+    holder.acquire()
+    try:
+        # Double release of the stale object must be a no-op.
+        stale.release()
+        assert os.path.isfile(tmpfile), 'stale release unlinked a held path'
+
+        # A never-acquired object (the __del__-after-failed-acquire path)
+        # must be a no-op too.
+        never_acquired = portalocker.TemporaryFileLock(tmpfile)
+        never_acquired.release()
+        assert os.path.isfile(tmpfile), (
+            'never-acquired release unlinked a held path'
+        )
+    finally:
+        holder.release()
+    assert not os.path.isfile(tmpfile)

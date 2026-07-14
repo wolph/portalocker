@@ -45,6 +45,10 @@
    Redis server still tested in CI
  * ``Lock.release()`` no longer propagates unlock errors; the file handle is
    always closed and cleared so a release can never leave a dangling lock
+ * ``TemporaryFileLock.release()`` and ``PidFileLock.release()`` are now
+   no-ops when the object does not hold the lock, so a stale object (double
+   release, or garbage collection of a failed acquire) can no longer unlink
+   the lock file out from under the current holder (#115)
  * ``TemporaryFileLock`` no longer keeps a strong ``atexit`` reference to
    itself, so unused instances can be garbage collected; cleanup at
    interpreter exit still happens via a weak reference

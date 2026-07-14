@@ -442,3 +442,29 @@ def test_pidfilelock_releases_sidecar_on_pid_write_failure(
         assert recovered.read_pid() == os.getpid()
     finally:
         recovered.release()
+
+
+def test_pidfilelock_release_without_ownership_keeps_files(tmp_path):
+    """#115: a stale PidFileLock (double release or GC'd failed acquire)
+    must not unlink the PID file or sidecar out from under the holder."""
+    pid_file = str(tmp_path / 'stale.pid')
+
+    stale = utils.PidFileLock(pid_file)
+    stale.acquire()
+    stale.release()
+
+    holder = utils.PidFileLock(pid_file)
+    holder.acquire()
+    try:
+        stale.release()
+        assert os.path.isfile(pid_file), 'stale release unlinked the pid file'
+
+        never_acquired = utils.PidFileLock(pid_file)
+        never_acquired.release()
+        assert os.path.isfile(pid_file), (
+            'never-acquired release unlinked the pid file'
+        )
+        assert holder.read_pid() == os.getpid()
+    finally:
+        holder.release()
+    assert not os.path.isfile(pid_file)
