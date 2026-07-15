@@ -1,5 +1,3 @@
-import typing
-
 from . import __about__, constants, exceptions, portalocker
 from .utils import (
     BoundedSemaphore,
@@ -11,19 +9,12 @@ from .utils import (
     open_atomic,
 )
 
-if typing.TYPE_CHECKING:
+try:
     from .redis import RedisLock
-else:  # pragma: no cover
-    try:
-        from .redis import RedisLock
-    except ImportError:
-        # `redis` is an optional dependency; keep the attribute importable
-        # so `portalocker.RedisLock` fails at use time, not import time.
-        RedisLock = None
-
-# Only needed during import; keep `portalocker.typing` out of the public
-# namespace (it did not exist before 4.0.0).
-del typing
+except ImportError:  # pragma: no cover
+    # `redis` is an optional dependency; keep the attribute importable so
+    # `portalocker.RedisLock` fails at use time, not import time.
+    RedisLock = None  # type: ignore[assignment,misc]  # ty: ignore[invalid-assignment]
 
 
 #: The package name on Pypi

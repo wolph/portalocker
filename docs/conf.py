@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import datetime
 from importlib import metadata
 
 project = 'portalocker'
 author = 'Rick van Hattem'
-copyright = f'2001-2026, {author}'
+copyright = (
+    f'2001-{datetime.datetime.now(tz=datetime.timezone.utc):%Y}, {author}'
+)
 release = metadata.version('portalocker')
 version = '.'.join(release.split('.')[:2])
 

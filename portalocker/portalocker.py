@@ -132,6 +132,7 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
         raw descriptors (``int`` / ``HasFileno``) via ``os.lseek``.
         """
         # Full IO objects (have tell/seek) -> preserve and restore position
+        original_pos: int | None
         if isinstance(file_obj, io.IOBase):
             fd: int = file_obj.fileno()
             original_pos = file_obj.tell()
@@ -147,9 +148,16 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
             fd = file_obj
         else:
             fd = typing.cast(types.HasFileno, file_obj).fileno()  # type: ignore[redundant-cast]
-        original_pos = os.lseek(fd, 0, os.SEEK_CUR)
-        if original_pos != 0:
-            os.lseek(fd, 0, os.SEEK_SET)
+        # A raw fd may be non-seekable (a pipe, socket or standard stream),
+        # where os.lseek raises OSError ("Illegal seek"). Such fds have no
+        # meaningful position to normalize, so skip the seek and record no
+        # position to restore.
+        try:
+            original_pos = os.lseek(fd, 0, os.SEEK_CUR)
+            if original_pos != 0:
+                os.lseek(fd, 0, os.SEEK_SET)
+        except OSError:
+            original_pos = None
         return fd, None, original_pos
 
     def _restore_windows_file_pos(
