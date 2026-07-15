@@ -35,5 +35,6 @@ uv.lock
 .aider*
 .aider-desk/
 .superpowers/
+.worktrees/
 gpgit/
 docs/_build/
