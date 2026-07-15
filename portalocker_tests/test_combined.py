@@ -105,3 +105,32 @@ def test_combined_includes_redis(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert 'OK' in result.stdout
+
+
+def test_combine_emits_type_checking_block_verbatim(tmp_path):
+    """The bundler must emit ``if TYPE_CHECKING:`` blocks verbatim rather
+    than inlining their relative imports (which would duplicate a module or
+    break the runtime guard the else-branch relies on).
+
+    Exercised directly through ``_read_file`` with a synthetic module so the
+    behaviour is covered regardless of whether any shipped module currently
+    uses a ``TYPE_CHECKING`` guard.
+    """
+    module = tmp_path / 'synthetic.py'
+    module.write_text(
+        'import typing\n'
+        'if typing.TYPE_CHECKING:\n'
+        '    from .redis import RedisLock\n'
+        '\n'
+        'value = 1\n',
+        encoding='ascii',
+    )
+
+    output = ''.join(__main__._read_file(module, set()))
+
+    # The guarded relative import is emitted as-is, not inlined.
+    assert 'from .redis import RedisLock' in output
+    # ... so redis.py's contents are not pulled in.
+    assert 'class RedisLock' not in output
+    # The dedented line after the block resumes normal handling.
+    assert 'value = 1' in output
