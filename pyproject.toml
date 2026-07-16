@@ -6,7 +6,7 @@ requires = ['uv_build>=0.11,<0.12']
 name = 'portalocker'
 version = '4.0.0'
 dynamic = []
-description = 'Wraps the portalocker recipe for easy usage'
+description = 'Cross-platform file locking, with Redis, PID-file and bounded-semaphore locks'
 readme = 'README.rst'
 requires-python = '>=3.10'
 license = 'BSD-3-Clause'
@@ -38,7 +38,9 @@ documentation = 'https://portalocker.readthedocs.io/en/latest/'
 repository = 'https://github.com/wolph/portalocker/'
 
 [project.optional-dependencies]
-redis = ['redis']
+# redis-py has shipped inline type hints (py.typed) since 5.0, which
+# replaced the external types-redis stubs this package used to depend on.
+redis = ['redis>=5.0']
 win32 = ["pywin32>=226; platform_system == 'Windows'"]
 tests = [
     'portalocker[redis]',
@@ -182,3 +184,5 @@ python-version = '3.10'
 [tool.ty.src]
 include = ['portalocker', 'portalocker_tests']
 
+[tool.uv]
+exclude-newer = "14 days"
