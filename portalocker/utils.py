@@ -91,7 +91,8 @@ def open_atomic(
     else:
         path = pathlib.Path(filename)
 
-    assert not path.exists(), f'{path!r} exists'
+    if path.exists():
+        raise AssertionError(f'{path!r} exists')
 
     # Create the parent directory if it doesn't exist
     path.parent.mkdir(parents=True, exist_ok=True)
