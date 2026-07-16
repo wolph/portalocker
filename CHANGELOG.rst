@@ -23,7 +23,7 @@
  * Fixed a ``TemporaryFileLock``/``PidFileLock`` unlock-then-unlink race that
    could let two processes hold the same lock (split-brain); release now
    unlinks before unlocking on POSIX and acquire re-verifies file identity
-   (inode) after locking
+   (inode) after locking (#115)
  * Fixed ``BoundedSemaphore`` staying permanently "Already locked" after a
    non-contention error (e.g. a missing directory)
  * Fixed ``RedisLock`` crashed-holder detection: the liveness check was
@@ -48,7 +48,7 @@
  * ``TemporaryFileLock.release()`` and ``PidFileLock.release()`` are now
    no-ops when the object does not hold the lock, so a stale object (double
    release, or garbage collection of a failed acquire) can no longer unlink
-   the lock file out from under the current holder (#115)
+   the lock file out from under the current holder
  * ``TemporaryFileLock`` no longer keeps a strong ``atexit`` reference to
    itself, so unused instances can be garbage collected; cleanup at
    interpreter exit still happens via a weak reference
@@ -122,4 +122,3 @@ https://github.com/WoLpH/portalocker/commits/master
 0.1:
 
  * Initial release
-
