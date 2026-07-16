@@ -58,6 +58,8 @@ this process acquired the lock:
 
 .. code-block:: python
 
+    import portalocker
+
     with portalocker.PidFileLock('worker.pid') as holder_pid:
         if holder_pid is None:
             run_singleton_worker()
@@ -67,6 +69,8 @@ this process acquired the lock:
 Use ``fail_closed()`` when the protected body must only run after acquisition:
 
 .. code-block:: python
+
+    import portalocker
 
     try:
         with portalocker.PidFileLock('worker.pid').fail_closed():

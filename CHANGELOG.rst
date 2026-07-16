@@ -11,10 +11,10 @@
    bare ``OSError`` text to a 2-tuple repr
  * ``LockBase`` is now generic over the acquire return type (typing-only
    change; downstream ``Lock`` subclasses are unaffected)
-* Added ``PidFileLock`` for pidfile-based locking (#106)
-* Added ``PidFileLock.fail_closed()`` for ownership-only contexts; contention
-  raises ``AlreadyLocked`` before entering the body and exposes the competing
-  PID through ``AlreadyLocked.holder_pid`` when readable (#118)
+ * Added ``PidFileLock`` for pidfile-based locking (#106)
+ * Added ``PidFileLock.fail_closed()`` for ownership-only contexts; contention
+   raises ``AlreadyLocked`` before entering the body and exposes the competing
+   PID through ``AlreadyLocked.holder_pid`` when readable (#118)
  * Packaging switched to the ``uv_build`` backend; releases are published to
    PyPI through GitHub Actions Trusted Publishing
  * ``python -m portalocker combine``: ``--output-file`` now opens lazily;

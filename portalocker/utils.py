@@ -704,12 +704,16 @@ class PidFileLock(TemporaryFileLock):
             pass
         return None
 
-    # `PidFileLock` deliberately breaks the `Lock.__enter__` contract: it
-    # reports the competing PID instead of returning a filehandle.
     def fail_closed(self) -> contextlib.AbstractContextManager[None]:
-        """Return a context that enters only after acquiring this lock."""
+        """Return a context that enters only after acquiring this lock.
+
+        :raises AlreadyLocked: if another process holds the lock. Its
+            ``holder_pid`` attribute contains the competing PID when readable.
+        """
         return _PidFileLockFailClosedContext(self)
 
+    # `PidFileLock` deliberately breaks the `Lock.__enter__` contract: it
+    # reports the competing PID instead of returning a filehandle.
     def __enter__(self) -> int | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]
         """
         Context manager entry that returns:
