@@ -106,9 +106,11 @@ def test_pidfilelock_fail_closed_missing_holder_pid(
     try:
         contender: utils.PidFileLock = utils.PidFileLock(str(pid_file))
         exc_info: pytest.ExceptionInfo[portalocker.AlreadyLocked]
-        with pytest.raises(portalocker.AlreadyLocked) as exc_info:
-            with contender.fail_closed():
-                body_entered = True
+        with (
+            pytest.raises(portalocker.AlreadyLocked) as exc_info,
+            contender.fail_closed(),
+        ):
+            body_entered = True
 
         assert not body_entered
         assert exc_info.value.holder_pid is None
@@ -127,9 +129,11 @@ def test_pidfilelock_fail_closed_reports_holder_pid(
     try:
         contender: utils.PidFileLock = utils.PidFileLock(str(pid_file))
         exc_info: pytest.ExceptionInfo[portalocker.AlreadyLocked]
-        with pytest.raises(portalocker.AlreadyLocked) as exc_info:
-            with contender.fail_closed():
-                body_entered = True
+        with (
+            pytest.raises(portalocker.AlreadyLocked) as exc_info,
+            contender.fail_closed(),
+        ):
+            body_entered = True
 
         assert not body_entered
         assert exc_info.value.holder_pid == os.getpid()

@@ -29,8 +29,6 @@ class LockException(BaseLockException):
 
 
 class AlreadyLocked(LockException):
-    holder_pid: int | None
-
     def __init__(
         self,
         *args: typing.Any,
