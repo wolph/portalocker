@@ -106,7 +106,7 @@ def open_atomic(
         os.fsync(temp_fh.fileno())
 
     try:
-        os.rename(temp_fh.name, path)
+        os.link(temp_fh.name, path)
     finally:
         with contextlib.suppress(Exception):
             os.remove(temp_fh.name)
