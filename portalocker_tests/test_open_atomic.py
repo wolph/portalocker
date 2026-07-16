@@ -5,6 +5,7 @@ import pathlib
 import subprocess
 import sys
 import textwrap
+import typing
 
 import pytest
 
@@ -17,7 +18,8 @@ def test_open_atomic_publishes_without_leaving_temporary_file(
     target: pathlib.Path = tmp_path / 'destination.bin'
     entries_before: set[pathlib.Path] = set(tmp_path.iterdir())
 
-    with portalocker.open_atomic(target) as temporary:
+    with portalocker.open_atomic(target) as file_handle:
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
         written: int = temporary.write(b'published payload')
         assert written == len(b'published payload')
 
@@ -40,7 +42,11 @@ def test_open_atomic_cleans_temporary_file_after_link_error(
     monkeypatch.setattr(os, 'link', fail_link)
 
     with pytest.raises(OSError, match='link publication failed'):
-        with portalocker.open_atomic(target) as temporary:
+        with portalocker.open_atomic(target) as file_handle:
+            temporary: typing.BinaryIO = typing.cast(
+                typing.BinaryIO,
+                file_handle,
+            )
             written: int = temporary.write(b'unpublished payload')
             assert written == len(b'unpublished payload')
 
@@ -102,7 +108,11 @@ def test_open_atomic_preserves_destination_created_before_publication(
     entries_before: set[pathlib.Path] = set(tmp_path.iterdir())
 
     with pytest.raises(FileExistsError):
-        with portalocker.open_atomic(target) as temporary:
+        with portalocker.open_atomic(target) as file_handle:
+            temporary: typing.BinaryIO = typing.cast(
+                typing.BinaryIO,
+                file_handle,
+            )
             written: int = temporary.write(b'temporary payload')
             assert written == len(b'temporary payload')
             target.write_bytes(b'concurrent winner')
