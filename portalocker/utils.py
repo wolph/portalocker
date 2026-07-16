@@ -209,6 +209,8 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             (``LockFlags.SHARED``) on Windows require the optional
             ``pywin32`` package (``pip install "portalocker[win32]"``);
             without it, acquiring a shared lock raises ``ImportError``.
+        raise_on_release_error: raise cleanup errors after both unlocking and
+            closing have been attempted. Disabled by default for compatibility.
         **file_open_kwargs: The kwargs for the `open(...)` call
 
     fail_when_locked is useful when multiple threads/processes can race
@@ -227,6 +229,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
     check_interval: float
     fail_when_locked: bool
     flags: constants.LockFlags
+    raise_on_release_error: bool
     file_open_kwargs: dict[str, typing.Any]
 
     def __init__(
@@ -237,6 +240,8 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = DEFAULT_FAIL_WHEN_LOCKED,
         flags: constants.LockFlags = LOCK_METHOD,
+        *,
+        raise_on_release_error: bool = False,
         **file_open_kwargs: typing.Any,
     ) -> None:
         if 'w' in mode:
@@ -258,6 +263,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         self.mode = mode
         self.truncate = truncate
         self.flags = flags
+        self.raise_on_release_error = raise_on_release_error
         self.file_open_kwargs = file_open_kwargs
         super().__init__(timeout, check_interval, fail_when_locked)
 
@@ -335,18 +341,30 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         return self.acquire()
 
     def release(self) -> None:
-        """Releases the currently locked file handle"""
-        if self.fh:
+        """Release the currently locked file handle."""
+        fh = self.fh
+        if fh:
+            release_errors: list[Exception] = []
             # On Windows, closing the handle also releases the lock. Ensure we
             # always close, even if unlock raises due to edge cases when
             # preparing/restoring file position.
             try:
-                with contextlib.suppress(Exception):
-                    portalocker.unlock(self.fh)
+                try:
+                    portalocker.unlock(fh)
+                except Exception as exception:
+                    release_errors.append(exception)
             finally:
-                with contextlib.suppress(Exception):
-                    self.fh.close()
+                try:
+                    fh.close()
+                except Exception as exception:
+                    release_errors.append(exception)
                 self.fh = None
+
+            if self.raise_on_release_error and release_errors:
+                primary_error: Exception = release_errors[0]
+                if len(release_errors) > 1:
+                    raise primary_error from release_errors[1]
+                raise primary_error
 
     def _get_fh(self) -> types.IO:
         """Get a new filehandle"""
