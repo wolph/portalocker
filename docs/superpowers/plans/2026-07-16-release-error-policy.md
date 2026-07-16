@@ -321,13 +321,13 @@ Add after `Lock.__enter__()`:
             previous_context = exc_value.__context__
             release_error.__context__ = previous_context
             exc_value.__context__ = release_error
-            add_note: typing.Callable[[str], None] | None = getattr(
-                exc_value,
-                'add_note',
-                None,
+            exception_notes: list[str] = typing.cast(
+                list[str],
+                exc_value.__dict__.setdefault('__notes__', []),
             )
-            if add_note is not None:
-                add_note(f'portalocker release failed: {release_error!r}')
+            exception_notes.append(
+                f'portalocker release failed: {release_error!r}',
+            )
         return None
 ```
 
