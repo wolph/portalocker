@@ -29,7 +29,16 @@ class LockException(BaseLockException):
 
 
 class AlreadyLocked(LockException):
-    pass
+    holder_pid: int | None
+
+    def __init__(
+        self,
+        *args: typing.Any,
+        holder_pid: int | None = None,
+        **kwargs: typing.Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.holder_pid: int | None = holder_pid
 
 
 class FileToLarge(LockException):
