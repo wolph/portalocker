@@ -4,6 +4,7 @@ import typing
 
 import pytest
 
+import portalocker.portalocker as portalocker_module
 from portalocker import types, utils
 
 
@@ -45,7 +46,7 @@ def set_unlock(
         if error is not None:
             raise error
 
-    monkeypatch.setattr(utils.portalocker, 'unlock', unlock)
+    monkeypatch.setattr(portalocker_module, 'unlock', unlock)
 
 
 def test_release_suppresses_errors_by_default(
@@ -130,9 +131,8 @@ def test_strict_context_exit_raises_release_error(
     set_unlock(monkeypatch, events, unlock_error)
 
     exc_info: pytest.ExceptionInfo[OSError]
-    with pytest.raises(OSError) as exc_info:
-        with lock:
-            pass
+    with pytest.raises(OSError) as exc_info, lock:
+        pass
 
     assert exc_info.value is unlock_error
     assert events == ['unlock', 'close']
@@ -149,10 +149,16 @@ def test_strict_context_preserves_body_error(
     set_unlock(monkeypatch, events, unlock_error)
 
     exc_info: pytest.ExceptionInfo[ValueError]
-    with pytest.raises(ValueError) as exc_info:
-        with lock:
-            raise body_error
+    with pytest.raises(ValueError) as exc_info, lock:
+        raise body_error
 
     assert exc_info.value is body_error
     assert exc_info.value.__context__ is unlock_error
+    exception_notes: list[str] = typing.cast(
+        list[str],
+        exc_info.value.__dict__['__notes__'],
+    )
+    assert exception_notes == [
+        "portalocker release failed: OSError('unlock failed')",
+    ]
     assert events == ['unlock', 'close']
