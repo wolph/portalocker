@@ -23,6 +23,11 @@ class ReleaseHandle:
             raise self.close_error
 
 
+class BrokenReprError(OSError):
+    def __repr__(self) -> str:
+        raise RuntimeError('repr failed')
+
+
 def make_lock(
     handle: ReleaseHandle,
     *,
@@ -159,6 +164,96 @@ def test_strict_context_preserves_body_error(
         exc_info.value.__dict__['__notes__'],
     )
     assert exception_notes == [
-        "portalocker release failed: OSError('unlock failed')",
+        'portalocker release failed; see exception context',
     ]
+    assert events == ['unlock', 'close']
+
+
+def test_strict_context_preserves_body_when_release_repr_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    body_error: ValueError = ValueError('body failed')
+    unlock_error: BrokenReprError = BrokenReprError('unlock failed')
+    handle: ReleaseHandle = ReleaseHandle(events)
+    lock: utils.Lock = make_lock(handle, raise_on_release_error=True)
+    set_unlock(monkeypatch, events, unlock_error)
+
+    exc_info: pytest.ExceptionInfo[ValueError]
+    with pytest.raises(ValueError) as exc_info, lock:
+        raise body_error
+
+    assert exc_info.value is body_error
+    assert exc_info.value.__context__ is unlock_error
+
+
+def test_strict_context_preserves_body_when_notes_are_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    body_error: ValueError = ValueError('body failed')
+    body_error.__dict__['__notes__'] = 'invalid'
+    unlock_error: OSError = OSError('unlock failed')
+    handle: ReleaseHandle = ReleaseHandle(events)
+    lock: utils.Lock = make_lock(handle, raise_on_release_error=True)
+    set_unlock(monkeypatch, events, unlock_error)
+
+    exc_info: pytest.ExceptionInfo[ValueError]
+    with pytest.raises(ValueError) as exc_info, lock:
+        raise body_error
+
+    assert exc_info.value is body_error
+    assert exc_info.value.__context__ is unlock_error
+
+
+def test_repeated_release_is_noop_after_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    handle: ReleaseHandle = ReleaseHandle(events)
+    lock: utils.Lock = make_lock(handle, raise_on_release_error=True)
+    set_unlock(monkeypatch, events)
+
+    lock.release()
+    lock.release()
+
+    assert events == ['unlock', 'close']
+
+
+def test_repeated_release_is_noop_after_strict_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    unlock_error: OSError = OSError('unlock failed')
+    handle: ReleaseHandle = ReleaseHandle(events)
+    lock: utils.Lock = make_lock(handle, raise_on_release_error=True)
+    set_unlock(monkeypatch, events, unlock_error)
+
+    exc_info: pytest.ExceptionInfo[OSError]
+    with pytest.raises(OSError) as exc_info:
+        lock.release()
+    lock.release()
+
+    assert exc_info.value is unlock_error
+    assert events == ['unlock', 'close']
+
+
+def test_strict_context_retains_unlock_and_close_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    body_error: ValueError = ValueError('body failed')
+    unlock_error: OSError = OSError('unlock failed')
+    close_error: OSError = OSError('close failed')
+    handle: ReleaseHandle = ReleaseHandle(events, close_error)
+    lock: utils.Lock = make_lock(handle, raise_on_release_error=True)
+    set_unlock(monkeypatch, events, unlock_error)
+
+    exc_info: pytest.ExceptionInfo[ValueError]
+    with pytest.raises(ValueError) as exc_info, lock:
+        raise body_error
+
+    assert exc_info.value is body_error
+    assert exc_info.value.__context__ is unlock_error
+    assert unlock_error.__cause__ is close_error
     assert events == ['unlock', 'close']
