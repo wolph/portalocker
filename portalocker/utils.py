@@ -356,13 +356,10 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             previous_context: BaseException | None = exc_value.__context__
             release_error.__context__ = previous_context
             exc_value.__context__ = release_error
-            exception_notes: list[str] = typing.cast(
-                list[str],
-                exc_value.__dict__.setdefault('__notes__', []),
-            )
-            exception_notes.append(
-                f'portalocker release failed: {release_error!r}',
-            )
+            with contextlib.suppress(Exception):
+                exc_value.add_note(  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
+                    'portalocker release failed; see exception context',
+                )
         return None
 
     def release(self) -> None:
