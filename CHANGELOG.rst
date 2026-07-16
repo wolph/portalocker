@@ -43,8 +43,10 @@
    ``LockException`` per the documented contract
  * ``RedisLock`` tests now run everywhere via ``fakeredis``, with a live
    Redis server still tested in CI
- * ``Lock.release()`` no longer propagates unlock errors; the file handle is
-   always closed and cleared so a release can never leave a dangling lock
+ * ``Lock.release()`` continues suppressing unlock and close errors by default;
+   closing is always attempted and the file handle reference is cleared.
+   Callers can opt into reporting cleanup failures with
+   ``Lock(..., raise_on_release_error=True)`` (#117)
  * ``TemporaryFileLock.release()`` and ``PidFileLock.release()`` are now
    no-ops when the object does not hold the lock, so a stale object (double
    release, or garbage collection of a failed acquire) can no longer unlink
@@ -122,4 +124,3 @@ https://github.com/WoLpH/portalocker/commits/master
 0.1:
 
  * Initial release
-
