@@ -624,6 +624,33 @@ class PidFileLock(TemporaryFileLock):
             raise
         pid_file.close()
 
+    def _rollback_failed_acquire(
+        self,
+        inner_lock: Lock,
+    ) -> Exception | None:
+        """Release a failed sidecar and return any secondary cleanup error."""
+        cleanup_error: Exception | None = None
+        try:
+            inner_lock.release()
+        except Exception as error:
+            cleanup_error = error
+
+        fh: types.IO | None = inner_lock.fh
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception as close_error:
+                if cleanup_error is None:
+                    cleanup_error = close_error
+                else:
+                    cleanup_error.__cause__ = close_error
+            finally:
+                inner_lock.fh = None
+
+        self._inner_lock = None
+        self._acquired_lock = False
+        return cleanup_error
+
     def acquire(
         self,
         timeout: float | None = None,
@@ -674,10 +701,12 @@ class PidFileLock(TemporaryFileLock):
 
         try:
             self._write_pid()
-        except Exception:
-            self._inner_lock = None
-            with contextlib.suppress(Exception):
-                inner_lock.release()
+        except Exception as error:
+            cleanup_error: Exception | None = self._rollback_failed_acquire(
+                inner_lock,
+            )
+            if cleanup_error is not None:
+                raise error from cleanup_error
             raise
 
         self._acquired_lock = True
