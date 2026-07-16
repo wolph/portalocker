@@ -688,6 +688,69 @@ def test_pidfilelock_uses_emergency_close_error_when_release_leaves_handle(
     recovered.release()
 
 
+def test_pidfilelock_preserves_pid_close_error_after_rollback_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#116: rollback causes retain the earlier PID-close failure."""
+    pid_file: Path = tmp_path / 'pidfilelock_all_cleanup_failures.pid'
+    real_open: typing.Callable[..., typing.TextIO] = typing.cast(
+        typing.Callable[..., typing.TextIO],
+        builtins.open,
+    )
+    cleanup_error: RuntimeError = RuntimeError('cleanup failed')
+    sidecar_handles: list[typing.IO[typing.Any]] = []
+
+    def failing_open(
+        file: typing.Any,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> typing.TextIO:
+        wrapped: typing.TextIO = real_open(file, *args, **kwargs)
+        if str(file) != str(pid_file):
+            return wrapped
+        return typing.cast(
+            typing.TextIO,
+            _FailingPidFile(wrapped, {'write', 'close'}),
+        )
+
+    def failing_release(lock: utils.Lock) -> None:
+        assert lock.fh is not None
+        wrapped: typing.IO[typing.Any] = lock.fh
+        sidecar_handles.append(wrapped)
+        lock.fh = typing.cast(
+            typing.TextIO,
+            _FailingPidFile(
+                typing.cast(typing.TextIO, wrapped),
+                {'close'},
+            ),
+        )
+        raise cleanup_error
+
+    monkeypatch.setattr(builtins, 'open', failing_open)
+    monkeypatch.setattr(utils.Lock, 'release', failing_release)
+
+    failing_lock: utils.PidFileLock = utils.PidFileLock(str(pid_file))
+    with pytest.raises(OSError, match=r'^write failed$') as exc_info:
+        failing_lock.acquire()
+
+    assert exc_info.value.__cause__ is cleanup_error
+    sidecar_close_error: BaseException | None = cleanup_error.__cause__
+    assert isinstance(sidecar_close_error, OSError)
+    assert str(sidecar_close_error) == 'close failed'
+    pid_close_error: BaseException | None = sidecar_close_error.__cause__
+    assert isinstance(pid_close_error, OSError)
+    assert str(pid_close_error) == 'close failed'
+    assert sidecar_handles[0].closed
+    assert failing_lock._inner_lock is None
+    assert not failing_lock._acquired_lock
+
+    monkeypatch.undo()
+    recovered: utils.PidFileLock = utils.PidFileLock(str(pid_file))
+    recovered.acquire(timeout=0)
+    recovered.release()
+
+
 def test_pidfilelock_release_without_ownership_keeps_files(tmp_path):
     """#115: a stale PidFileLock (double release or GC'd failed acquire)
     must not unlink the PID file or sidecar out from under the holder."""
