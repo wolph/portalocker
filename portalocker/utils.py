@@ -60,12 +60,17 @@ def open_atomic(
     filename: Filename,
     binary: bool = True,
 ) -> collections.abc.Generator[types.IO]:
-    """Open a file for atomic writing. Instead of locking this method allows
-    you to write the entire file and move it to the actual location. Note that
-    this makes the assumption that a rename is atomic on your platform which
-    is generally the case but not a guarantee.
+    """Open a new file for atomic writing without replacing an existing file.
 
-    http://docs.python.org/library/os.html#os.rename
+    The destination must not exist when entering or publishing the context. If
+    another actor creates it while the context is open, publication raises
+    :class:`FileExistsError` and leaves that destination untouched.
+
+    The implementation writes and synchronizes a temporary file in the
+    destination directory, then publishes it with an atomic hard link. The
+    filesystem must support hard links.
+
+    https://docs.python.org/3/library/os.html#os.link
 
     >>> filename = 'test_file.txt'
     >>> if os.path.exists(filename):
