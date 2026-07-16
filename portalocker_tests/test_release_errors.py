@@ -118,3 +118,41 @@ def test_strict_release_chains_close_error_to_unlock_error(
     assert exc_info.value.__cause__ is close_error
     assert events == ['unlock', 'close']
     assert lock.fh is None
+
+
+def test_strict_context_exit_raises_release_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    unlock_error: OSError = OSError('unlock failed')
+    handle: ReleaseHandle = ReleaseHandle(events)
+    lock: utils.Lock = make_lock(handle, raise_on_release_error=True)
+    set_unlock(monkeypatch, events, unlock_error)
+
+    exc_info: pytest.ExceptionInfo[OSError]
+    with pytest.raises(OSError) as exc_info:
+        with lock:
+            pass
+
+    assert exc_info.value is unlock_error
+    assert events == ['unlock', 'close']
+
+
+def test_strict_context_preserves_body_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    body_error: ValueError = ValueError('body failed')
+    unlock_error: OSError = OSError('unlock failed')
+    handle: ReleaseHandle = ReleaseHandle(events)
+    lock: utils.Lock = make_lock(handle, raise_on_release_error=True)
+    set_unlock(monkeypatch, events, unlock_error)
+
+    exc_info: pytest.ExceptionInfo[ValueError]
+    with pytest.raises(ValueError) as exc_info:
+        with lock:
+            raise body_error
+
+    assert exc_info.value is body_error
+    assert exc_info.value.__context__ is unlock_error
+    assert events == ['unlock', 'close']

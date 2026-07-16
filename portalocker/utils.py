@@ -340,6 +340,31 @@ class Lock(LockBase[typing.IO[typing.Any]]):
     def __enter__(self) -> typing.IO[typing.Any]:
         return self.acquire()
 
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: typing.Any,
+    ) -> bool | None:
+        if not self.raise_on_release_error or exc_value is None:
+            self.release()
+            return None
+
+        try:
+            self.release()
+        except Exception as release_error:
+            previous_context: BaseException | None = exc_value.__context__
+            release_error.__context__ = previous_context
+            exc_value.__context__ = release_error
+            add_note: typing.Callable[[str], None] | None = getattr(
+                exc_value,
+                'add_note',
+                None,
+            )
+            if add_note is not None:
+                add_note(f'portalocker release failed: {release_error!r}')
+        return None
+
     def release(self) -> None:
         """Release the currently locked file handle."""
         fh = self.fh
