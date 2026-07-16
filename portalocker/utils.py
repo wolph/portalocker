@@ -796,7 +796,6 @@ class _PidFileLockFailClosedContext(
         except exceptions.AlreadyLocked as exc:
             exc.holder_pid = self._lock.read_pid()
             raise
-        return None
 
     def __exit__(
         self,
