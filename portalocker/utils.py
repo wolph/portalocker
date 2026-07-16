@@ -706,6 +706,10 @@ class PidFileLock(TemporaryFileLock):
 
     # `PidFileLock` deliberately breaks the `Lock.__enter__` contract: it
     # reports the competing PID instead of returning a filehandle.
+    def fail_closed(self) -> contextlib.AbstractContextManager[None]:
+        """Return a context that enters only after acquiring this lock."""
+        return _PidFileLockFailClosedContext(self)
+
     def __enter__(self) -> int | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]
         """
         Context manager entry that returns:
@@ -776,6 +780,27 @@ class PidFileLock(TemporaryFileLock):
                 self._inner_lock = None
                 with contextlib.suppress(Exception):
                     inner_lock.release()
+
+
+class _PidFileLockFailClosedContext(
+    contextlib.AbstractContextManager[None],
+):
+    """Fail-closed context adapter for :class:`PidFileLock`."""
+
+    def __init__(self, lock: PidFileLock) -> None:
+        self._lock: PidFileLock = lock
+
+    def __enter__(self) -> None:
+        self._lock.acquire()
+        return None
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: typing.Any,
+    ) -> bool | None:
+        return self._lock.__exit__(exc_type, exc_value, traceback)
 
 
 class BoundedSemaphore(LockBase['Lock | None']):

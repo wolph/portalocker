@@ -1,6 +1,7 @@
 """Tests for PidFileLock class."""
 
 import builtins
+import contextlib
 import multiprocessing
 import os
 import tempfile
@@ -12,6 +13,15 @@ import pytest
 
 import portalocker
 from portalocker import utils
+
+
+def _pidfilelock_context_types(
+    lock: utils.PidFileLock,
+) -> tuple[
+    contextlib.AbstractContextManager[int | None],
+    contextlib.AbstractContextManager[None],
+]:
+    return lock, lock.fail_closed()
 
 
 def test_pidfilelock_creation():
@@ -65,6 +75,23 @@ def test_pidfilelock_context_manager_success():
 
         assert lock_released
         assert file_cleaned
+
+
+def test_pidfilelock_fail_closed_context_manager_success(
+    tmp_path: Path,
+) -> None:
+    pid_file: Path = tmp_path / 'fail_closed_success.pid'
+    lock: utils.PidFileLock = utils.PidFileLock(str(pid_file))
+
+    with lock.fail_closed():
+        is_acquired: bool = lock._acquired_lock
+        assert is_acquired
+        assert lock.read_pid() == os.getpid()
+
+    is_released: bool = not lock._acquired_lock
+    assert is_released
+    assert not pid_file.exists()
+    assert not Path(f'{pid_file}.lock').exists()
 
 
 def test_pidfilelock_context_manager_already_locked():
