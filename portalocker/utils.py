@@ -791,7 +791,11 @@ class _PidFileLockFailClosedContext(
         self._lock: PidFileLock = lock
 
     def __enter__(self) -> None:
-        self._lock.acquire()
+        try:
+            self._lock.acquire()
+        except exceptions.AlreadyLocked as exc:
+            exc.holder_pid = self._lock.read_pid()
+            raise
         return None
 
     def __exit__(

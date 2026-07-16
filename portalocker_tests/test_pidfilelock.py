@@ -116,6 +116,27 @@ def test_pidfilelock_fail_closed_missing_holder_pid(
         holder.release()
 
 
+def test_pidfilelock_fail_closed_reports_holder_pid(
+    tmp_path: Path,
+) -> None:
+    pid_file: Path = tmp_path / 'fail_closed_holder_pid.pid'
+    holder: utils.PidFileLock = utils.PidFileLock(str(pid_file))
+    holder.acquire()
+
+    body_entered: bool = False
+    try:
+        contender: utils.PidFileLock = utils.PidFileLock(str(pid_file))
+        exc_info: pytest.ExceptionInfo[portalocker.AlreadyLocked]
+        with pytest.raises(portalocker.AlreadyLocked) as exc_info:
+            with contender.fail_closed():
+                body_entered = True
+
+        assert not body_entered
+        assert exc_info.value.holder_pid == os.getpid()
+    finally:
+        holder.release()
+
+
 def test_pidfilelock_context_manager_already_locked():
     """Test context manager when another process holds the lock."""
     with tempfile.TemporaryDirectory() as tmpdir:
