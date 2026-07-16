@@ -706,6 +706,12 @@ class PidFileLock(TemporaryFileLock):
                 inner_lock,
             )
             if cleanup_error is not None:
+                publication_cause: BaseException | None = error.__cause__
+                if publication_cause is not None:
+                    cause_tail: BaseException = cleanup_error
+                    while cause_tail.__cause__ is not None:
+                        cause_tail = cause_tail.__cause__
+                    cause_tail.__cause__ = publication_cause
                 raise error from cleanup_error
             raise
 
