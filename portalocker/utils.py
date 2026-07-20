@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import atexit
+import collections.abc
 import contextlib
 import logging
 import os
@@ -58,7 +59,7 @@ def coalesce(*args: typing.Any, test_value: typing.Any = None) -> typing.Any:
 def open_atomic(
     filename: Filename,
     binary: bool = True,
-) -> typing.Iterator[types.IO]:
+) -> collections.abc.Generator[types.IO]:
     """Open a file for atomic writing. Instead of locking this method allows
     you to write the entire file and move it to the actual location. Note that
     this makes the assumption that a rename is atomic on your platform which
@@ -111,7 +112,16 @@ def open_atomic(
             os.remove(temp_fh.name)
 
 
-class LockBase(abc.ABC):  # pragma: no cover
+#: The type returned by `LockBase.acquire` and, through it, by
+#: `LockBase.__enter__`. Locks that guard a file return the opened
+#: filehandle, others return whatever fits their locking model.
+AcquireReturnT = typing.TypeVar('AcquireReturnT')
+
+
+class LockBase(  # pragma: no cover
+    abc.ABC,
+    typing.Generic[AcquireReturnT],
+):
     #: timeout when trying to acquire a lock
     timeout: float
     #: check interval while waiting for `timeout`
@@ -138,7 +148,7 @@ class LockBase(abc.ABC):  # pragma: no cover
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.AnyStr]: ...
+    ) -> AcquireReturnT: ...
 
     def _timeout_generator(
         self,
@@ -163,7 +173,7 @@ class LockBase(abc.ABC):  # pragma: no cover
     @abc.abstractmethod
     def release(self) -> None: ...
 
-    def __enter__(self) -> typing.IO[typing.AnyStr]:
+    def __enter__(self) -> AcquireReturnT:
         return self.acquire()
 
     def __exit__(
@@ -175,7 +185,7 @@ class LockBase(abc.ABC):  # pragma: no cover
         self.release()
         return None
 
-    def __delete__(self, instance: LockBase) -> None:
+    def __delete__(self, instance: LockBase[AcquireReturnT]) -> None:
         instance.release()
 
     # Ensure cleanup on garbage collection as tests rely on this behaviour
@@ -184,7 +194,7 @@ class LockBase(abc.ABC):  # pragma: no cover
             self.release()
 
 
-class Lock(LockBase):
+class Lock(LockBase[typing.IO[typing.Any]]):
     """Lock manager with built-in timeout
 
     Args:
@@ -195,6 +205,10 @@ class Lock(LockBase):
         check_interval: check interval while waiting
         fail_when_locked: after the initial lock failed, return an error
             or lock the file. This does not wait for the timeout.
+        flags: the locking flags. Note that shared locks
+            (``LockFlags.SHARED``) on Windows require the optional
+            ``pywin32`` package (``pip install "portalocker[win32]"``);
+            without it, acquiring a shared lock raises ``ImportError``.
         **file_open_kwargs: The kwargs for the `open(...)` call
 
     fail_when_locked is useful when multiple threads/processes can race
@@ -237,7 +251,7 @@ class Lock(LockBase):
             warnings.warn(
                 'timeout has no effect in blocking mode',
                 stacklevel=1,
-            )
+            )  # pragma: nt-no-pywin32
 
         self.fh = None
         self.filename = str(filename)
@@ -252,7 +266,7 @@ class Lock(LockBase):
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.AnyStr]:
+    ) -> typing.IO[typing.Any]:
         """Acquire the locked filehandle"""
 
         fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
@@ -264,13 +278,12 @@ class Lock(LockBase):
             warnings.warn(
                 'timeout has no effect in blocking mode',
                 stacklevel=1,
-            )
+            )  # pragma: nt-no-pywin32
 
         # If we already have a filehandle, return it
         fh = self.fh
         if fh:
-            # Due to type invariance we need to cast the type
-            return typing.cast(typing.IO[typing.AnyStr], fh)
+            return fh
 
         # Get a new filehandler
         fh = self._get_fh()
@@ -316,9 +329,9 @@ class Lock(LockBase):
         fh = self._prepare_fh(fh)
 
         self.fh = fh
-        return typing.cast(typing.IO[typing.AnyStr], fh)
+        return fh
 
-    def __enter__(self) -> typing.IO[typing.AnyStr]:
+    def __enter__(self) -> typing.IO[typing.Any]:
         return self.acquire()
 
     def release(self) -> None:
@@ -399,14 +412,14 @@ class RLock(Lock):
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.AnyStr]:
-        fh: typing.IO[typing.AnyStr]
+    ) -> typing.IO[typing.Any]:
+        fh: typing.IO[typing.Any]
         if self._acquire_count >= 1:
-            fh = typing.cast(typing.IO[typing.AnyStr], self.fh)
+            assert self.fh is not None
+            fh = self.fh
         else:
             fh = super().acquire(timeout, check_interval, fail_when_locked)
         self._acquire_count += 1
-        assert fh is not None
         return fh
 
     def release(self) -> None:
@@ -418,6 +431,23 @@ class RLock(Lock):
         if self._acquire_count == 1:  # pragma: no branch - trivial guard
             super().release()
         self._acquire_count -= 1
+
+
+def _fh_matches_path(fh: types.IO, filename: str) -> bool:  # pragma: not-posix
+    """Return whether ``fh`` still refers to the file now at ``filename``.
+
+    A competing releaser can unlink (and a third party recreate) ``filename``
+    in the window between our ``open`` and our lock, which would leave two
+    processes each holding a lock on a *different* inode for the same name
+    (split-brain). Comparing the handle's inode with the path's inode detects
+    that swap. This is a POSIX-only concern: on Windows a locked file cannot be
+    unlinked, so no swap is possible.
+    """
+    try:
+        return os.fstat(fh.fileno()).st_ino == os.stat(filename).st_ino
+    except FileNotFoundError:
+        # The path was unlinked and not (yet) recreated.
+        return False
 
 
 class TemporaryFileLock(Lock):
@@ -442,7 +472,7 @@ class TemporaryFileLock(Lock):
         wr = weakref.ref(self)
 
         def _finalize_release(
-            ref: weakref.ReferenceType[TemporaryFileLock] = wr,  # type: ignore[arg-type]
+            ref: typing.Callable[[], TemporaryFileLock | None] = wr,
         ) -> None:  # pragma: no cover - best effort
             obj = ref()
             if obj is not None:
@@ -451,20 +481,94 @@ class TemporaryFileLock(Lock):
 
         atexit.register(_finalize_release)
 
-    def release(self) -> None:  # pragma: no cover - platform-specific cleanup
-        """Release the file lock and remove the temporary file."""
-        Lock.release(self)
-        # Try to remove file with a short retry loop to avoid transient
-        # Windows share violations from background scanners.
-        if os.path.isfile(self.filename):  # pragma: no branch
-            for _ in range(5):
-                try:
+    def acquire(
+        self,
+        timeout: float | None = None,
+        check_interval: float | None = None,
+        fail_when_locked: bool | None = None,
+    ) -> typing.IO[typing.Any]:
+        """Acquire the lock, guarding against split-brain path swaps."""
+        return self._acquire_verified(
+            self,
+            self.filename,
+            timeout,
+            check_interval,
+            fail_when_locked,
+        )
+
+    @staticmethod
+    def _acquire_verified(
+        lock: Lock,
+        filename: str,
+        timeout: float | None,
+        check_interval: float | None,
+        fail_when_locked: bool | None,
+    ) -> typing.IO[typing.Any]:
+        """Acquire ``lock`` and confirm the handle still names ``filename``.
+
+        A competing releaser can unlink (and a third party recreate)
+        ``filename`` between our ``open`` and our lock, so two processes could
+        each hold a lock on a different inode for the same name. After locking
+        we verify the handle still points at the current path; on a mismatch we
+        drop the stale handle and re-acquire, bounded by the timeout (no
+        unbounded spin). No-op on Windows, where a locked file cannot be
+        swapped.
+
+        Shared by ``TemporaryFileLock`` and the ``PidFileLock`` sidecar lock so
+        both surfaces get the same guarantee.
+        """
+        for _ in lock._timeout_generator(timeout, check_interval):
+            fh = Lock.acquire(lock, timeout, check_interval, fail_when_locked)
+            if os.name == 'nt':  # Windows: a locked file can't be swapped.
+                return fh  # pragma: not-nt
+            if _fh_matches_path(fh, filename):  # pragma: not-posix
+                return fh  # pragma: not-posix
+            # Stale handle: the path was unlinked+recreated behind our back.
+            Lock.release(lock)  # pragma: not-posix
+        raise exceptions.AlreadyLocked(  # pragma: not-posix
+            exceptions.LockException.LOCK_FAILED,
+            f'{filename!r} kept being replaced while locking (split-brain)',
+        )
+
+    def release(self) -> None:
+        """Release the file lock and remove the temporary file.
+
+        On POSIX the file is unlinked while the lock is *still held*, so a
+        competing acquirer cannot grab the freshly created path in the window
+        between unlock and unlink (split-brain). On Windows an open/locked
+        file cannot be unlinked, so there we unlock and close first, then
+        remove with a short retry for AV/scanner share violations.
+
+        Releasing an object that holds nothing is a no-op: a stale object
+        (double release, or garbage collection of a failed acquire calling
+        ``__del__``) must never unlink the path out from under the current
+        holder.
+        """
+        if self.fh is None:
+            # Not holding the lock; the path (if any) belongs to another
+            # holder now.
+            return
+        if os.name == 'nt':  # pragma: no cover
+            Lock.release(self)
+            if os.path.isfile(self.filename):
+                for _ in range(5):
+                    try:
+                        os.unlink(self.filename)
+                        break
+                    except PermissionError:
+                        time.sleep(0.05)
+                    except FileNotFoundError:
+                        break
+        else:  # pragma: not-posix
+            # Unlink first, while we still hold the lock, then unlock+close.
+            # The unlock must run even when the unlink fails (e.g. a
+            # PermissionError from a read-only directory), otherwise the
+            # error would leave the lock held forever.
+            try:
+                with contextlib.suppress(FileNotFoundError):
                     os.unlink(self.filename)
-                    break
-                except PermissionError:  # pragma: no cover - rare on CI
-                    time.sleep(0.05)  # pragma: no cover - timing dependent
-                except FileNotFoundError:  # pragma: no cover - race
-                    break
+            finally:
+                Lock.release(self)
 
 
 class PidFileLock(TemporaryFileLock):
@@ -504,12 +608,12 @@ class PidFileLock(TemporaryFileLock):
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.AnyStr]:
+    ) -> typing.IO[typing.Any]:
         """Acquire the lock and write the current PID to the file"""
         fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
 
         # Acquire the sidecar lock file using a normal Lock instance.
-        self._inner_lock = Lock(
+        inner_lock = Lock(
             self._lockfile,
             mode='a',
             timeout=timeout if fail_when_locked is False else 0,
@@ -520,46 +624,73 @@ class PidFileLock(TemporaryFileLock):
             fail_when_locked=True,
             flags=LOCK_METHOD,
         )
+        self._inner_lock = inner_lock
         try:
-            self._inner_lock.acquire(
-                timeout=timeout,
-                check_interval=check_interval,
-                fail_when_locked=True,
+            # Reuse the split-brain guard so the sidecar lock gets the same
+            # inode-verification as a direct `TemporaryFileLock`.
+            self._acquire_verified(
+                inner_lock,
+                self._lockfile,
+                timeout,
+                check_interval,
+                fail_when_locked,
             )
-        except Exception:
-            # Propagate so __enter__ can return PID of holder
+        except Exception as exc:
+            # Don't leak the (failed) sidecar reference on any error.
             self._inner_lock = None
+            # `fail_when_locked=True` raises `AlreadyLocked` on the first
+            # contention, while a timed-out `fail_when_locked=False` acquire
+            # re-raises the last plain `LockException` - from contention or
+            # from repeated lock failures (e.g. ENOLCK, NFS quirks). Normalize
+            # any plain `LockException` to `AlreadyLocked` so `__enter__` and
+            # callers see one predictable surface; anything else propagates.
+            if isinstance(exc, exceptions.LockException) and not isinstance(
+                exc,
+                exceptions.AlreadyLocked,
+            ):
+                raise exceptions.AlreadyLocked(*exc.args) from exc
             raise
 
-        # Write the current process PID to the public PID file
+        # Write the current process PID to the public PID file. Anything that
+        # fails here must release the sidecar lock we just acquired, otherwise
+        # it stays held forever: `__enter__` surfaces the error and `__exit__`
+        # only cleans up after a *successful* acquire.
         # Use unbuffered OS ops where possible
-        with open(self.filename, 'a+') as f:
-            try:
-                fd2 = f.fileno()  # type: ignore[no-untyped-call]
-                os.lseek(fd2, 0, os.SEEK_SET)
+        try:
+            with open(self.filename, 'a+') as f:
                 try:
-                    os.ftruncate(fd2, 0)
+                    fd2 = f.fileno()
+                    os.lseek(fd2, 0, os.SEEK_SET)
+                    try:
+                        os.ftruncate(fd2, 0)
+                    except Exception:  # pragma: no cover - rare
+                        # Fallback for platforms without os.ftruncate (e.g.
+                        # Windows)
+                        f.seek(0)
+                        f.truncate()
+                    os.write(fd2, str(os.getpid()).encode('ascii'))
+                    with contextlib.suppress(Exception):
+                        os.fsync(fd2)
                 except Exception:  # pragma: no cover - rare
-                    # Fallback for platforms without os.ftruncate (e.g.
-                    # Windows)
+                    # Fallback for platforms without os.write/os.lseek (e.g.
+                    # Jython)
                     f.seek(0)
                     f.truncate()
-                os.write(fd2, str(os.getpid()).encode('ascii'))
-                with contextlib.suppress(Exception):
-                    os.fsync(fd2)
-            except Exception:  # pragma: no cover - rare
-                # Fallback for platforms without os.write/os.lseek (e.g.
-                # Jython)
-                f.seek(0)
-                f.truncate()
-                f.write(str(os.getpid()))  # type: ignore[arg-type,call-overload]
-                with contextlib.suppress(Exception):
-                    f.flush()
+                    f.write(str(os.getpid()))
+                    with contextlib.suppress(Exception):
+                        f.flush()
+        except Exception:
+            # Release the sidecar and reset state before propagating.
+            self._inner_lock = None
+            with contextlib.suppress(Exception):
+                inner_lock.release()
+            raise
 
         self._acquired_lock = True
         # No need to keep a direct fh on the PID file; return the lock's fh
         # to satisfy the context manager typing contract.
-        return typing.cast(typing.IO[typing.AnyStr], self._inner_lock.fh)
+        assert inner_lock.fh is not None
+        return inner_lock.fh
 
     def read_pid(self) -> int | None:
         """Read the PID from the lock file if it exists and is readable"""
@@ -573,7 +704,9 @@ class PidFileLock(TemporaryFileLock):
             pass
         return None
 
-    def __enter__(self) -> int | None:  # type: ignore[override]
+    # `PidFileLock` deliberately breaks the `Lock.__enter__` contract: it
+    # reports the competing PID instead of returning a filehandle.
+    def __enter__(self) -> int | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]
         """
         Context manager entry that returns:
         - None if we successfully acquired the lock
@@ -599,21 +732,53 @@ class PidFileLock(TemporaryFileLock):
         return None
 
     def release(self) -> None:
-        """Release the sidecar lock and remove the PID file."""
-        # Release sidecar first
-        if self._inner_lock is not None:
-            with contextlib.suppress(Exception):
-                self._inner_lock.release()
+        """Release the sidecar lock and remove the PID + sidecar files.
+
+        On POSIX both the PID file and the sidecar lock file are unlinked while
+        the sidecar lock is *still held*, so a competing acquirer cannot grab
+        the sidecar path in the window between unlock and unlink (split-brain).
+        The PID file itself carries no OS lock (the sidecar holds it), but it
+        is removed in the same held window for consistency. On Windows the
+        locked sidecar cannot be unlinked, so it is released first and removed
+        after.
+
+        Releasing an object that does not hold the sidecar is a no-op: a
+        stale object (double release, or garbage collection of a failed
+        acquire calling ``__del__``) must never unlink the PID or sidecar
+        files out from under the current holder.
+        """
+        inner_lock = self._inner_lock
+        if inner_lock is None:
+            # Not holding the sidecar; the files belong to another holder.
+            return
+        if os.name == 'nt':  # pragma: no cover
             self._inner_lock = None
-        # Then use default behavior to close/unlock any fh and unlink PID file
-        super().release()
-        # Try to remove sidecar file as well
-        with contextlib.suppress(Exception):
-            if os.path.isfile(self._lockfile):
-                os.unlink(self._lockfile)
+            with contextlib.suppress(Exception):
+                inner_lock.release()
+            with contextlib.suppress(Exception):
+                os.unlink(self.filename)
+            with contextlib.suppress(Exception):
+                if os.path.isfile(self._lockfile):
+                    os.unlink(self._lockfile)
+        else:  # pragma: not-posix
+            # Unlink both paths while the sidecar lock is still held. The
+            # sidecar unlock must run even when an unlink fails (e.g. a
+            # PermissionError from a read-only directory), otherwise the
+            # error would leave the sidecar held forever. `_inner_lock` is
+            # only cleared once the unlock actually runs, so a failed
+            # release keeps its reference and can be retried.
+            try:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.filename)
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self._lockfile)
+            finally:
+                self._inner_lock = None
+                with contextlib.suppress(Exception):
+                    inner_lock.release()
 
 
-class BoundedSemaphore(LockBase):
+class BoundedSemaphore(LockBase['Lock | None']):
     """
     Bounded semaphore to prevent too many parallel processes from running
 
@@ -645,7 +810,7 @@ class BoundedSemaphore(LockBase):
         self.name = name
         self.filename_pattern = filename_pattern
         self.directory = directory
-        self.lock: Lock | None = None
+        self.lock = None
         super().__init__(
             timeout=timeout,
             check_interval=check_interval,
@@ -674,7 +839,7 @@ class BoundedSemaphore(LockBase):
             number=number,
         )
 
-    def acquire(  # type: ignore[override]
+    def acquire(
         self,
         timeout: float | None = None,
         check_interval: float | None = None,
@@ -702,12 +867,23 @@ class BoundedSemaphore(LockBase):
         filename: Filename
         for filename in filenames:
             logger.debug('trying lock for %r', filename)
-            self.lock = Lock(filename, fail_when_locked=True)
+            lock = Lock(filename, fail_when_locked=True)
             try:
-                self.lock.acquire()
+                lock.acquire()
             except exceptions.AlreadyLocked:
+                # Taken by someone else; try the next candidate file.
+                continue
+            except Exception:
+                # Any other failure (e.g. a missing directory raising
+                # `FileNotFoundError` from the underlying `open`) must not
+                # leave a half-set lock behind, otherwise the
+                # `assert not self.lock` guard in `acquire` would brick the
+                # instance on the next call. Reset and propagate.
                 self.lock = None
+                raise
             else:
+                # Only record the lock once it is actually held.
+                self.lock = lock
                 logger.debug('locked %r', filename)
                 return True
 

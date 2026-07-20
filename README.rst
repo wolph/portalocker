@@ -2,18 +2,16 @@
 portalocker - Cross-platform locking library
 ############################################
 
-.. image:: https://github.com/wolph/portalocker/actions/workflows/main.yml/badge.svg?branch=master
-    :alt: Linux Test Status
-    :target: https://github.com/wolph/portalocker/actions/workflows/main.yml
-
-.. image:: https://coveralls.io/repos/WoLpH/portalocker/badge.svg?branch=master
-    :alt: Coverage Status
-    :target: https://coveralls.io/r/WoLpH/portalocker?branch=master
+.. image:: https://github.com/wolph/portalocker/actions/workflows/ci.yml/badge.svg?branch=develop
+    :alt: CI Test Status
+    :target: https://github.com/wolph/portalocker/actions/workflows/ci.yml
 
 Overview
 --------
 
 Portalocker is a library to provide an easy API to file locking.
+
+Portalocker requires Python 3.10 or later.
 
 An important detail to note is that on Linux and Unix systems the locks are
 advisory by default. By specifying the `-o mand` option to the mount command it
@@ -23,6 +21,22 @@ recommended however. For more information about the subject:
  - https://en.wikipedia.org/wiki/File_locking
  - http://stackoverflow.com/questions/39292051/portalocker-does-not-seem-to-lock
  - https://stackoverflow.com/questions/12062466/mandatory-file-lock-on-linux
+
+Windows and the ``pywin32`` dependency
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Since version 4.0.0, ``pywin32`` is no longer installed automatically on
+Windows. Exclusive locks work out of the box without any extra
+dependencies using the built-in `msvcrt` module. Shared locks
+(``LockFlags.SHARED``) on Windows require the optional `pywin32`
+dependency, which can be installed through the ``win32`` extra:
+
+::
+
+    pip install "portalocker[win32]"
+
+Attempting to acquire a shared lock on Windows without `pywin32` raises an
+``ImportError`` explaining this requirement.
 
 The module is currently maintained by Rick van Hattem <Wolph@wol.ph>.
 The project resides at https://github.com/WoLpH/portalocker . Bugs and feature

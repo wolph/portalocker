@@ -9,10 +9,12 @@ from .utils import (
     open_atomic,
 )
 
-try:  # pragma: no cover
+try:
     from .redis import RedisLock
 except ImportError:  # pragma: no cover
-    RedisLock = None  # type: ignore[assignment,misc]
+    # `redis` is an optional dependency; keep the attribute importable so
+    # `portalocker.RedisLock` fails at use time, not import time.
+    RedisLock = None  # type: ignore[assignment,misc]  # ty: ignore[invalid-assignment]
 
 
 #: The package name on Pypi
