@@ -7,7 +7,7 @@ from portalocker import exceptions, utils
 def test_utils_base():
     """Test that LockBase can be subclassed."""
 
-    class Test(utils.LockBase):
+    class Test(utils.LockBase[None]):
         pass
 
 

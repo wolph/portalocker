@@ -7,12 +7,12 @@ class BaseLockException(Exception):  # noqa: N818
     # Error codes:
     LOCK_FAILED: typing.Final = 1
 
-    strerror: typing.Optional[str] = None  # ensure attribute always exists
+    strerror: str | None = None  # ensure attribute always exists
 
     def __init__(
         self,
         *args: typing.Any,
-        fh: typing.Union[types.IO, None, int, types.HasFileno] = None,
+        fh: types.IO | None | int | types.HasFileno = None,
         **kwargs: typing.Any,
     ) -> None:
         self.fh = fh

@@ -1,3 +1,6 @@
+# Several redis-py methods (`pubsub`, `unsubscribe`, `client_list`, ...) are
+# unannotated or take untyped `**kwargs`, so their types are (partially)
+# unknown to pyright.
 # pyright: reportUnknownMemberType=false
 from __future__ import annotations
 
@@ -8,7 +11,7 @@ import random
 import time
 import typing
 
-import redis
+import redis.client
 
 from . import exceptions, utils
 
@@ -27,7 +30,7 @@ class PubSubWorkerThread(redis.client.PubSubWorkerThread):
             raise
 
 
-class RedisLock(utils.LockBase):
+class RedisLock(utils.LockBase['RedisLock']):
     """
     An extremely reliable Redis lock based on pubsub with a keep-alive thread
 
@@ -68,7 +71,7 @@ class RedisLock(utils.LockBase):
     thread: PubSubWorkerThread | None
     channel: str
     timeout: float
-    connection: redis.client.Redis[str] | None
+    connection: redis.client.Redis | None
     pubsub: redis.client.PubSub | None = None
     close_connection: bool
 
@@ -80,7 +83,7 @@ class RedisLock(utils.LockBase):
     def __init__(
         self,
         channel: str,
-        connection: redis.client.Redis[str] | None = None,
+        connection: redis.client.Redis | None = None,
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = False,
@@ -107,11 +110,25 @@ class RedisLock(utils.LockBase):
             fail_when_locked=fail_when_locked,
         )
 
-    def get_connection(self) -> redis.client.Redis[str]:
+    def get_connection(self) -> redis.client.Redis:
         if not self.connection:
             self.connection = redis.client.Redis(**self.redis_kwargs)
 
         return self.connection
+
+    def _get_pubsub(
+        self,
+        connection: redis.client.Redis,
+    ) -> redis.client.PubSub:
+        """Typed wrapper, `Redis.pubsub()` is unannotated in redis-py."""
+        return typing.cast(
+            'redis.client.PubSub',
+            connection.pubsub(),  # type: ignore[no-untyped-call]
+        )
+
+    def _get_subscriber_count(self, connection: redis.client.Redis) -> int:
+        """Get the subscriber count for our channel."""
+        return connection.pubsub_numsub(self.channel)[0][1]
 
     def channel_handler(self, message: dict[str, str]) -> None:
         if message.get('type') != 'message':  # pragma: no cover
@@ -154,7 +171,7 @@ class RedisLock(utils.LockBase):
             time.sleep(sleep_time)
             yield 0
 
-    def acquire(  # type: ignore[override]
+    def acquire(
         self,
         timeout: float | None = None,
         check_interval: float | None = None,
@@ -176,7 +193,7 @@ class RedisLock(utils.LockBase):
 
         timeout_generator = self._timeout_generator(timeout, check_interval)
         for _ in timeout_generator:  # pragma: no branch
-            subscribers = connection.pubsub_numsub(self.channel)[0][1]
+            subscribers = self._get_subscriber_count(connection)
 
             if subscribers:
                 logger.debug(
@@ -188,7 +205,12 @@ class RedisLock(utils.LockBase):
                 if self.check_or_kill_lock(
                     connection,
                     self.unavailable_timeout,
-                ):  # pragma: no branch
+                ):
+                    # The holder is alive. When `fail_when_locked` is set we
+                    # must not keep polling until the timeout expires; fail
+                    # immediately as documented.
+                    if fail_when_locked:
+                        raise exceptions.AlreadyLocked()
                     continue
                 else:  # pragma: no cover
                     subscribers = 0
@@ -197,19 +219,30 @@ class RedisLock(utils.LockBase):
             # above can still end up here
             if not subscribers:
                 connection.client_setname(self.client_name)
-                self.pubsub = connection.pubsub()
-                self.pubsub.subscribe(**{self.channel: self.channel_handler})
-                self.thread = PubSubWorkerThread(
-                    self.pubsub,
-                    sleep_time=self.thread_sleep_time,
-                )
-                self.thread.start()
-                time.sleep(0.01)
-                subscribers = connection.pubsub_numsub(self.channel)[0][1]
+                pubsub = self._get_pubsub(connection)
+                self.pubsub = pubsub
+                try:
+                    pubsub.subscribe(**{self.channel: self.channel_handler})
+                    self.thread = PubSubWorkerThread(
+                        pubsub,
+                        sleep_time=self.thread_sleep_time,
+                    )
+                    self.thread.start()
+                    time.sleep(0.01)
+                    subscribers = self._get_subscriber_count(connection)
+                except Exception:
+                    # Roll back so a partially initialised `self.pubsub` /
+                    # `self.thread` cannot brick a retry via the assertion at
+                    # the top of `acquire` (or leak the worker thread).
+                    self.release()
+                    raise
                 if subscribers == 1:  # pragma: no branch
                     return self
                 else:  # pragma: no cover
-                    # Race condition, let's try again
+                    # NOTE: this retry reuses the outer timeout deadline,
+                    # which may already have expired, so a lost race here can
+                    # end the acquire attempt early instead of retrying within
+                    # a fresh window.
                     self.release()
 
             if fail_when_locked:  # pragma: no cover
@@ -219,40 +252,60 @@ class RedisLock(utils.LockBase):
 
     def check_or_kill_lock(
         self,
-        connection: redis.client.Redis[str],
+        connection: redis.client.Redis,
         timeout: float,
     ) -> bool | None:
         # Random channel name to get messages back from the lock
         response_channel = f'{self.channel}-{random.random()}'
-
-        pubsub = connection.pubsub()
-        pubsub.subscribe(response_channel)
-        connection.publish(
-            self.channel,
-            json.dumps(
-                dict(
-                    response_channel=response_channel,
-                    message='ping',
-                ),
-            ),
-        )
-
         check_interval = min(self.thread_sleep_time, timeout / 10)
-        for _ in self._timeout_generator(
-            timeout,
-            check_interval,
-        ):  # pragma: no branch
-            if pubsub.get_message(timeout=check_interval):
-                pubsub.close()
-                return True
 
-        for client_ in connection.client_list('pubsub'):  # pragma: no cover
-            if client_.get('name') == self.client_name:
-                logger.warning('Killing unavailable redis client: %r', client_)
-                connection.client_kill_filter(  # pyright: ignore
-                    client_.get('id'),
+        pubsub = self._get_pubsub(connection)
+        try:
+            pubsub.subscribe(response_channel)
+
+            # Consume the subscribe-confirmation message *before* pinging.
+            # Redis queues a confirmation the moment we subscribe; if it were
+            # left in the buffer the poll below would treat it as a pong and
+            # wrongly report the holder as alive. Waiting for it here also
+            # guarantees the subscription is active before we publish, so the
+            # pong sent in response to our ping cannot be dropped.
+            for _ in self._timeout_generator(timeout, check_interval):
+                confirmation = typing.cast(
+                    'dict[str, typing.Any] | None',
+                    pubsub.get_message(timeout=check_interval),
                 )
-        return None
+                if confirmation and confirmation.get('type') == 'subscribe':
+                    break
+
+            connection.publish(
+                self.channel,
+                json.dumps(
+                    dict(
+                        response_channel=response_channel,
+                        message='ping',
+                    ),
+                ),
+            )
+
+            for _ in self._timeout_generator(timeout, check_interval):
+                message = typing.cast(
+                    'dict[str, typing.Any] | None',
+                    pubsub.get_message(timeout=check_interval),
+                )
+                if message and message.get('type') == 'message':
+                    return True
+
+            clients: list[dict[str, str]] = connection.client_list('pubsub')
+            for client_ in clients:
+                if client_.get('name') == self.client_name:
+                    logger.warning(
+                        'Killing unavailable redis client: %r',
+                        client_,
+                    )
+                    connection.client_kill_filter(client_.get('id'))
+            return None
+        finally:
+            pubsub.close()
 
     def release(self) -> None:
         if self.thread:  # pragma: no branch
@@ -262,9 +315,18 @@ class RedisLock(utils.LockBase):
             time.sleep(0.01)
 
         if self.pubsub:  # pragma: no branch
-            self.pubsub.unsubscribe(self.channel)
+            # `PubSub.unsubscribe()` is unannotated in redis-py
+            self.pubsub.unsubscribe(  # type: ignore[no-untyped-call]
+                self.channel,
+            )
             self.pubsub.close()
             self.pubsub = None
 
-    def __del__(self) -> None:
+        # Only close connections we created ourselves; caller-supplied ones
+        # are left untouched. Clear it so a later acquire recreates it.
+        if self.close_connection and self.connection is not None:
+            self.connection.close()
+            self.connection = None
+
+    def __del__(self) -> None:  # pragma: no cover - best effort cleanup
         self.release()

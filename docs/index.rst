@@ -9,7 +9,6 @@ Contents:
    :maxdepth: 4
 
    portalocker
-   tests
    license
 
 Indices and tables

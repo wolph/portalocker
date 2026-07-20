@@ -1,3 +1,4 @@
+import importlib.util
 import os
 
 import pytest
@@ -5,6 +6,16 @@ import pytest
 import portalocker
 from portalocker import LockFlags
 from portalocker_tests.conftest import LOCKERS
+
+# Since portalocker 4.0.0 pywin32 is an optional extra. On Windows without it,
+# `win32file` is unavailable and shared locks are unsupported by design
+# (msvcrt has no true shared lock), so they raise ImportError pointing at the
+# `portalocker[win32]` extra. Skip the shared-lock cases in that configuration.
+_needs_win32_extra = pytest.mark.skipif(
+    os.name == 'nt' and importlib.util.find_spec('win32file') is None,
+    reason='shared locks on Windows require the pywin32 extra '
+    '(portalocker[win32])',
+)
 
 
 def test_exclusive(tmpdir):
@@ -43,6 +54,7 @@ def test_exclusive(tmpdir):
         portalocker.unlock(fh)
 
 
+@_needs_win32_extra
 def test_shared(tmpdir):
     """Test that shared lock allows reading but not writing by others."""
     tmpfile = tmpdir.join('test_shared.lock')

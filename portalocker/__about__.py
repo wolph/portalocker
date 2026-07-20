@@ -8,7 +8,6 @@ needed.
 import re
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Optional
 
 __package_name__ = 'portalocker'
 __author__ = 'Rick van Hattem'
@@ -17,7 +16,7 @@ __description__ = 'Wraps the portalocker recipe for easy usage'
 __url__ = 'https://github.com/WoLpH/portalocker'
 
 
-def _read_pyproject_version(path: Path) -> Optional[str]:  # pragma: no cover
+def _read_pyproject_version(path: Path) -> str | None:  # pragma: no cover
     """Read the version from a ``pyproject.toml`` file if available.
 
     This uses a small regex parser that looks for the ``[project]`` table
