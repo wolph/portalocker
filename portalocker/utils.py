@@ -67,8 +67,9 @@ def open_atomic(
     :class:`FileExistsError` and leaves that destination untouched.
 
     The implementation writes and synchronizes a temporary file in the
-    destination directory, then publishes it with an atomic hard link. The
-    filesystem must support hard links.
+    destination directory, then publishes it with an operation that refuses an
+    existing destination. Windows uses an atomic rename; POSIX uses an atomic
+    hard link, so the POSIX filesystem must support hard links.
 
     https://docs.python.org/3/library/os.html#os.link
 
@@ -112,7 +113,10 @@ def open_atomic(
         os.fsync(temp_fh.fileno())
 
     try:
-        os.link(temp_fh.name, path)
+        if os.name == 'nt':  # pragma: not-nt
+            os.rename(temp_fh.name, path)
+        else:  # pragma: not-posix
+            os.link(temp_fh.name, path)
     finally:
         with contextlib.suppress(Exception):
             os.remove(temp_fh.name)
