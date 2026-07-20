@@ -6,7 +6,7 @@ requires = ['uv_build>=0.11,<0.12']
 name = 'portalocker'
 version = '4.0.0'
 dynamic = []
-description = 'Wraps the portalocker recipe for easy usage'
+description = 'Cross-platform file locking, with Redis, PID-file and bounded-semaphore locks'
 readme = 'README.rst'
 requires-python = '>=3.10'
 license = 'BSD-3-Clause'
@@ -14,20 +14,40 @@ license-files = ['LICENSE']
 authors = [{ name = 'Rick van Hattem', email = 'wolph@wol.ph' }]
 keywords = ['locking', 'locks', 'with', 'statement', 'windows', 'linux', 'unix']
 classifiers = [
-    'Development Status :: 5 - Production/Stable',
+    'Development Status :: 6 - Mature',
     'Intended Audience :: Developers',
+    'Intended Audience :: Information Technology',
+    'Intended Audience :: System Administrators',
+    'Natural Language :: English',
+    'Operating System :: MacOS',
     'Operating System :: MacOS :: MacOS X',
+    'Operating System :: Microsoft',
     'Operating System :: Microsoft :: Windows',
+    'Operating System :: POSIX',
+    'Operating System :: POSIX :: BSD',
+    'Operating System :: POSIX :: BSD :: FreeBSD',
+    'Operating System :: POSIX :: BSD :: NetBSD',
+    'Operating System :: POSIX :: BSD :: OpenBSD',
     'Operating System :: POSIX :: Linux',
+    'Operating System :: POSIX :: SunOS/Solaris',
+    'Operating System :: Unix',
+    'Programming Language :: Python',
+    'Programming Language :: Python :: 3',
     'Programming Language :: Python :: 3 :: Only',
     'Programming Language :: Python :: 3.10',
     'Programming Language :: Python :: 3.11',
     'Programming Language :: Python :: 3.12',
     'Programming Language :: Python :: 3.13',
     'Programming Language :: Python :: 3.14',
+    'Programming Language :: Python :: Implementation',
     'Programming Language :: Python :: Implementation :: CPython',
     'Programming Language :: Python :: Implementation :: PyPy',
+    'Topic :: Software Development :: Libraries',
     'Topic :: Software Development :: Libraries :: Python Modules',
+    'Topic :: System',
+    'Topic :: System :: Distributed Computing',
+    'Topic :: System :: Filesystems',
+    'Topic :: System :: Monitoring',
     'Typing :: Typed',
 ]
 dependencies = []
@@ -38,7 +58,9 @@ documentation = 'https://portalocker.readthedocs.io/en/latest/'
 repository = 'https://github.com/wolph/portalocker/'
 
 [project.optional-dependencies]
-redis = ['redis']
+# redis-py has shipped inline type hints (py.typed) since 5.0, which
+# replaced the external types-redis stubs this package used to depend on.
+redis = ['redis>=5.0']
 win32 = ["pywin32>=226; platform_system == 'Windows'"]
 tests = [
     'portalocker[redis]',
@@ -182,3 +204,5 @@ python-version = '3.10'
 [tool.ty.src]
 include = ['portalocker', 'portalocker_tests']
 
+[tool.uv]
+exclude-newer = "14 days"
