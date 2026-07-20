@@ -9,11 +9,11 @@ checkbox (`- [ ]`) syntax for tracking.
 destination created before publication, while preserving its existing API and
 entry-time `AssertionError` behavior.
 
-**Architecture:** Keep the existing same-directory temporary-file workflow and
-replace the final `os.rename()` with atomic hard-link publication through
-`os.link()`. Turn the removable entry assertion into an explicit
-`AssertionError`, retain unconditional temporary-file cleanup, and document the
-no-replacement contract.
+**Architecture:** Keep the existing same-directory temporary-file workflow,
+retain atomic `os.rename()` publication on Windows, and use atomic hard-link
+publication through `os.link()` on POSIX. Turn the removable entry assertion
+into an explicit `AssertionError`, retain unconditional temporary-file cleanup,
+and document the no-replacement contract.
 
 **Tech Stack:** Python 3.10+, `contextlib`, `os`, `pathlib`, `tempfile`, pytest,
 uv, mypy, basedpyright, pyrefly, ty, Sphinx.
@@ -68,13 +68,16 @@ uv run pytest --no-cov portalocker_tests/test_open_atomic.py::test_open_atomic_p
 Expected: FAIL with `Failed: DID NOT RAISE <class 'FileExistsError'>`; the
 current POSIX `os.rename()` replaces the concurrent winner.
 
-- [ ] **Step 3: Publish with an atomic no-replace hard link**
+- [ ] **Step 3: Publish with the platform's atomic no-replace primitive**
 
 In `portalocker/utils.py`, replace the publication call only:
 
 ```python
     try:
-        os.link(temp_fh.name, path)
+        if os.name == 'nt':  # pragma: not-nt
+            os.rename(temp_fh.name, path)
+        else:  # pragma: not-posix
+            os.link(temp_fh.name, path)
     finally:
         with contextlib.suppress(Exception):
             os.remove(temp_fh.name)
@@ -236,21 +239,22 @@ def test_open_atomic_publishes_without_leaving_temporary_file(
     assert set(tmp_path.iterdir()) == entries_before | {target}
 
 
-def test_open_atomic_cleans_temporary_file_after_link_error(
+def test_open_atomic_cleans_temporary_file_after_publication_error(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target: pathlib.Path = tmp_path / 'destination.bin'
     temporary_paths: list[pathlib.Path] = []
 
-    def fail_link(source: str, destination: pathlib.Path) -> None:
+    def fail_publication(source: str, destination: pathlib.Path) -> None:
         temporary_paths.append(pathlib.Path(source))
         assert destination == target
-        raise OSError('link publication failed')
+        raise OSError('publication failed')
 
-    monkeypatch.setattr(os, 'link', fail_link)
+    publication_function: str = 'rename' if os.name == 'nt' else 'link'
+    monkeypatch.setattr(os, publication_function, fail_publication)
 
-    with pytest.raises(OSError, match='link publication failed'):
+    with pytest.raises(OSError, match='publication failed'):
         with portalocker.open_atomic(target) as temporary:
             written: int = temporary.write(b'unpublished payload')
             assert written == len(b'unpublished payload')
@@ -298,8 +302,9 @@ Replace the opening paragraphs of `open_atomic()` with:
     :class:`FileExistsError` and leaves that destination untouched.
 
     The implementation writes and synchronizes a temporary file in the
-    destination directory, then publishes it with an atomic hard link. The
-    filesystem must support hard links.
+    destination directory, then publishes it with an operation that refuses an
+    existing destination. Windows uses an atomic rename; POSIX uses an atomic
+    hard link, so the POSIX filesystem must support hard links.
 
     https://docs.python.org/3/library/os.html#os.link
 ```

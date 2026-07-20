@@ -27,21 +27,55 @@ def test_open_atomic_publishes_without_leaving_temporary_file(
     assert set(tmp_path.iterdir()) == entries_before | {target}
 
 
-def test_open_atomic_cleans_temporary_file_after_link_error(
+def test_open_atomic_uses_rename_on_windows(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target: pathlib.Path = tmp_path / 'destination.bin'
+    rename_calls: list[tuple[pathlib.Path, pathlib.Path]] = []
+    real_replace: typing.Callable[[str, pathlib.Path], None] = typing.cast(
+        typing.Callable[[str, pathlib.Path], None],
+        os.replace,
+    )
+
+    def fake_rename(source: str, destination: pathlib.Path) -> None:
+        rename_calls.append((pathlib.Path(source), destination))
+        real_replace(source, destination)
+
+    def fail_link(source: str, destination: pathlib.Path) -> None:
+        raise AssertionError(f'unexpected os.link({source!r}, {destination!r})')
+
+    monkeypatch.setattr(os, 'name', 'nt')
+    monkeypatch.setattr(os, 'rename', fake_rename)
+    monkeypatch.setattr(os, 'link', fail_link)
+
+    with portalocker.open_atomic(target) as file_handle:
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'published with rename')
+        assert written == len(b'published with rename')
+
+    assert target.read_bytes() == b'published with rename'
+    assert len(rename_calls) == 1
+    assert rename_calls[0][1] == target
+    assert not rename_calls[0][0].exists()
+
+
+def test_open_atomic_cleans_temporary_file_after_publication_error(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target: pathlib.Path = tmp_path / 'destination.bin'
     temporary_paths: list[pathlib.Path] = []
 
-    def fail_link(source: str, destination: pathlib.Path) -> None:
+    def fail_publication(source: str, destination: pathlib.Path) -> None:
         temporary_paths.append(pathlib.Path(source))
         assert destination == target
-        raise OSError('link publication failed')
+        raise OSError('publication failed')
 
-    monkeypatch.setattr(os, 'link', fail_link)
+    publication_function: str = 'rename' if os.name == 'nt' else 'link'
+    monkeypatch.setattr(os, publication_function, fail_publication)
 
-    with pytest.raises(OSError, match='link publication failed'):
+    with pytest.raises(OSError, match='publication failed'):
         with portalocker.open_atomic(target) as file_handle:
             temporary: typing.BinaryIO = typing.cast(
                 typing.BinaryIO,
