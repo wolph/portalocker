@@ -36,6 +36,7 @@ Add imports and helpers to `portalocker_tests/test_multiprocess.py`:
 
 ```python
 import multiprocessing.context
+import multiprocessing.process
 import multiprocessing.queues
 import pathlib
 import typing
@@ -80,7 +81,7 @@ def hold_inode_waiter(
     opened_event: multiprocessing.synchronize.Event,
     acquired_event: multiprocessing.synchronize.Event,
     release_event: multiprocessing.synchronize.Event,
-    inode_queue: multiprocessing.queues.Queue,
+    inode_queue: multiprocessing.queues.Queue[int],
 ) -> None:
     """Open the original inode, acquire, report it, and hold the lock."""
     original_get_fh: typing.Callable[
@@ -131,7 +132,7 @@ def test_temporary_lock_waiters_converge_on_current_inode(
     lock_kind: LockKind,
 ) -> None:
     """#115: waiters must reject an obsolete unlinked lock inode."""
-    context: multiprocessing.context.BaseContext = multiprocessing.get_context(
+    context: multiprocessing.context.SpawnContext = multiprocessing.get_context(
         'spawn'
     )
     filename: str = str(tmp_path / f'{lock_kind}.lock')
@@ -145,8 +146,8 @@ def test_temporary_lock_waiters_converge_on_current_inode(
     opened_event: multiprocessing.synchronize.Event = context.Event()
     acquired_event: multiprocessing.synchronize.Event = context.Event()
     release_event: multiprocessing.synchronize.Event = context.Event()
-    inode_queue: multiprocessing.queues.Queue = context.Queue()
-    waiter: multiprocessing.Process = context.Process(
+    inode_queue: multiprocessing.queues.Queue[int] = context.Queue()
+    waiter: multiprocessing.process.BaseProcess = context.Process(
         target=hold_inode_waiter,
         args=(
             filename,
