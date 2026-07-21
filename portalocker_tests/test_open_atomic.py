@@ -27,37 +27,40 @@ def test_open_atomic_publishes_without_leaving_temporary_file(
     assert set(tmp_path.iterdir()) == entries_before | {target}
 
 
-def test_open_atomic_uses_rename_on_windows(
+def test_open_atomic_uses_platform_publication_primitive(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target: pathlib.Path = tmp_path / 'destination.bin'
-    rename_calls: list[tuple[pathlib.Path, pathlib.Path]] = []
+    publication_calls: list[tuple[pathlib.Path, pathlib.Path]] = []
     real_replace: typing.Callable[[str, pathlib.Path], None] = typing.cast(
         typing.Callable[[str, pathlib.Path], None],
         os.replace,
     )
 
-    def fake_rename(source: str, destination: pathlib.Path) -> None:
-        rename_calls.append((pathlib.Path(source), destination))
+    def fake_publication(source: str, destination: pathlib.Path) -> None:
+        publication_calls.append((pathlib.Path(source), destination))
         real_replace(source, destination)
 
-    def fail_link(source: str, destination: pathlib.Path) -> None:
-        raise AssertionError(f'unexpected os.link({source!r}, {destination!r})')
+    def fail_unused_publication(source: str, destination: pathlib.Path) -> None:
+        raise AssertionError(
+            f'unexpected publication call: {source!r} -> {destination!r}'
+        )
 
-    monkeypatch.setattr(os, 'name', 'nt')
-    monkeypatch.setattr(os, 'rename', fake_rename)
-    monkeypatch.setattr(os, 'link', fail_link)
+    publication_function: str = 'rename' if os.name == 'nt' else 'link'
+    unused_publication_function: str = 'link' if os.name == 'nt' else 'rename'
+    monkeypatch.setattr(os, publication_function, fake_publication)
+    monkeypatch.setattr(os, unused_publication_function, fail_unused_publication)
 
     with portalocker.open_atomic(target) as file_handle:
         temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
-        written: int = temporary.write(b'published with rename')
-        assert written == len(b'published with rename')
+        written: int = temporary.write(b'published payload')
+        assert written == len(b'published payload')
 
-    assert target.read_bytes() == b'published with rename'
-    assert len(rename_calls) == 1
-    assert rename_calls[0][1] == target
-    assert not rename_calls[0][0].exists()
+    assert target.read_bytes() == b'published payload'
+    assert len(publication_calls) == 1
+    assert publication_calls[0][1] == target
+    assert not publication_calls[0][0].exists()
 
 
 def test_open_atomic_cleans_temporary_file_after_publication_error(
@@ -75,14 +78,16 @@ def test_open_atomic_cleans_temporary_file_after_publication_error(
     publication_function: str = 'rename' if os.name == 'nt' else 'link'
     monkeypatch.setattr(os, publication_function, fail_publication)
 
-    with pytest.raises(OSError, match='publication failed'):
-        with portalocker.open_atomic(target) as file_handle:
-            temporary: typing.BinaryIO = typing.cast(
-                typing.BinaryIO,
-                file_handle,
-            )
-            written: int = temporary.write(b'unpublished payload')
-            assert written == len(b'unpublished payload')
+    with (
+        pytest.raises(OSError, match='publication failed'),
+        portalocker.open_atomic(target) as file_handle,
+    ):
+        temporary: typing.BinaryIO = typing.cast(
+            typing.BinaryIO,
+            file_handle,
+        )
+        written: int = temporary.write(b'unpublished payload')
+        assert written == len(b'unpublished payload')
 
     assert len(temporary_paths) == 1
     assert not temporary_paths[0].exists()
@@ -98,9 +103,11 @@ def test_open_atomic_existing_destination_check_survives_optimization(
     expected_message: str = f'{target!r} exists'
     target.write_bytes(existing)
 
-    with pytest.raises(AssertionError, match='exists'):
-        with portalocker.open_atomic(target):
-            pass
+    with (
+        pytest.raises(AssertionError, match='exists'),
+        portalocker.open_atomic(target),
+    ):
+        pass
 
     script: str = textwrap.dedent(
         f'''\
@@ -141,15 +148,17 @@ def test_open_atomic_preserves_destination_created_before_publication(
     target: pathlib.Path = tmp_path / 'destination.bin'
     entries_before: set[pathlib.Path] = set(tmp_path.iterdir())
 
-    with pytest.raises(FileExistsError):
-        with portalocker.open_atomic(target) as file_handle:
-            temporary: typing.BinaryIO = typing.cast(
-                typing.BinaryIO,
-                file_handle,
-            )
-            written: int = temporary.write(b'temporary payload')
-            assert written == len(b'temporary payload')
-            target.write_bytes(b'concurrent winner')
+    with (
+        pytest.raises(FileExistsError),
+        portalocker.open_atomic(target) as file_handle,
+    ):
+        temporary: typing.BinaryIO = typing.cast(
+            typing.BinaryIO,
+            file_handle,
+        )
+        written: int = temporary.write(b'temporary payload')
+        assert written == len(b'temporary payload')
+        target.write_bytes(b'concurrent winner')
 
     assert target.read_bytes() == b'concurrent winner'
     assert set(tmp_path.iterdir()) == entries_before | {target}
