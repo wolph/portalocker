@@ -117,7 +117,7 @@ def test_open_atomic_existing_destination_check_survives_optimization(
         pass
 
     script: str = textwrap.dedent(
-        f'''\
+        f"""\
         import pathlib
 
         import portalocker
@@ -135,7 +135,7 @@ def test_open_atomic_existing_destination_check_survives_optimization(
             raise RuntimeError('missing AssertionError under optimized Python')
         if target.read_bytes() != expected:
             raise RuntimeError('existing destination was modified')
-        ''',
+        """,
     )
     completed: subprocess.CompletedProcess[str] = subprocess.run(
         [sys.executable, '-O', '-c', script],
