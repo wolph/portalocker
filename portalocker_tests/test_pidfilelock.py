@@ -24,6 +24,14 @@ def _pidfilelock_context_types(
     return lock, lock.fail_closed()
 
 
+def test_already_locked_holder_pid_exists_without_init() -> None:
+    exc: portalocker.AlreadyLocked = portalocker.AlreadyLocked.__new__(
+        portalocker.AlreadyLocked,
+    )
+
+    assert exc.holder_pid is None
+
+
 def test_pidfilelock_creation():
     """Test basic PidFileLock creation."""
     with tempfile.TemporaryDirectory() as tmpdir:
