@@ -160,15 +160,11 @@ def test_strict_context_preserves_body_error(
     assert exc_info.value is body_error
     assert exc_info.value.__context__ is unlock_error
     if hasattr(exc_info.value, 'add_note'):
-        exception_notes: list[str] = typing.cast(
-            list[str],
-            exc_info.value.__dict__['__notes__'],
-        )
-        assert exception_notes == [
+        assert getattr(exc_info.value, '__notes__', []) == [
             'portalocker release failed; see exception context',
         ]
     else:
-        assert '__notes__' not in exc_info.value.__dict__
+        assert not hasattr(exc_info.value, '__notes__')
     assert events == ['unlock', 'close']
 
 
