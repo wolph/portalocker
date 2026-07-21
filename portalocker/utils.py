@@ -4,6 +4,7 @@ import abc
 import atexit
 import collections.abc
 import contextlib
+import errno
 import logging
 import os
 import pathlib
@@ -605,7 +606,7 @@ class PidFileLock(TemporaryFileLock):
 
     def _write_pid(self) -> None:
         """Publish the current PID and preserve operation errors on close."""
-        pid_file: typing.TextIO = open(
+        pid_file: typing.TextIO = open(  # noqa: SIM115
             self.filename,
             'a+',
             encoding='ascii',
@@ -615,7 +616,11 @@ class PidFileLock(TemporaryFileLock):
             pid_file.truncate()
             pid_file.write(str(os.getpid()))
             pid_file.flush()
-            os.fsync(pid_file.fileno())
+            try:
+                os.fsync(pid_file.fileno())
+            except OSError as error:
+                if error.errno not in (errno.EINVAL, errno.ENOTSUP):
+                    raise
         except Exception as error:
             try:
                 pid_file.close()
@@ -628,7 +633,12 @@ class PidFileLock(TemporaryFileLock):
         self,
         inner_lock: Lock,
     ) -> Exception | None:
-        """Release a failed sidecar and return any secondary cleanup error."""
+        """Release a failed sidecar and return any secondary cleanup error.
+
+        ``Lock.release`` currently clears its handle without raising. Keep the
+        fallback close so rollback remains safe if that contract changes or a
+        custom/monkeypatched release exits early.
+        """
         cleanup_error: Exception | None = None
         try:
             inner_lock.release()
