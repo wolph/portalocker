@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import errno
 import multiprocessing
 import os
 import tempfile
@@ -513,6 +514,29 @@ def test_pidfilelock_releases_sidecar_on_publication_failure(
         assert recovered.read_pid() == os.getpid()
     finally:
         recovered.release()
+
+
+@pytest.mark.parametrize('error_number', (errno.EINVAL, errno.ENOTSUP))
+def test_pidfilelock_tolerates_unsupported_fsync(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+) -> None:
+    """Unsupported fsync must not regress otherwise valid PID publication."""
+    pid_file: Path = tmp_path / 'pidfilelock_unsupported_fsync.pid'
+
+    def unsupported_fsync(fd: int) -> None:
+        raise OSError(error_number, os.strerror(error_number))
+
+    monkeypatch.setattr(os, 'fsync', unsupported_fsync)
+
+    lock: utils.PidFileLock = utils.PidFileLock(str(pid_file))
+    lock.acquire(timeout=0)
+    try:
+        assert lock._acquired_lock
+        assert lock.read_pid() == os.getpid()
+    finally:
+        lock.release()
 
 
 def test_pidfilelock_preserves_write_error_when_pid_close_fails(
