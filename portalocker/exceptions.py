@@ -29,6 +29,8 @@ class LockException(BaseLockException):
 
 
 class AlreadyLocked(LockException):
+    holder_pid: int | None = None
+
     def __init__(
         self,
         *args: typing.Any,
@@ -36,7 +38,7 @@ class AlreadyLocked(LockException):
         **kwargs: typing.Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.holder_pid: int | None = holder_pid
+        self.holder_pid = holder_pid
 
 
 class FileToLarge(LockException):
