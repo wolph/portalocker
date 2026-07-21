@@ -42,7 +42,10 @@ def test_open_atomic_uses_platform_publication_primitive(
         publication_calls.append((pathlib.Path(source), destination))
         real_replace(source, destination)
 
-    def fail_unused_publication(source: str, destination: pathlib.Path) -> None:
+    def fail_unused_publication(
+        source: str,
+        destination: pathlib.Path,
+    ) -> None:
         raise AssertionError(
             f'unexpected publication call: {source!r} -> {destination!r}'
         )
@@ -50,7 +53,11 @@ def test_open_atomic_uses_platform_publication_primitive(
     publication_function: str = 'rename' if os.name == 'nt' else 'link'
     unused_publication_function: str = 'link' if os.name == 'nt' else 'rename'
     monkeypatch.setattr(os, publication_function, fake_publication)
-    monkeypatch.setattr(os, unused_publication_function, fail_unused_publication)
+    monkeypatch.setattr(
+        os,
+        unused_publication_function,
+        fail_unused_publication,
+    )
 
     with portalocker.open_atomic(target) as file_handle:
         temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
