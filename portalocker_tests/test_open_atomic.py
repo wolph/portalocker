@@ -47,7 +47,7 @@ def test_open_atomic_uses_platform_publication_primitive(
         destination: pathlib.Path,
     ) -> None:
         raise AssertionError(
-            f'unexpected publication call: {source!r} -> {destination!r}'
+            f'unexpected publication call: {source!r} -> {destination!r}',
         )
 
     publication_function: str = 'rename' if os.name == 'nt' else 'link'
