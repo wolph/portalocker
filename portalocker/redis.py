@@ -422,7 +422,8 @@ class RedisLock(utils.LockBase['RedisLock']):
                 self.release()
                 raise exceptions.AlreadyLocked()
             if holders is not None and not any(
-                holder.mode is RedisLockMode.SHARED for holder in holders
+                holder.mode is RedisLockMode.SHARED
+                for holder in holders
             ):
                 self.mode = RedisLockMode.EXCLUSIVE
                 return True
