@@ -403,6 +403,40 @@ class RedisLock(utils.LockBase['RedisLock']):
             and pending_holder_ids[0] == self.holder_id
         )
 
+    def _resolve_lock_holders(
+        self,
+        holders: list[RedisLockHolder] | None,
+        fail_when_locked: bool,
+    ) -> bool:
+        if holders is not None and self._holders_are_compatible(holders):
+            return True
+
+        writer_is_elected: bool = (
+            holders is not None
+            and self.flags == constants.LockFlags.EXCLUSIVE
+            and self._writer_is_elected(holders)
+        )
+        if writer_is_elected:
+            self.writer_elected = True
+            if fail_when_locked:
+                self.release()
+                raise exceptions.AlreadyLocked()
+            if holders is not None and not any(
+                holder.mode is RedisLockMode.SHARED for holder in holders
+            ):
+                self.mode = RedisLockMode.EXCLUSIVE
+                return True
+            return False
+
+        if holders is None and self.writer_elected:
+            return False
+
+        self.release()
+        logger.debug('Redis lock %s released to retry', self.holder_id)
+        if fail_when_locked:
+            raise exceptions.AlreadyLocked()
+        return False
+
     def acquire(
         self,
         timeout: float | None = None,
@@ -456,32 +490,11 @@ class RedisLock(utils.LockBase['RedisLock']):
                 self.holder_id,
                 holders,
             )
-            if holders is not None and self._holders_are_compatible(holders):
+            if self._resolve_lock_holders(
+                holders,
+                effective_fail_when_locked,
+            ):
                 return self
-            writer_is_elected: bool = (
-                holders is not None
-                and self.flags == constants.LockFlags.EXCLUSIVE
-                and self._writer_is_elected(holders)
-            )
-            if writer_is_elected:
-                self.writer_elected = True
-                if effective_fail_when_locked:
-                    self.release()
-                    raise exceptions.AlreadyLocked()
-                if holders is not None and not any(
-                    holder.mode is RedisLockMode.SHARED
-                    for holder in holders
-                ):
-                    self.mode = RedisLockMode.EXCLUSIVE
-                    return self
-                continue
-            if holders is None and self.writer_elected:
-                continue
-
-            self.release()
-            logger.debug('Redis lock %s released to retry', self.holder_id)
-            if effective_fail_when_locked:
-                raise exceptions.AlreadyLocked()
 
         self.release()
         raise exceptions.AlreadyLocked()
