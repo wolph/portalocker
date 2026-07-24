@@ -236,6 +236,14 @@ def test_redis_incompatible_lock_modes_contend(
         holder.release()
 
 
+def _ignore_stale_cleanup(
+    lock: redis.RedisLock,
+    connection: client.Redis,
+    responding_holders: typing.Iterable[redis.RedisLockHolder],
+) -> None:
+    pass
+
+
 def test_redis_pending_writer_blocks_new_readers(
     redis_connection: ConnectionFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -253,6 +261,14 @@ def test_redis_pending_writer_blocks_new_readers(
         check_interval=0.02,
         unavailable_timeout=0.2,
     )
+    if isinstance(reader.connection, fakeredis.FakeStrictRedis):
+        # fakeredis does not implement CLIENT KILL. Stale-holder cleanup is
+        # covered independently; this test isolates writer gating.
+        monkeypatch.setattr(
+            redis.RedisLock,
+            '_kill_unavailable_locks',
+            _ignore_stale_cleanup,
+        )
     writer_errors: list[BaseException] = []
     writer_released: threading.Event = threading.Event()
     original_writer_release: typing.Callable[[], None] = writer.release
@@ -301,26 +317,20 @@ def test_redis_pending_writers_are_elected_by_holder_id(
     redis_connection: ConnectionFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def ignore_stale_cleanup(
-        lock: redis.RedisLock,
-        connection: client.Redis,
-        responding_holders: typing.Iterable[redis.RedisLockHolder],
-    ) -> None:
-        pass
-
-    # fakeredis does not implement CLIENT KILL. Stale-holder cleanup is
-    # covered independently; this test isolates writer election.
-    monkeypatch.setattr(
-        redis.RedisLock,
-        '_kill_unavailable_locks',
-        ignore_stale_cleanup,
-    )
     channel: str = str(random.random())
     reader: redis.RedisLock = redis.RedisLock(
         channel,
         connection=redis_connection(),
         flags=portalocker.LockFlags.SHARED,
     )
+    if isinstance(reader.connection, fakeredis.FakeStrictRedis):
+        # fakeredis does not implement CLIENT KILL. Stale-holder cleanup is
+        # covered independently; this test isolates writer election.
+        monkeypatch.setattr(
+            redis.RedisLock,
+            '_kill_unavailable_locks',
+            _ignore_stale_cleanup,
+        )
     first: redis.RedisLock = redis.RedisLock(
         channel,
         connection=redis_connection(),
@@ -1002,9 +1012,11 @@ def test_redis_acquire_fail_when_locked_fails_fast() -> None:
         server=server,
         decode_responses=True,
     )
-    contender_connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
-        server=server,
-        decode_responses=True,
+    contender_connection: fakeredis.FakeStrictRedis = (
+        fakeredis.FakeStrictRedis(
+            server=server,
+            decode_responses=True,
+        )
     )
     channel: str = str(random.random())
     holder: redis.RedisLock = redis.RedisLock(
