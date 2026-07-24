@@ -81,8 +81,37 @@ Usage is really easy:
     with lock:
         print('do something here')
 
+Shared locks allow multiple readers while remaining mutually exclusive with
+writers:
+
+::
+
+    read_lock = portalocker.RedisLock(
+        'some_lock_channel_name',
+        flags=portalocker.LockFlags.SHARED,
+    )
+
+    with read_lock:
+        print('read shared state')
+
+Waiting writers prevent new readers from entering, so a continuous stream of
+readers cannot starve an exclusive lock. New shared locks also interoperate with
+older portalocker clients: legacy Redis locks are treated as exclusive.
+
 The API is essentially identical to the other ``Lock`` classes so in addition
 to the ``with`` statement you can also use ``lock.acquire(...)``.
+
+The normal test suite uses ``fakeredis``. To optionally repeat the Redis tests
+against a locally running server:
+
+::
+
+    redis-server
+    tox -e redis-live
+
+Set ``REDIS_HOST`` or ``REDIS_PORT`` when the server does not use
+``localhost:6379``. The ``redis-live`` environment fails instead of skipping
+when it cannot connect.
 
 Python 2
 --------
@@ -200,4 +229,3 @@ License
 -------
 
 See the `LICENSE <https://github.com/WoLpH/portalocker/blob/develop/LICENSE>`_ file.
-

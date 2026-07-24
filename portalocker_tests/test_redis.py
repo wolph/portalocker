@@ -9,7 +9,9 @@ server, mirroring real usage.
 
 import _thread
 import json
+import os
 import random
+import threading
 import time
 import typing
 
@@ -23,12 +25,100 @@ from portalocker import redis, utils
 ConnectionFactory = typing.Callable[[], client.Redis]
 
 
-def _live_redis_available() -> bool:
+def test_redis_lock_accepts_shared_flag() -> None:
+    lock: redis.RedisLock = redis.RedisLock(
+        'shared-channel',
+        flags=portalocker.LockFlags.SHARED,
+    )
+
+    assert lock.flags == portalocker.LockFlags.SHARED
+
+
+def test_redis_lock_uses_holder_specific_client_name() -> None:
+    lock: redis.RedisLock = redis.RedisLock('named-channel')
+
+    assert lock.client_name == f'named-channel-lock-{lock.holder_id}'
+    assert lock.legacy_client_name == 'named-channel-lock'
+
+
+def test_redis_lock_names_pubsub_connection(
+    redis_connection: ConnectionFactory,
+) -> None:
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+    )
+
+    lock.acquire()
     try:
-        client.Redis().ping()
+        connection: client.Redis = lock.get_connection()
+        matching_clients: list[dict[str, str]] = [
+            client_
+            for client_ in connection.client_list()
+            if client_.get('name') == lock.client_name
+        ]
+        assert len(matching_clients) == 1
+        if not isinstance(connection, fakeredis.FakeStrictRedis):
+            assert int(matching_clients[0]['sub']) == 1
+    finally:
+        lock.release()
+
+
+def test_live_redis_required_fails_when_server_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv('PORTALOCKER_REDIS_TESTS_REQUIRED', '1')
+
+    with pytest.raises(pytest.UsageError, match='required live Redis server'):
+        _ensure_live_redis_available(False)
+
+
+@pytest.mark.parametrize(
+    'flags',
+    [
+        portalocker.LockFlags(0),
+        portalocker.LockFlags.EXCLUSIVE | portalocker.LockFlags.SHARED,
+        portalocker.LockFlags.SHARED | portalocker.LockFlags.NON_BLOCKING,
+    ],
+)
+def test_redis_lock_rejects_invalid_flags(
+    flags: portalocker.LockFlags,
+) -> None:
+    with pytest.raises(ValueError, match='exactly one'):
+        redis.RedisLock('invalid-channel', flags=flags)
+
+
+def _live_redis_connection() -> client.Redis:
+    host: str = os.environ.get('REDIS_HOST', 'localhost')
+    port: int = int(os.environ.get('REDIS_PORT', '6379'))
+    return client.Redis(
+        host=host,
+        port=port,
+        decode_responses=True,
+    )
+
+
+def _live_redis_available() -> bool:
+    connection: client.Redis = _live_redis_connection()
+    try:
+        connection.ping()
     except (exceptions.ConnectionError, ConnectionRefusedError):
         return False
+    finally:
+        connection.close()
     return True
+
+
+def _ensure_live_redis_available(available: bool) -> None:
+    if available:
+        return
+    if os.environ.get('PORTALOCKER_REDIS_TESTS_REQUIRED') == '1':
+        raise pytest.UsageError(
+            'required live Redis server is unavailable at '
+            f'{os.environ.get("REDIS_HOST", "localhost")}:'
+            f'{os.environ.get("REDIS_PORT", "6379")}'
+        )
+    pytest.skip('no live redis server')
 
 
 _LIVE_REDIS: bool = _live_redis_available()
@@ -50,9 +140,8 @@ def set_redis_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
 def redis_connection(request: pytest.FixtureRequest) -> ConnectionFactory:
     """Yield a connection factory backed by fakeredis or a live server."""
     if request.param == 'live':
-        if not _LIVE_REDIS:
-            pytest.skip('no live redis server on localhost:6379')
-        return lambda: client.Redis(decode_responses=True)
+        _ensure_live_redis_available(_LIVE_REDIS)
+        return _live_redis_connection
 
     server: fakeredis.FakeServer = fakeredis.FakeServer()
     return lambda: fakeredis.FakeStrictRedis(
@@ -82,6 +171,218 @@ def test_redis_lock(redis_connection: ConnectionFactory) -> None:
         lock_a.release()
         if lock_a.connection is not None:
             lock_a.connection.close()
+
+
+def test_redis_shared_locks_coexist(
+    redis_connection: ConnectionFactory,
+) -> None:
+    channel: str = str(random.random())
+    first: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        flags=portalocker.LockFlags.SHARED,
+    )
+    second: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        flags=portalocker.LockFlags.SHARED,
+    )
+
+    try:
+        first.acquire()
+        second.acquire()
+    finally:
+        second.release()
+        first.release()
+
+
+@pytest.mark.parametrize(
+    ('holder_flags', 'contender_flags'),
+    [
+        (
+            portalocker.LockFlags.SHARED,
+            portalocker.LockFlags.EXCLUSIVE,
+        ),
+        (
+            portalocker.LockFlags.EXCLUSIVE,
+            portalocker.LockFlags.SHARED,
+        ),
+    ],
+)
+def test_redis_incompatible_lock_modes_contend(
+    redis_connection: ConnectionFactory,
+    holder_flags: portalocker.LockFlags,
+    contender_flags: portalocker.LockFlags,
+) -> None:
+    channel: str = str(random.random())
+    holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        flags=holder_flags,
+    )
+    contender: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        flags=contender_flags,
+        fail_when_locked=True,
+    )
+
+    holder.acquire()
+    try:
+        with pytest.raises(portalocker.AlreadyLocked):
+            contender.acquire()
+        assert contender.pubsub is None
+    finally:
+        holder.release()
+
+
+def test_redis_pending_writer_blocks_new_readers(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel: str = str(random.random())
+    reader: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        flags=portalocker.LockFlags.SHARED,
+    )
+    writer: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        timeout=5,
+        check_interval=0.02,
+        unavailable_timeout=0.2,
+    )
+    writer_errors: list[BaseException] = []
+    writer_released: threading.Event = threading.Event()
+    original_writer_release: typing.Callable[[], None] = writer.release
+
+    def record_writer_release() -> None:
+        original_writer_release()
+        writer_released.set()
+
+    monkeypatch.setattr(writer, 'release', record_writer_release)
+
+    def acquire_writer() -> None:
+        try:
+            writer.acquire()
+        except BaseException as exception:  # pragma: no cover
+            writer_errors.append(exception)
+
+    reader.acquire()
+    writer_thread: threading.Thread = threading.Thread(target=acquire_writer)
+    writer_thread.start()
+    deadline: float = time.monotonic() + 1
+    while writer.pubsub is None and time.monotonic() < deadline:
+        time.sleep(0.001)
+    assert writer.pubsub is not None
+
+    try:
+        assert not writer_released.wait(timeout=0.4)
+        late_reader: redis.RedisLock = redis.RedisLock(
+            channel,
+            connection=redis_connection(),
+            flags=portalocker.LockFlags.SHARED,
+            fail_when_locked=True,
+        )
+        with pytest.raises(portalocker.AlreadyLocked):
+            late_reader.acquire()
+        assert late_reader.pubsub is None
+    finally:
+        reader.release()
+        writer_thread.join(timeout=3)
+        writer.release()
+
+    assert not writer_thread.is_alive()
+    assert not writer_errors
+
+
+def test_redis_pending_writers_are_elected_by_holder_id(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def ignore_stale_cleanup(
+        lock: redis.RedisLock,
+        connection: client.Redis,
+        responding_holders: typing.Iterable[redis.RedisLockHolder],
+    ) -> None:
+        pass
+
+    # fakeredis does not implement CLIENT KILL. Stale-holder cleanup is
+    # covered independently; this test isolates writer election.
+    monkeypatch.setattr(
+        redis.RedisLock,
+        '_kill_unavailable_locks',
+        ignore_stale_cleanup,
+    )
+    channel: str = str(random.random())
+    reader: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        flags=portalocker.LockFlags.SHARED,
+    )
+    first: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        timeout=10,
+        check_interval=0.02,
+        unavailable_timeout=1,
+    )
+    second: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        timeout=10,
+        check_interval=0.02,
+        unavailable_timeout=1,
+    )
+    first.holder_id = 'a-first-writer'
+    second.holder_id = 'b-second-writer'
+    acquired: list[str] = []
+    errors: list[BaseException] = []
+
+    def acquire(lock: redis.RedisLock, name: str) -> None:
+        try:
+            lock.acquire()
+            acquired.append(name)
+        except BaseException as exception:  # pragma: no cover
+            errors.append(exception)
+
+    reader.acquire()
+    first_thread: threading.Thread = threading.Thread(
+        target=acquire,
+        args=(first, 'first'),
+    )
+    second_thread: threading.Thread = threading.Thread(
+        target=acquire,
+        args=(second, 'second'),
+    )
+    first_thread.start()
+    first_deadline: float = time.monotonic() + 2
+    while first.pubsub is None and time.monotonic() < first_deadline:
+        time.sleep(0.001)
+    assert first.pubsub is not None
+    second_thread.start()
+    second_deadline: float = time.monotonic() + 2
+    while second.pubsub is None and time.monotonic() < second_deadline:
+        time.sleep(0.001)
+    assert second.pubsub is not None
+
+    reader.release()
+    acquired_deadline: float = time.monotonic() + 6
+    while not acquired and not errors and time.monotonic() < acquired_deadline:
+        time.sleep(0.001)
+    if errors:
+        raise errors[0]
+    assert acquired == ['first']
+
+    first.release()
+    second_thread.join(timeout=4)
+    assert acquired == ['first', 'second']
+    second.release()
+    first_thread.join(timeout=1)
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert not errors
 
 
 @pytest.mark.parametrize('timeout', [None, 0, 0.001])
@@ -177,7 +478,7 @@ def test_redis_channel_handler(redis_connection: ConnectionFactory) -> None:
         while (message := pubsub.get_message(timeout=0.1)) is not None:
             assert message.get('type') != 'message'
 
-        # A ping publishes a pong (timestamp) on the response channel.
+        # A ping publishes holder identity and mode on the response channel.
         lock.channel_handler(
             {
                 'type': 'message',
@@ -196,12 +497,200 @@ def test_redis_channel_handler(redis_connection: ConnectionFactory) -> None:
                 pong = message
                 break
         assert pong is not None
-        pong_data: typing.Any = pong['data']
-        assert pong_data is not None
-        assert float(pong_data) > 0
+        pong_raw_data: typing.Any = pong['data']
+        assert isinstance(pong_raw_data, (str, bytes, bytearray))
+        pong_data: dict[str, typing.Any] = json.loads(pong_raw_data)
+        assert pong_data == {
+            'holder_id': lock.holder_id,
+            'mode': 'exclusive',
+            'protocol': 1,
+        }
         pubsub.close()
     finally:
         lock.release()
+
+
+@pytest.mark.parametrize(
+    'data',
+    [
+        'not-json',
+        json.dumps([]),
+        json.dumps({}),
+        json.dumps({'response_channel': 123}),
+    ],
+)
+def test_redis_channel_handler_ignores_invalid_messages(
+    data: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+    )
+    published: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        connection,
+        'publish',
+        lambda channel, message: published.append((channel, message)),
+    )
+
+    lock.channel_handler({'type': 'message', 'data': data})
+
+    assert published == []
+
+
+def test_redis_parse_legacy_response_as_exclusive() -> None:
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+
+    holder: redis.RedisLockHolder = lock._parse_lock_response('123.45', 7)
+
+    assert holder == redis.RedisLockHolder(
+        holder_id='legacy-7',
+        mode=redis.RedisLockMode.EXCLUSIVE,
+        legacy=True,
+    )
+
+
+@pytest.mark.parametrize(
+    'response',
+    [
+        json.dumps(
+            {
+                'holder_id': 123,
+                'mode': 'shared',
+                'protocol': 1,
+            }
+        ),
+        json.dumps(
+            {
+                'holder_id': 'holder',
+                'mode': 123,
+                'protocol': 1,
+            }
+        ),
+        json.dumps(
+            {
+                'holder_id': 'holder',
+                'mode': 'unknown',
+                'protocol': 1,
+            }
+        ),
+        json.dumps(
+            {
+                'holder_id': 'holder',
+                'mode': 'shared',
+                'protocol': 2,
+            }
+        ),
+    ],
+)
+def test_redis_parse_unknown_response_as_legacy(response: str) -> None:
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+
+    holder: redis.RedisLockHolder = lock._parse_lock_response(response, 0)
+
+    assert holder.mode is redis.RedisLockMode.EXCLUSIVE
+    assert holder.legacy
+
+
+def test_redis_shared_lock_blocks_on_legacy_holder(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel: str = str(random.random())
+    legacy_holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+    )
+
+    def legacy_channel_handler(message: dict[str, str]) -> None:
+        if message.get('type') != 'message':  # pragma: no cover
+            return
+        data: dict[str, str] = json.loads(message['data'])
+        connection: client.Redis = legacy_holder.get_connection()
+        connection.publish(data['response_channel'], str(time.time()))
+
+    monkeypatch.setattr(
+        legacy_holder,
+        'channel_handler',
+        legacy_channel_handler,
+    )
+    shared_contender: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        flags=portalocker.LockFlags.SHARED,
+        fail_when_locked=True,
+    )
+
+    legacy_holder.acquire()
+    try:
+        with pytest.raises(portalocker.AlreadyLocked):
+            shared_contender.acquire()
+    finally:
+        legacy_holder.release()
+
+
+def test_legacy_probe_recognizes_new_shared_holder(
+    redis_connection: ConnectionFactory,
+) -> None:
+    channel: str = str(random.random())
+    shared_holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        flags=portalocker.LockFlags.SHARED,
+    )
+    legacy_probe: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+    )
+
+    shared_holder.acquire()
+    try:
+        connection: client.Redis = legacy_probe.get_connection()
+        assert legacy_probe.check_or_kill_lock(connection, timeout=0.2)
+    finally:
+        shared_holder.release()
+
+
+def test_live_redis_reaps_unresponsive_shared_holder(
+    redis_connection: ConnectionFactory,
+) -> None:
+    holder_connection: client.Redis = redis_connection()
+    if isinstance(holder_connection, fakeredis.FakeStrictRedis):
+        pytest.skip('fakeredis does not implement CLIENT KILL')
+    contender_connection: client.Redis = redis_connection()
+    channel: str = str(random.random())
+    holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=holder_connection,
+        flags=portalocker.LockFlags.SHARED,
+        unavailable_timeout=0.2,
+    )
+    contender: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=contender_connection,
+        timeout=2,
+        check_interval=0.02,
+        unavailable_timeout=0.2,
+    )
+
+    holder.acquire()
+    assert holder.thread is not None
+    holder.thread.stop()
+    holder.thread.join()
+    holder.thread = None
+    try:
+        contender.acquire()
+        assert contender.mode is redis.RedisLockMode.EXCLUSIVE
+    finally:
+        contender.release()
+        holder.release()
+        holder_connection.close()
+        contender_connection.close()
 
 
 class _SilentPubSub:
@@ -215,6 +704,121 @@ class _SilentPubSub:
 
     def close(self) -> None:
         pass
+
+
+class _ResponsePubSub:
+    def __init__(
+        self,
+        responses: list[str],
+        confirmations: list[dict[str, typing.Any] | None] | None = None,
+    ) -> None:
+        self._responses: list[str] = responses
+        self._confirmations: list[dict[str, typing.Any] | None] = (
+            confirmations
+            if confirmations is not None
+            else [{'type': 'subscribe'}]
+        )
+
+    def subscribe(self, *channels: str) -> None:
+        pass
+
+    def get_message(self, timeout: float) -> dict[str, typing.Any] | None:
+        if self._confirmations:
+            return self._confirmations.pop(0)
+        if self._responses:
+            return {'type': 'message', 'data': self._responses.pop(0)}
+        return None
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    'confirmations',
+    [
+        [None],
+        [{'type': 'message'}, {'type': 'subscribe'}],
+    ],
+)
+def test_redis_collect_holders_tolerates_confirmation_delays(
+    confirmations: list[dict[str, typing.Any] | None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.001,
+    )
+    pubsub: _ResponsePubSub = _ResponsePubSub(
+        [],
+        confirmations=confirmations,
+    )
+    monkeypatch.setattr(lock, '_get_pubsub', lambda connection: pubsub)
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection: 0)
+    monkeypatch.setattr(connection, 'publish', lambda channel, message: 0)
+
+    holders: list[redis.RedisLockHolder] | None = lock._collect_lock_holders(
+        connection,
+        expected_subscribers=0,
+        timeout=0.01,
+    )
+
+    assert holders == []
+
+
+def test_redis_collect_holders_kills_only_unresponsive_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        'stale-channel',
+        connection=connection,
+        thread_sleep_time=0.001,
+    )
+    response: str = json.dumps(
+        {
+            'holder_id': 'responding',
+            'mode': 'shared',
+            'protocol': 1,
+        }
+    )
+    pubsub: _ResponsePubSub = _ResponsePubSub([response])
+    killed: list[str | None] = []
+    monkeypatch.setattr(lock, '_get_pubsub', lambda connection: pubsub)
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection: 2)
+    monkeypatch.setattr(connection, 'publish', lambda channel, message: 2)
+    monkeypatch.setattr(
+        connection,
+        'client_list',
+        lambda: [
+            {
+                'id': 'responding-client',
+                'name': 'stale-channel-lock-responding',
+            },
+            {'id': 'stale-client', 'name': 'stale-channel-lock-stale'},
+        ],
+    )
+    monkeypatch.setattr(
+        connection,
+        'client_kill_filter',
+        lambda client_id: killed.append(client_id),
+    )
+
+    holders: list[redis.RedisLockHolder] | None = lock._collect_lock_holders(
+        connection,
+        expected_subscribers=2,
+        timeout=0.01,
+    )
+
+    assert holders is None
+    assert killed == ['stale-client']
 
 
 def test_redis_check_or_kill_lock_kills_unresponsive_client(
@@ -388,41 +992,42 @@ def test_redis_check_or_kill_lock_always_closes_pubsub(
     assert calls.count('close') == 1
 
 
-def test_redis_acquire_fail_when_locked_fails_fast(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_redis_acquire_fail_when_locked_fails_fast() -> None:
     """``fail_when_locked`` raises immediately when the holder is alive.
 
-    It must not keep polling until the timeout expires. ``check_or_kill_lock``
-    is stubbed to report the holder alive and is expected to be consulted
-    exactly once before ``AlreadyLocked`` is raised.
+    It must not keep polling until the timeout expires.
     """
-    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
-        server=fakeredis.FakeServer(),
+    server: fakeredis.FakeServer = fakeredis.FakeServer()
+    holder_connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=server,
         decode_responses=True,
     )
-    lock: redis.RedisLock = redis.RedisLock(
-        str(random.random()),
-        connection=connection,
+    contender_connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=server,
+        decode_responses=True,
+    )
+    channel: str = str(random.random())
+    holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=holder_connection,
         thread_sleep_time=0.001,
     )
-    calls: list[float] = []
-
-    def check_or_kill_lock(conn: client.Redis, timeout: float) -> bool:
-        calls.append(timeout)
-        return True
-
-    monkeypatch.setattr(lock, '_get_subscriber_count', lambda conn: 1)
-    monkeypatch.setattr(lock, 'check_or_kill_lock', check_or_kill_lock)
+    contender: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=contender_connection,
+        timeout=1,
+        fail_when_locked=True,
+        thread_sleep_time=0.001,
+    )
+    holder.acquire()
 
     start: float = time.monotonic()
     with pytest.raises(portalocker.AlreadyLocked):
-        lock.acquire(timeout=1, fail_when_locked=True)
+        contender.acquire()
     elapsed: float = time.monotonic() - start
 
-    # Raised after a single liveness check, not after polling the timeout.
-    assert calls == [lock.unavailable_timeout]
     assert elapsed < 0.5
+    holder.release()
 
 
 def test_redis_release_closes_auto_created_connection(
@@ -475,6 +1080,12 @@ class _SubscribeError(Exception):
 
 class _BoomPubSub:
     """Pubsub whose ``subscribe`` always raises."""
+
+    def execute_command(self, *args: typing.Any) -> None:
+        pass
+
+    def parse_response(self) -> None:
+        pass
 
     def subscribe(self, **channels: typing.Any) -> None:
         raise _SubscribeError('subscribe failed')

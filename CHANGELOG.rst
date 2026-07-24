@@ -33,6 +33,10 @@
    ``fail_when_locked=True`` fails fast instead of polling the full timeout,
    internally-created connections are closed on release, and a failed
    ``acquire()`` rolls back cleanly so the lock can be retried
+ * Added shared ``RedisLock`` readers through ``LockFlags.SHARED``. Waiting
+   writers gate new readers to prevent starvation, holder-specific heartbeats
+   preserve stale-client cleanup, and legacy Redis lock responses are treated
+   as exclusive for mixed-version safety (#124)
  * Fixed ``FlockLocker``/``LockfLocker`` on POSIX to use their named syscall
    (previously silently used the global ``LOCKER``); the module-level
    ``lock()``/``unlock()`` on POSIX now accept all documented ``LOCKER``
@@ -122,4 +126,3 @@ https://github.com/WoLpH/portalocker/commits/master
 0.1:
 
  * Initial release
-
