@@ -25,7 +25,8 @@
    always ``None`` before); the smoke-run now uses ``sys.executable``
    (fixes Windows)
  * Fixed ``PidFileLock`` ignoring ``timeout`` when ``fail_when_locked=False``;
-   its sidecar lock is now released if the PID write fails
+   all PID-publication failures now transactionally release the sidecar and
+   preserve the publication error if cleanup also fails (#116)
  * Fixed a ``TemporaryFileLock``/``PidFileLock`` unlock-then-unlink race that
    could let two processes hold the same lock (split-brain); release now
    unlinks before unlocking on POSIX and acquire re-verifies file identity

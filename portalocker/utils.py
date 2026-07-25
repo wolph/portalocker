@@ -4,6 +4,7 @@ import abc
 import atexit
 import collections.abc
 import contextlib
+import errno
 import logging
 import os
 import pathlib
@@ -653,6 +654,63 @@ class PidFileLock(TemporaryFileLock):
         self._lockfile = f'{self.filename}.lock'
         self._inner_lock: Lock | None = None
 
+    def _write_pid(self) -> None:
+        """Publish the current PID and preserve operation errors on close."""
+        pid_file: typing.TextIO = open(  # noqa: SIM115
+            self.filename,
+            'a+',
+            encoding='ascii',
+        )
+        try:
+            pid_file.seek(0)
+            pid_file.truncate()
+            pid_file.write(str(os.getpid()))
+            pid_file.flush()
+            try:
+                os.fsync(pid_file.fileno())
+            except OSError as error:
+                if error.errno not in (errno.EINVAL, errno.ENOTSUP):
+                    raise
+        except Exception as error:
+            try:
+                pid_file.close()
+            except Exception as close_error:
+                raise error from close_error
+            raise
+        pid_file.close()
+
+    def _rollback_failed_acquire(
+        self,
+        inner_lock: Lock,
+    ) -> Exception | None:
+        """Release a failed sidecar and return any secondary cleanup error.
+
+        ``Lock.release`` currently clears its handle without raising. Keep the
+        fallback close so rollback remains safe if that contract changes or a
+        custom/monkeypatched release exits early.
+        """
+        cleanup_error: Exception | None = None
+        try:
+            inner_lock.release()
+        except Exception as error:
+            cleanup_error = error
+
+        fh: types.IO | None = inner_lock.fh
+        if fh is not None:
+            try:
+                fh.close()
+            except Exception as close_error:
+                if cleanup_error is None:
+                    cleanup_error = close_error
+                else:
+                    cleanup_error.__cause__ = close_error
+            finally:
+                inner_lock.fh = None
+
+        self._inner_lock = None
+        self._acquired_lock = False
+        return cleanup_error
+
     def acquire(
         self,
         timeout: float | None = None,
@@ -701,39 +759,20 @@ class PidFileLock(TemporaryFileLock):
                 raise exceptions.AlreadyLocked(*exc.args) from exc
             raise
 
-        # Write the current process PID to the public PID file. Anything that
-        # fails here must release the sidecar lock we just acquired, otherwise
-        # it stays held forever: `__enter__` surfaces the error and `__exit__`
-        # only cleans up after a *successful* acquire.
-        # Use unbuffered OS ops where possible
         try:
-            with open(self.filename, 'a+') as f:
-                try:
-                    fd2 = f.fileno()
-                    os.lseek(fd2, 0, os.SEEK_SET)
-                    try:
-                        os.ftruncate(fd2, 0)
-                    except Exception:  # pragma: no cover - rare
-                        # Fallback for platforms without os.ftruncate (e.g.
-                        # Windows)
-                        f.seek(0)
-                        f.truncate()
-                    os.write(fd2, str(os.getpid()).encode('ascii'))
-                    with contextlib.suppress(Exception):
-                        os.fsync(fd2)
-                except Exception:  # pragma: no cover - rare
-                    # Fallback for platforms without os.write/os.lseek (e.g.
-                    # Jython)
-                    f.seek(0)
-                    f.truncate()
-                    f.write(str(os.getpid()))
-                    with contextlib.suppress(Exception):
-                        f.flush()
-        except Exception:
-            # Release the sidecar and reset state before propagating.
-            self._inner_lock = None
-            with contextlib.suppress(Exception):
-                inner_lock.release()
+            self._write_pid()
+        except Exception as error:
+            cleanup_error: Exception | None = self._rollback_failed_acquire(
+                inner_lock,
+            )
+            if cleanup_error is not None:
+                publication_cause: BaseException | None = error.__cause__
+                if publication_cause is not None:
+                    cause_tail: BaseException = cleanup_error
+                    while cause_tail.__cause__ is not None:
+                        cause_tail = cause_tail.__cause__
+                    cause_tail.__cause__ = publication_cause
+                raise error from cleanup_error
             raise
 
         self._acquired_lock = True
