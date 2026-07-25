@@ -313,6 +313,14 @@ def test_redis_pending_writer_blocks_new_readers(
     writer_thread: threading.Thread = threading.Thread(target=acquire_writer)
     writer_thread.start()
     _wait_for_subscribers(reader, 2)
+    # Before its first complete holder sample a pending writer backs off by
+    # releasing its subscription, making it invisible to new readers. The
+    # reader-gating guarantee only holds once the writer is elected, so the
+    # test must synchronize on that state.
+    election_deadline: float = time.monotonic() + 30
+    while not writer.writer_elected and time.monotonic() < election_deadline:
+        time.sleep(0.001)
+    assert writer.writer_elected
 
     try:
         assert not writer_released.wait(timeout=0.4)
@@ -395,6 +403,13 @@ def test_redis_pending_writers_are_elected_by_holder_id(
     _wait_for_subscribers(reader, 2)
     second_thread.start()
     _wait_for_subscribers(reader, 3)
+    # An unelected writer backs off by dropping its subscription whenever a
+    # holder sample is incomplete, so the election order is only pinned down
+    # once the favored writer is actually elected while the reader holds on.
+    election_deadline: float = time.monotonic() + 30
+    while not first.writer_elected and time.monotonic() < election_deadline:
+        time.sleep(0.001)
+    assert first.writer_elected
 
     reader.release()
     acquired_deadline: float = time.monotonic() + 20
