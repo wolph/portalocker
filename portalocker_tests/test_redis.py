@@ -244,6 +244,26 @@ def _ignore_stale_cleanup(
     pass
 
 
+def _wait_for_subscribers(
+    lock: redis.RedisLock,
+    expected: int,
+    timeout: float = 10,
+) -> None:
+    """Block until the lock channel has at least ``expected`` subscribers.
+
+    ``RedisLock.pubsub`` is assigned before SUBSCRIBE reaches the server,
+    so waiting for ``pubsub is not None`` does not guarantee that a waiter
+    participates in elections yet. Contention tests must synchronize on
+    the server-side subscriber count instead.
+    """
+    deadline: float = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if lock._get_subscriber_count(lock.get_connection()) >= expected:
+            return
+        time.sleep(0.001)
+    raise AssertionError(f'never observed {expected} subscribers')
+
+
 def test_redis_pending_writer_blocks_new_readers(
     redis_connection: ConnectionFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -290,10 +310,7 @@ def test_redis_pending_writer_blocks_new_readers(
     reader.acquire()
     writer_thread: threading.Thread = threading.Thread(target=acquire_writer)
     writer_thread.start()
-    deadline: float = time.monotonic() + 1
-    while writer.pubsub is None and time.monotonic() < deadline:
-        time.sleep(0.001)
-    assert writer.pubsub is not None
+    _wait_for_subscribers(reader, 2)
 
     try:
         assert not writer_released.wait(timeout=0.4)
@@ -372,15 +389,9 @@ def test_redis_pending_writers_are_elected_by_holder_id(
         args=(second, 'second'),
     )
     first_thread.start()
-    first_deadline: float = time.monotonic() + 2
-    while first.pubsub is None and time.monotonic() < first_deadline:
-        time.sleep(0.001)
-    assert first.pubsub is not None
+    _wait_for_subscribers(reader, 2)
     second_thread.start()
-    second_deadline: float = time.monotonic() + 2
-    while second.pubsub is None and time.monotonic() < second_deadline:
-        time.sleep(0.001)
-    assert second.pubsub is not None
+    _wait_for_subscribers(reader, 3)
 
     reader.release()
     acquired_deadline: float = time.monotonic() + 20
