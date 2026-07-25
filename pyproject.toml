@@ -136,6 +136,11 @@ filterwarnings = [
     'ignore::PendingDeprecationWarning',
     'ignore::ImportWarning',
     'ignore::ResourceWarning',
+    # CPython's multiprocessing resource tracker warns (and, escalated to an
+    # error inside a finalizer, fails tests as an unraisable exception) when
+    # garbage collection makes it clean up a semaphore reentrantly. The
+    # timing is interpreter-internal and unrelated to the code under test.
+    'ignore:ResourceTracker called reentrantly:UserWarning',
 ]
 
 [tool.coverage.run]
