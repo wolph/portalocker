@@ -247,9 +247,13 @@ class RedisLock(utils.LockBase['RedisLock']):
             )
             pubsub.parse_response()  # type: ignore[no-untyped-call]
             pubsub.subscribe(**{self.channel: self.channel_handler})
+            # A daemon thread so an unreleased lock can never block
+            # interpreter exit; losing the connection releases the lock by
+            # design, which is exactly what process exit should do.
             self.thread = PubSubWorkerThread(
                 pubsub,
                 sleep_time=self.thread_sleep_time,
+                daemon=True,
             )
             self.thread.start()
             time.sleep(0.01)
@@ -300,8 +304,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         for client_ in clients:
             client_name: str = client_.get('name', '')
             unavailable: bool = (
-                client_name == self.legacy_client_name
-                and not legacy_responded
+                client_name == self.legacy_client_name and not legacy_responded
             ) or (
                 client_name.startswith(client_name_prefix)
                 and client_name.removeprefix(client_name_prefix)
@@ -389,9 +392,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         self,
         holders: list[RedisLockHolder],
     ) -> bool:
-        if any(
-            holder.mode is RedisLockMode.EXCLUSIVE for holder in holders
-        ):
+        if any(holder.mode is RedisLockMode.EXCLUSIVE for holder in holders):
             return False
         pending_holder_ids: list[str] = sorted(
             holder.holder_id
@@ -399,8 +400,7 @@ class RedisLock(utils.LockBase['RedisLock']):
             if holder.mode is RedisLockMode.PENDING
         )
         return bool(
-            pending_holder_ids
-            and pending_holder_ids[0] == self.holder_id
+            pending_holder_ids and pending_holder_ids[0] == self.holder_id
         )
 
     def _resolve_lock_holders(
@@ -422,8 +422,7 @@ class RedisLock(utils.LockBase['RedisLock']):
                 self.release()
                 raise exceptions.AlreadyLocked()
             if holders is not None and not any(
-                holder.mode is RedisLockMode.SHARED
-                for holder in holders
+                holder.mode is RedisLockMode.SHARED for holder in holders
             ):
                 self.mode = RedisLockMode.EXCLUSIVE
                 return True
