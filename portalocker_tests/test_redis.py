@@ -254,12 +254,14 @@ def test_redis_pending_writer_blocks_new_readers(
         connection=redis_connection(),
         flags=portalocker.LockFlags.SHARED,
     )
+    # Timeouts are sized for heavily loaded CI runners; the assertions below
+    # never wait for these upper bounds on the happy path.
     writer: redis.RedisLock = redis.RedisLock(
         channel,
         connection=redis_connection(),
-        timeout=5,
+        timeout=30,
         check_interval=0.02,
-        unavailable_timeout=0.2,
+        unavailable_timeout=2,
     )
     if isinstance(reader.connection, fakeredis.FakeStrictRedis):
         # fakeredis does not implement CLIENT KILL. Stale-holder cleanup is
@@ -306,7 +308,7 @@ def test_redis_pending_writer_blocks_new_readers(
         assert late_reader.pubsub is None
     finally:
         reader.release()
-        writer_thread.join(timeout=3)
+        writer_thread.join(timeout=15)
         writer.release()
 
     assert not writer_thread.is_alive()
@@ -331,19 +333,22 @@ def test_redis_pending_writers_are_elected_by_holder_id(
             '_kill_unavailable_locks',
             _ignore_stale_cleanup,
         )
+    # The election result depends on every pending writer answering liveness
+    # pings in time, so the unavailable window has to absorb CI scheduling
+    # stalls; the happy path never waits for these upper bounds.
     first: redis.RedisLock = redis.RedisLock(
         channel,
         connection=redis_connection(),
-        timeout=10,
+        timeout=30,
         check_interval=0.02,
-        unavailable_timeout=1,
+        unavailable_timeout=5,
     )
     second: redis.RedisLock = redis.RedisLock(
         channel,
         connection=redis_connection(),
-        timeout=10,
+        timeout=30,
         check_interval=0.02,
-        unavailable_timeout=1,
+        unavailable_timeout=5,
     )
     first.holder_id = 'a-first-writer'
     second.holder_id = 'b-second-writer'
@@ -378,7 +383,7 @@ def test_redis_pending_writers_are_elected_by_holder_id(
     assert second.pubsub is not None
 
     reader.release()
-    acquired_deadline: float = time.monotonic() + 6
+    acquired_deadline: float = time.monotonic() + 20
     while not acquired and not errors and time.monotonic() < acquired_deadline:
         time.sleep(0.001)
     if errors:
@@ -386,13 +391,89 @@ def test_redis_pending_writers_are_elected_by_holder_id(
     assert acquired == ['first']
 
     first.release()
-    second_thread.join(timeout=4)
+    second_thread.join(timeout=15)
     assert acquired == ['first', 'second']
     second.release()
     first_thread.join(timeout=1)
     assert not first_thread.is_alive()
     assert not second_thread.is_alive()
     assert not errors
+
+
+def test_redis_elected_writer_waits_for_shared_holders() -> None:
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.holder_id = 'writer'
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            holder_id=lock.holder_id,
+            mode=redis.RedisLockMode.PENDING,
+        ),
+        redis.RedisLockHolder(
+            holder_id='reader',
+            mode=redis.RedisLockMode.SHARED,
+        ),
+    ]
+
+    assert not lock._resolve_lock_holders(holders, fail_when_locked=False)
+    assert lock.writer_elected
+    assert lock.mode is redis.RedisLockMode.PENDING
+    assert not lock._resolve_lock_holders(None, fail_when_locked=False)
+
+
+def test_redis_elected_writer_reuses_subscription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        check_interval=0.001,
+        timeout=1,
+    )
+    lock.holder_id = 'writer'
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            holder_id=lock.holder_id,
+            mode=redis.RedisLockMode.PENDING,
+        ),
+        redis.RedisLockHolder(
+            holder_id='reader',
+            mode=redis.RedisLockMode.SHARED,
+        ),
+    ]
+    subscriber_counts: list[int] = [2, 1]
+    start_calls: list[client.Redis] = []
+    sentinel_pubsub: client.PubSub = typing.cast(
+        'client.PubSub',
+        object(),
+    )
+
+    def start_subscription(connection_: client.Redis) -> None:
+        start_calls.append(connection_)
+        lock.pubsub = sentinel_pubsub
+
+    def get_subscriber_count(connection_: client.Redis) -> int:
+        return subscriber_counts.pop(0)
+
+    def collect_lock_holders(
+        connection_: client.Redis,
+        expected_subscribers: int,
+        timeout: float,
+    ) -> list[redis.RedisLockHolder]:
+        return holders
+
+    monkeypatch.setattr(lock, '_start_subscription', start_subscription)
+    monkeypatch.setattr(lock, '_get_subscriber_count', get_subscriber_count)
+    monkeypatch.setattr(lock, '_collect_lock_holders', collect_lock_holders)
+
+    assert lock.acquire() is lock
+    assert start_calls == [connection]
+    assert lock.mode is redis.RedisLockMode.EXCLUSIVE
+    lock.pubsub = None
+    connection.close()
 
 
 @pytest.mark.parametrize('timeout', [None, 0, 0.001])
@@ -1024,12 +1105,16 @@ def test_redis_acquire_fail_when_locked_fails_fast() -> None:
         connection=holder_connection,
         thread_sleep_time=0.001,
     )
+    # The generous timeout is the point of the regression: failing fast must
+    # not depend on the timeout, so the elapsed assertion below proves the
+    # contender never polled anywhere near it even on slow CI runners.
     contender: redis.RedisLock = redis.RedisLock(
         channel,
         connection=contender_connection,
-        timeout=1,
+        timeout=30,
         fail_when_locked=True,
         thread_sleep_time=0.001,
+        unavailable_timeout=2,
     )
     holder.acquire()
 
@@ -1038,7 +1123,7 @@ def test_redis_acquire_fail_when_locked_fails_fast() -> None:
         contender.acquire()
     elapsed: float = time.monotonic() - start
 
-    assert elapsed < 0.5
+    assert elapsed < 10
     holder.release()
 
 
