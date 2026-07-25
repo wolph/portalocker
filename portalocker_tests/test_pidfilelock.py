@@ -445,8 +445,10 @@ def test_pidfilelock_releases_sidecar_on_pid_write_failure(
 
 
 def test_pidfilelock_release_without_ownership_keeps_files(tmp_path):
-    """#115: a stale PidFileLock (double release or GC'd failed acquire)
-    must not unlink the PID file or sidecar out from under the holder."""
+    """A stale PidFileLock must not unlink a current holder's files.
+
+    This covers double release and garbage collection after a failed acquire.
+    """
     pid_file = str(tmp_path / 'stale.pid')
 
     stale = utils.PidFileLock(pid_file)
