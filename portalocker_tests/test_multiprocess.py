@@ -1,15 +1,25 @@
+from __future__ import annotations
+
 import dataclasses
 import importlib.util
 import multiprocessing
+import multiprocessing.context
+import multiprocessing.process
+import multiprocessing.queues
 import multiprocessing.synchronize
 import os
+import pathlib
 import platform
 import time
+import typing
+from unittest import mock
 
 import pytest
 
 import portalocker
-from portalocker import LockFlags
+from portalocker import LockFlags, utils
+
+LockKind: typing.TypeAlias = typing.Literal['temporary', 'pid']
 
 # On Windows without the optional pywin32 extra, shared locks are unsupported
 # by design and raise ImportError (in the *spawned* children). Skip in the
@@ -28,6 +38,74 @@ class LockResult:
     exception_class: type[BaseException] | None = None
     exception_message: str | None = None
     exception_repr: str | None = None
+
+
+def make_temporary_lock(
+    filename: str,
+    lock_kind: LockKind,
+    *,
+    timeout: float,
+    fail_when_locked: bool,
+) -> portalocker.TemporaryFileLock:
+    """Create one of the temporary-path lock implementations under test."""
+    lock_type: type[portalocker.TemporaryFileLock]
+    if lock_kind == 'temporary':
+        lock_type = portalocker.TemporaryFileLock
+    else:
+        lock_type = portalocker.PidFileLock
+    return lock_type(
+        filename,
+        timeout=timeout,
+        fail_when_locked=fail_when_locked,
+    )
+
+
+def native_lock_path(filename: str, lock_kind: LockKind) -> str:
+    """Return the pathname carrying the native OS lock."""
+    if lock_kind == 'pid':
+        return f'{filename}.lock'
+    return filename
+
+
+def hold_inode_waiter(
+    filename: str,
+    lock_kind: LockKind,
+    native_filename: str,
+    opened_event: multiprocessing.synchronize.Event,
+    acquired_event: multiprocessing.synchronize.Event,
+    release_event: multiprocessing.synchronize.Event,
+    inode_queue: multiprocessing.queues.Queue[int],
+) -> None:
+    """Open the original inode, acquire, report it, and hold the lock."""
+    original_get_fh: typing.Callable[
+        [utils.Lock],
+        typing.IO[typing.Any],
+    ] = typing.cast(
+        typing.Callable[[utils.Lock], typing.IO[typing.Any]],
+        utils.Lock._get_fh,
+    )
+
+    def announce_open(lock: utils.Lock) -> typing.IO[typing.Any]:
+        fh: typing.IO[typing.Any] = original_get_fh(lock)
+        if lock.filename == native_filename:
+            opened_event.set()
+        return fh
+
+    lock: portalocker.TemporaryFileLock = make_temporary_lock(
+        filename,
+        lock_kind,
+        timeout=30,
+        fail_when_locked=False,
+    )
+    try:
+        with mock.patch.object(utils.Lock, '_get_fh', announce_open):
+            fh: typing.IO[typing.Any] = lock.acquire()
+        inode_queue.put(os.fstat(fh.fileno()).st_ino)
+        acquired_event.set()
+        if not release_event.wait(timeout=30):
+            raise TimeoutError('parent did not release the inode waiter')
+    finally:
+        lock.release()
 
 
 def lock(
@@ -189,3 +267,85 @@ def test_exclusive_processes(
         holder.join(timeout=30)
 
     assert holder.exitcode == 0
+
+
+@pytest.mark.parametrize('lock_kind', ['temporary', 'pid'])
+@pytest.mark.skipif(
+    os.name == 'nt',
+    reason='POSIX-only inode replacement race',
+)
+@pytest.mark.skipif(
+    'pypy' in platform.python_implementation().lower(),
+    reason='pypy3 does not support the multiprocessing test',
+)
+def test_temporary_lock_waiters_converge_on_current_inode(
+    tmp_path: pathlib.Path,
+    lock_kind: LockKind,
+) -> None:
+    """#115: waiters must reject an obsolete unlinked lock inode."""
+    context: multiprocessing.context.SpawnContext = (
+        multiprocessing.get_context('spawn')
+    )
+    filename: str = str(tmp_path / f'{lock_kind}.lock')
+    native_filename: str = native_lock_path(filename, lock_kind)
+    holder: portalocker.TemporaryFileLock = make_temporary_lock(
+        filename,
+        lock_kind,
+        timeout=30,
+        fail_when_locked=False,
+    )
+    opened_event: multiprocessing.synchronize.Event = context.Event()
+    acquired_event: multiprocessing.synchronize.Event = context.Event()
+    release_event: multiprocessing.synchronize.Event = context.Event()
+    inode_queue: multiprocessing.queues.Queue[int] = context.Queue()
+    waiter: multiprocessing.process.BaseProcess = context.Process(
+        target=hold_inode_waiter,
+        args=(
+            filename,
+            lock_kind,
+            native_filename,
+            opened_event,
+            acquired_event,
+            release_event,
+            inode_queue,
+        ),
+    )
+    holder_released: bool = False
+
+    holder.acquire()
+    waiter.start()
+    try:
+        assert opened_event.wait(timeout=30), (
+            'waiter never opened the holder inode'
+        )
+        holder.release()
+        holder_released = True
+        assert acquired_event.wait(timeout=30), 'waiter never acquired'
+
+        waiter_inode: int = inode_queue.get(timeout=30)
+        contender: portalocker.TemporaryFileLock = make_temporary_lock(
+            filename,
+            lock_kind,
+            timeout=0,
+            fail_when_locked=True,
+        )
+        try:
+            with pytest.raises(portalocker.AlreadyLocked):
+                contender.acquire()
+        finally:
+            contender.release()
+
+        current_inode: int = os.stat(native_filename).st_ino
+        assert waiter_inode == current_inode
+    finally:
+        if not holder_released:
+            holder.release()
+        release_event.set()
+        waiter.join(timeout=30)
+        if waiter.is_alive():
+            waiter.terminate()
+            waiter.join(timeout=30)
+        inode_queue.close()
+        inode_queue.join_thread()
+
+    assert waiter.exitcode == 0

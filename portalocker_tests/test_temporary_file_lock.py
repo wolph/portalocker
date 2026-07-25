@@ -164,9 +164,11 @@ def test_temporaryfilelock_sequential_cycles(tmpfile):
 
 
 def test_temporaryfilelock_release_without_ownership_keeps_file(tmpfile):
-    """#115: releasing a lock object that holds nothing must not unlink the
-    path - a stale object (double release or GC of a failed acquire) would
-    otherwise destroy the current holder's lock file."""
+    """Releasing a lock object that holds nothing must not unlink the path.
+
+    A stale object (double release or GC of a failed acquire) would otherwise
+    destroy the current holder's lock file.
+    """
     stale = portalocker.TemporaryFileLock(tmpfile)
     stale.acquire()
     stale.release()
