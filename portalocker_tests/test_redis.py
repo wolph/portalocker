@@ -419,6 +419,13 @@ def test_redis_elected_writer_waits_for_shared_holders() -> None:
     assert lock.mode is redis.RedisLockMode.PENDING
     assert not lock._resolve_lock_holders(None, fail_when_locked=False)
 
+    # Once the last shared holder is gone the elected writer acquires. In
+    # the integration tests this path races the subscribers==1 fast path,
+    # so it has to be covered deterministically here.
+    assert lock._resolve_lock_holders([holders[0]], fail_when_locked=False)
+    resolved_mode: redis.RedisLockMode = lock.mode
+    assert resolved_mode is redis.RedisLockMode.EXCLUSIVE
+
 
 def test_redis_elected_writer_reuses_subscription(
     monkeypatch: pytest.MonkeyPatch,
@@ -859,6 +866,38 @@ def test_redis_collect_holders_tolerates_confirmation_delays(
     )
 
     assert holders == []
+
+
+def test_redis_collect_holders_detects_subscriber_churn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A holder set that changes mid-probe invalidates the sample.
+
+    In the integration tests this only happens when a competing waiter
+    resubscribes at exactly the wrong moment, so it has to be covered
+    deterministically here.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.001,
+    )
+    pubsub: _ResponsePubSub = _ResponsePubSub([])
+    monkeypatch.setattr(lock, '_get_pubsub', lambda connection: pubsub)
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection: 1)
+    monkeypatch.setattr(connection, 'publish', lambda channel, message: 0)
+
+    holders: list[redis.RedisLockHolder] | None = lock._collect_lock_holders(
+        connection,
+        expected_subscribers=2,
+        timeout=0.01,
+    )
+
+    assert holders is None
 
 
 def test_redis_collect_holders_kills_only_unresponsive_holder(
