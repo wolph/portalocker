@@ -1,6 +1,7 @@
 """Tests for PidFileLock class."""
 
 import builtins
+import contextlib
 import multiprocessing
 import os
 import tempfile
@@ -12,6 +13,23 @@ import pytest
 
 import portalocker
 from portalocker import utils
+
+
+def _pidfilelock_context_types(
+    lock: utils.PidFileLock,
+) -> tuple[
+    contextlib.AbstractContextManager[int | None],
+    contextlib.AbstractContextManager[None],
+]:
+    return lock, lock.fail_closed()
+
+
+def test_already_locked_holder_pid_exists_without_init() -> None:
+    exc: portalocker.AlreadyLocked = portalocker.AlreadyLocked.__new__(
+        portalocker.AlreadyLocked,
+    )
+
+    assert exc.holder_pid is None
 
 
 def test_pidfilelock_creation():
@@ -65,6 +83,70 @@ def test_pidfilelock_context_manager_success():
 
         assert lock_released
         assert file_cleaned
+
+
+def test_pidfilelock_fail_closed_context_manager_success(
+    tmp_path: Path,
+) -> None:
+    pid_file: Path = tmp_path / 'fail_closed_success.pid'
+    lock: utils.PidFileLock = utils.PidFileLock(str(pid_file))
+
+    with lock.fail_closed():
+        is_acquired: bool = lock._acquired_lock
+        assert is_acquired
+        assert lock.read_pid() == os.getpid()
+
+    is_released: bool = not lock._acquired_lock
+    assert is_released
+    assert not pid_file.exists()
+    assert not Path(f'{pid_file}.lock').exists()
+
+
+def test_pidfilelock_fail_closed_missing_holder_pid(
+    tmp_path: Path,
+) -> None:
+    pid_file: Path = tmp_path / 'fail_closed_missing_pid.pid'
+    holder: utils.PidFileLock = utils.PidFileLock(str(pid_file))
+    holder.acquire()
+    pid_file.unlink()
+
+    body_entered: bool = False
+    try:
+        contender: utils.PidFileLock = utils.PidFileLock(str(pid_file))
+        exc_info: pytest.ExceptionInfo[portalocker.AlreadyLocked]
+        with (
+            pytest.raises(portalocker.AlreadyLocked) as exc_info,
+            contender.fail_closed(),
+        ):
+            body_entered = True
+
+        assert not body_entered
+        assert exc_info.value.holder_pid is None
+    finally:
+        holder.release()
+
+
+def test_pidfilelock_fail_closed_reports_holder_pid(
+    tmp_path: Path,
+) -> None:
+    pid_file: Path = tmp_path / 'fail_closed_holder_pid.pid'
+    holder: utils.PidFileLock = utils.PidFileLock(str(pid_file))
+    holder.acquire()
+
+    body_entered: bool = False
+    try:
+        contender: utils.PidFileLock = utils.PidFileLock(str(pid_file))
+        exc_info: pytest.ExceptionInfo[portalocker.AlreadyLocked]
+        with (
+            pytest.raises(portalocker.AlreadyLocked) as exc_info,
+            contender.fail_closed(),
+        ):
+            body_entered = True
+
+        assert not body_entered
+        assert exc_info.value.holder_pid == os.getpid()
+    finally:
+        holder.release()
 
 
 def test_pidfilelock_context_manager_already_locked():
