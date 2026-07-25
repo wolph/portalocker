@@ -5,20 +5,35 @@
 from __future__ import annotations
 
 import _thread
+import enum
 import json
 import logging
 import random
 import time
 import typing
+import uuid
 
 import redis.client
 
-from . import exceptions, utils
+from . import constants, exceptions, utils
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_UNAVAILABLE_TIMEOUT = 1
 DEFAULT_THREAD_SLEEP_TIME = 0.1
+REDIS_LOCK_PROTOCOL_VERSION = 1
+
+
+class RedisLockMode(str, enum.Enum):
+    EXCLUSIVE = 'exclusive'
+    PENDING = 'pending'
+    SHARED = 'shared'
+
+
+class RedisLockHolder(typing.NamedTuple):
+    holder_id: str
+    mode: RedisLockMode
+    legacy: bool = False
 
 
 class PubSubWorkerThread(redis.client.PubSubWorkerThread):
@@ -64,6 +79,10 @@ class RedisLock(utils.LockBase['RedisLock']):
             given. The `DEFAULT_REDIS_KWARGS` are used as default, if you want
             to override these you need to explicitly specify a value (e.g.
             `health_check_interval=0`)
+        flags: `LockFlags.EXCLUSIVE` (the default) or `LockFlags.SHARED`.
+            Shared holders may coexist, while an exclusive holder waits for
+            all shared holders to release. Other flag combinations are
+            rejected; use `fail_when_locked` for non-blocking acquisition.
 
     """
 
@@ -74,6 +93,10 @@ class RedisLock(utils.LockBase['RedisLock']):
     connection: redis.client.Redis | None
     pubsub: redis.client.PubSub | None = None
     close_connection: bool
+    flags: constants.LockFlags
+    holder_id: str
+    mode: RedisLockMode
+    writer_elected: bool
 
     DEFAULT_REDIS_KWARGS: typing.ClassVar[dict[str, typing.Any]] = dict(
         health_check_interval=10,
@@ -90,6 +113,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         thread_sleep_time: float = DEFAULT_THREAD_SLEEP_TIME,
         unavailable_timeout: float = DEFAULT_UNAVAILABLE_TIMEOUT,
         redis_kwargs: dict[str, typing.Any] | None = None,
+        flags: constants.LockFlags = constants.LockFlags.EXCLUSIVE,
     ) -> None:
         # We don't want to close connections given as an argument
         self.close_connection = not connection
@@ -100,6 +124,22 @@ class RedisLock(utils.LockBase['RedisLock']):
         self.thread_sleep_time = thread_sleep_time
         self.unavailable_timeout = unavailable_timeout
         self.redis_kwargs = redis_kwargs or dict()
+        if flags not in (
+            constants.LockFlags.EXCLUSIVE,
+            constants.LockFlags.SHARED,
+        ):
+            raise ValueError(
+                'RedisLock flags must contain exactly one of '
+                'LockFlags.EXCLUSIVE or LockFlags.SHARED'
+            )
+        self.flags = flags
+        self.holder_id = uuid.uuid4().hex
+        self.writer_elected = False
+        self.mode = (
+            RedisLockMode.SHARED
+            if flags == constants.LockFlags.SHARED
+            else RedisLockMode.PENDING
+        )
 
         for key, value in self.DEFAULT_REDIS_KWARGS.items():
             self.redis_kwargs.setdefault(key, value)
@@ -134,21 +174,43 @@ class RedisLock(utils.LockBase['RedisLock']):
         if message.get('type') != 'message':  # pragma: no cover
             return
 
-        raw_data = message.get('data')
+        raw_data: str | None = message.get('data')
         if not raw_data:
             return
 
         try:
-            data = json.loads(raw_data)
-        except TypeError:  # pragma: no cover
-            logger.debug('TypeError while parsing: %r', message)
+            data: typing.Any = json.loads(raw_data)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug('Invalid Redis lock message: %r', message)
+            return
+        if not isinstance(data, dict):
+            return
+        data_dict: dict[str, typing.Any] = typing.cast(
+            'dict[str, typing.Any]',
+            data,
+        )
+        response_channel: typing.Any = data_dict.get('response_channel')
+        if not isinstance(response_channel, str) or not response_channel:
             return
 
         assert self.connection is not None
-        self.connection.publish(data['response_channel'], str(time.time()))
+        self.connection.publish(
+            response_channel,
+            json.dumps(
+                {
+                    'holder_id': self.holder_id,
+                    'mode': self.mode.value,
+                    'protocol': REDIS_LOCK_PROTOCOL_VERSION,
+                }
+            ),
+        )
 
     @property
     def client_name(self) -> str:
+        return f'{self.legacy_client_name}-{self.holder_id}'
+
+    @property
+    def legacy_client_name(self) -> str:
         return f'{self.channel}-lock'
 
     def _timeout_generator(
@@ -171,83 +233,270 @@ class RedisLock(utils.LockBase['RedisLock']):
             time.sleep(sleep_time)
             yield 0
 
+    def _start_subscription(
+        self,
+        connection: redis.client.Redis,
+    ) -> None:
+        pubsub: redis.client.PubSub = self._get_pubsub(connection)
+        self.pubsub = pubsub
+        try:
+            pubsub.execute_command(  # type: ignore[no-untyped-call]
+                'CLIENT',
+                'SETNAME',
+                self.client_name,
+            )
+            pubsub.parse_response()  # type: ignore[no-untyped-call]
+            pubsub.subscribe(**{self.channel: self.channel_handler})
+            # A daemon thread so an unreleased lock can never block
+            # interpreter exit; losing the connection releases the lock by
+            # design, which is exactly what process exit should do.
+            self.thread = PubSubWorkerThread(
+                pubsub,
+                sleep_time=self.thread_sleep_time,
+                daemon=True,
+            )
+            self.thread.start()
+            time.sleep(0.01)
+        except Exception:
+            self.release()
+            raise
+
+    def _parse_lock_response(
+        self,
+        raw_data: typing.Any,
+        legacy_index: int,
+    ) -> RedisLockHolder:
+        try:
+            data: typing.Any = json.loads(raw_data)
+            holder_id: typing.Any = data.get('holder_id')
+            mode: typing.Any = data.get('mode')
+            protocol: typing.Any = data.get('protocol')
+            if (
+                protocol == REDIS_LOCK_PROTOCOL_VERSION
+                and isinstance(holder_id, str)
+                and isinstance(mode, str)
+            ):
+                return RedisLockHolder(
+                    holder_id=holder_id,
+                    mode=RedisLockMode(mode),
+                )
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+        return RedisLockHolder(
+            holder_id=f'legacy-{legacy_index}',
+            mode=RedisLockMode.EXCLUSIVE,
+            legacy=True,
+        )
+
+    def _kill_unavailable_locks(
+        self,
+        connection: redis.client.Redis,
+        responding_holders: typing.Iterable[RedisLockHolder],
+    ) -> None:
+        holders: list[RedisLockHolder] = list(responding_holders)
+        responding_holder_ids: set[str] = {
+            holder.holder_id for holder in holders if not holder.legacy
+        }
+        legacy_responded: bool = any(holder.legacy for holder in holders)
+        client_name_prefix: str = f'{self.legacy_client_name}-'
+        clients: list[dict[str, str]] = connection.client_list()
+        for client_ in clients:
+            client_name: str = client_.get('name', '')
+            unavailable: bool = (
+                client_name == self.legacy_client_name and not legacy_responded
+            ) or (
+                client_name.startswith(client_name_prefix)
+                and client_name.removeprefix(client_name_prefix)
+                not in responding_holder_ids
+            )
+            if unavailable:
+                logger.warning(
+                    'Killing unavailable redis client: %r',
+                    client_,
+                )
+                connection.client_kill_filter(client_.get('id'))
+
+    def _collect_lock_holders(
+        self,
+        connection: redis.client.Redis,
+        expected_subscribers: int,
+        timeout: float,
+    ) -> list[RedisLockHolder] | None:
+        response_channel: str = f'{self.channel}-{uuid.uuid4().hex}'
+        check_interval: float = min(self.thread_sleep_time, timeout / 10)
+        pubsub: redis.client.PubSub = self._get_pubsub(connection)
+        holders: dict[str, RedisLockHolder] = {}
+        legacy_index: int = 0
+        try:
+            pubsub.subscribe(response_channel)
+            for _ in self._timeout_generator(timeout, check_interval):
+                confirmation: dict[str, typing.Any] | None = typing.cast(
+                    'dict[str, typing.Any] | None',
+                    pubsub.get_message(timeout=check_interval),
+                )
+                if confirmation and confirmation.get('type') == 'subscribe':
+                    break
+
+            connection.publish(
+                self.channel,
+                json.dumps(
+                    {
+                        'message': 'ping',
+                        'response_channel': response_channel,
+                    }
+                ),
+            )
+
+            for _ in self._timeout_generator(timeout, check_interval):
+                message: dict[str, typing.Any] | None = typing.cast(
+                    'dict[str, typing.Any] | None',
+                    pubsub.get_message(timeout=check_interval),
+                )
+                if message and message.get('type') == 'message':
+                    holder: RedisLockHolder = self._parse_lock_response(
+                        message.get('data'),
+                        legacy_index,
+                    )
+                    holders[holder.holder_id] = holder
+                    legacy_index += int(holder.legacy)
+                    if len(holders) >= expected_subscribers:
+                        break
+
+            current_subscribers: int = self._get_subscriber_count(connection)
+            logger.debug(
+                'Redis lock %s probe expected=%d received=%d current=%d',
+                self.holder_id,
+                expected_subscribers,
+                len(holders),
+                current_subscribers,
+            )
+            if current_subscribers != expected_subscribers:
+                return None
+            if len(holders) < expected_subscribers:
+                self._kill_unavailable_locks(connection, holders.values())
+                return None
+            return list(holders.values())
+        finally:
+            pubsub.close()
+
+    def _holders_are_compatible(
+        self,
+        holders: list[RedisLockHolder],
+    ) -> bool:
+        return self.flags == constants.LockFlags.SHARED and all(
+            holder.mode is RedisLockMode.SHARED for holder in holders
+        )
+
+    def _writer_is_elected(
+        self,
+        holders: list[RedisLockHolder],
+    ) -> bool:
+        if any(holder.mode is RedisLockMode.EXCLUSIVE for holder in holders):
+            return False
+        pending_holder_ids: list[str] = sorted(
+            holder.holder_id
+            for holder in holders
+            if holder.mode is RedisLockMode.PENDING
+        )
+        return bool(
+            pending_holder_ids and pending_holder_ids[0] == self.holder_id
+        )
+
+    def _resolve_lock_holders(
+        self,
+        holders: list[RedisLockHolder] | None,
+        fail_when_locked: bool,
+    ) -> bool:
+        if holders is not None and self._holders_are_compatible(holders):
+            return True
+
+        writer_is_elected: bool = (
+            holders is not None
+            and self.flags == constants.LockFlags.EXCLUSIVE
+            and self._writer_is_elected(holders)
+        )
+        if writer_is_elected:
+            self.writer_elected = True
+            if fail_when_locked:
+                self.release()
+                raise exceptions.AlreadyLocked()
+            if holders is not None and not any(
+                holder.mode is RedisLockMode.SHARED for holder in holders
+            ):
+                self.mode = RedisLockMode.EXCLUSIVE
+                return True
+            return False
+
+        if holders is None and self.writer_elected:
+            return False
+
+        self.release()
+        logger.debug('Redis lock %s released to retry', self.holder_id)
+        if fail_when_locked:
+            raise exceptions.AlreadyLocked()
+        return False
+
     def acquire(
         self,
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
     ) -> RedisLock:
-        timeout = utils.coalesce(timeout, self.timeout, 0.0)
-        check_interval = utils.coalesce(
-            check_interval,
-            self.check_interval,
-            0.0,
+        effective_timeout: float = typing.cast(
+            'float',
+            utils.coalesce(timeout, self.timeout, 0.0),
         )
-        fail_when_locked = utils.coalesce(
-            fail_when_locked,
-            self.fail_when_locked,
+        effective_check_interval: float = typing.cast(
+            'float',
+            utils.coalesce(check_interval, self.check_interval, 0.0),
+        )
+        effective_fail_when_locked: bool = typing.cast(
+            'bool',
+            utils.coalesce(fail_when_locked, self.fail_when_locked, False),
         )
 
         assert not self.pubsub, 'This lock is already active'
-        connection = self.get_connection()
+        if self.flags == constants.LockFlags.EXCLUSIVE:
+            self.mode = RedisLockMode.PENDING
+            self.writer_elected = False
+        connection: redis.client.Redis = self.get_connection()
 
-        timeout_generator = self._timeout_generator(timeout, check_interval)
-        for _ in timeout_generator:  # pragma: no branch
-            subscribers = self._get_subscriber_count(connection)
+        for _ in self._timeout_generator(
+            effective_timeout,
+            effective_check_interval,
+        ):
+            if self.pubsub is None:
+                self._start_subscription(connection)
+            subscribers: int = self._get_subscriber_count(connection)
+            logger.debug(
+                'Redis lock %s mode=%s observed %d subscribers',
+                self.holder_id,
+                self.mode.value,
+                subscribers,
+            )
+            if subscribers == 1:
+                if self.flags == constants.LockFlags.EXCLUSIVE:
+                    self.mode = RedisLockMode.EXCLUSIVE
+                return self
 
-            if subscribers:
-                logger.debug(
-                    'Found %d lock subscribers for %s',
-                    subscribers,
-                    self.channel,
-                )
+            holders: list[RedisLockHolder] | None = self._collect_lock_holders(
+                connection,
+                subscribers,
+                self.unavailable_timeout,
+            )
+            logger.debug(
+                'Redis lock %s observed holders=%r',
+                self.holder_id,
+                holders,
+            )
+            if self._resolve_lock_holders(
+                holders,
+                effective_fail_when_locked,
+            ):
+                return self
 
-                if self.check_or_kill_lock(
-                    connection,
-                    self.unavailable_timeout,
-                ):
-                    # The holder is alive. When `fail_when_locked` is set we
-                    # must not keep polling until the timeout expires; fail
-                    # immediately as documented.
-                    if fail_when_locked:
-                        raise exceptions.AlreadyLocked()
-                    continue
-                else:  # pragma: no cover
-                    subscribers = 0
-
-            # Note: this should not be changed to an elif because the if
-            # above can still end up here
-            if not subscribers:
-                connection.client_setname(self.client_name)
-                pubsub = self._get_pubsub(connection)
-                self.pubsub = pubsub
-                try:
-                    pubsub.subscribe(**{self.channel: self.channel_handler})
-                    self.thread = PubSubWorkerThread(
-                        pubsub,
-                        sleep_time=self.thread_sleep_time,
-                    )
-                    self.thread.start()
-                    time.sleep(0.01)
-                    subscribers = self._get_subscriber_count(connection)
-                except Exception:
-                    # Roll back so a partially initialised `self.pubsub` /
-                    # `self.thread` cannot brick a retry via the assertion at
-                    # the top of `acquire` (or leak the worker thread).
-                    self.release()
-                    raise
-                if subscribers == 1:  # pragma: no branch
-                    return self
-                else:  # pragma: no cover
-                    # NOTE: this retry reuses the outer timeout deadline,
-                    # which may already have expired, so a lost race here can
-                    # end the acquire attempt early instead of retrying within
-                    # a fresh window.
-                    self.release()
-
-            if fail_when_locked:  # pragma: no cover
-                raise exceptions.AlreadyLocked()
-
+        self.release()
         raise exceptions.AlreadyLocked()
 
     def check_or_kill_lock(
@@ -308,6 +557,7 @@ class RedisLock(utils.LockBase['RedisLock']):
             pubsub.close()
 
     def release(self) -> None:
+        self.writer_elected = False
         if self.thread:  # pragma: no branch
             self.thread.stop()
             self.thread.join()

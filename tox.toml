@@ -10,9 +10,25 @@ skip_missing_interpreters = true
 
 [env_run_base]
 labels = ['test']
-pass_env = ['FORCE_COLOR', 'REDIS_HOST']
+pass_env = ['FORCE_COLOR', 'REDIS_HOST', 'REDIS_PORT']
 extras = ['tests']
 commands = [['pytest', { replace = 'posargs', extend = true }]]
+
+[env.redis-live]
+labels = ['test']
+description = 'RedisLock tests against a required live Redis server'
+pass_env = ['FORCE_COLOR', 'REDIS_HOST', 'REDIS_PORT']
+set_env = { PORTALOCKER_REDIS_TESTS_REQUIRED = '1' }
+extras = ['tests']
+commands = [
+    [
+        'pytest',
+        '--no-cov',
+        'portalocker_tests/test_redis.py',
+        'portalocker_tests/test_redis_random_sleep.py',
+        { replace = 'posargs', extend = true },
+    ],
+]
 
 [env.win32]
 labels = ['test']
