@@ -60,12 +60,18 @@ def open_atomic(
     filename: Filename,
     binary: bool = True,
 ) -> collections.abc.Generator[types.IO]:
-    """Open a file for atomic writing. Instead of locking this method allows
-    you to write the entire file and move it to the actual location. Note that
-    this makes the assumption that a rename is atomic on your platform which
-    is generally the case but not a guarantee.
+    """Open a new file for atomic writing without replacing an existing file.
 
-    http://docs.python.org/library/os.html#os.rename
+    The destination must not exist when entering or publishing the context. If
+    another actor creates it while the context is open, publication raises
+    :class:`FileExistsError` and leaves that destination untouched.
+
+    The implementation writes and synchronizes a temporary file in the
+    destination directory, then publishes it with an operation that refuses an
+    existing destination. Windows uses an atomic rename; POSIX uses an atomic
+    hard link, so the POSIX filesystem must support hard links.
+
+    https://docs.python.org/3/library/os.html#os.link
 
     >>> filename = 'test_file.txt'
     >>> if os.path.exists(filename):
@@ -91,7 +97,8 @@ def open_atomic(
     else:
         path = pathlib.Path(filename)
 
-    assert not path.exists(), f'{path!r} exists'
+    if path.exists():
+        raise AssertionError(f'{path!r} exists')
 
     # Create the parent directory if it doesn't exist
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -106,7 +113,10 @@ def open_atomic(
         os.fsync(temp_fh.fileno())
 
     try:
-        os.rename(temp_fh.name, path)
+        if os.name == 'nt':  # pragma: not-nt
+            os.rename(temp_fh.name, path)
+        else:  # pragma: not-posix
+            os.link(temp_fh.name, path)
     finally:
         with contextlib.suppress(Exception):
             os.remove(temp_fh.name)
