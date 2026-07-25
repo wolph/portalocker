@@ -283,8 +283,8 @@ def test_temporary_lock_waiters_converge_on_current_inode(
     lock_kind: LockKind,
 ) -> None:
     """#115: waiters must reject an obsolete unlinked lock inode."""
-    context: multiprocessing.context.SpawnContext = multiprocessing.get_context(
-        'spawn'
+    context: multiprocessing.context.SpawnContext = (
+        multiprocessing.get_context('spawn')
     )
     filename: str = str(tmp_path / f'{lock_kind}.lock')
     native_filename: str = native_lock_path(filename, lock_kind)
