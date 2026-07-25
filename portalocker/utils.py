@@ -61,12 +61,18 @@ def open_atomic(
     filename: Filename,
     binary: bool = True,
 ) -> collections.abc.Generator[types.IO]:
-    """Open a file for atomic writing. Instead of locking this method allows
-    you to write the entire file and move it to the actual location. Note that
-    this makes the assumption that a rename is atomic on your platform which
-    is generally the case but not a guarantee.
+    """Open a new file for atomic writing without replacing an existing file.
 
-    http://docs.python.org/library/os.html#os.rename
+    The destination must not exist when entering or publishing the context. If
+    another actor creates it while the context is open, publication raises
+    :class:`FileExistsError` and leaves that destination untouched.
+
+    The implementation writes and synchronizes a temporary file in the
+    destination directory, then publishes it with an operation that refuses an
+    existing destination. Windows uses an atomic rename; POSIX uses an atomic
+    hard link, so the POSIX filesystem must support hard links.
+
+    https://docs.python.org/3/library/os.html#os.link
 
     >>> filename = 'test_file.txt'
     >>> if os.path.exists(filename):
@@ -92,7 +98,8 @@ def open_atomic(
     else:
         path = pathlib.Path(filename)
 
-    assert not path.exists(), f'{path!r} exists'
+    if path.exists():
+        raise AssertionError(f'{path!r} exists')
 
     # Create the parent directory if it doesn't exist
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,7 +114,10 @@ def open_atomic(
         os.fsync(temp_fh.fileno())
 
     try:
-        os.rename(temp_fh.name, path)
+        if os.name == 'nt':  # pragma: not-nt
+            os.rename(temp_fh.name, path)
+        else:  # pragma: not-posix
+            os.link(temp_fh.name, path)
     finally:
         with contextlib.suppress(Exception):
             os.remove(temp_fh.name)
@@ -210,6 +220,8 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             (``LockFlags.SHARED``) on Windows require the optional
             ``pywin32`` package (``pip install "portalocker[win32]"``);
             without it, acquiring a shared lock raises ``ImportError``.
+        raise_on_release_error: raise cleanup errors after both unlocking and
+            closing have been attempted. Disabled by default for compatibility.
         **file_open_kwargs: The kwargs for the `open(...)` call
 
     fail_when_locked is useful when multiple threads/processes can race
@@ -228,6 +240,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
     check_interval: float
     fail_when_locked: bool
     flags: constants.LockFlags
+    raise_on_release_error: bool
     file_open_kwargs: dict[str, typing.Any]
 
     def __init__(
@@ -238,6 +251,8 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = DEFAULT_FAIL_WHEN_LOCKED,
         flags: constants.LockFlags = LOCK_METHOD,
+        *,
+        raise_on_release_error: bool = False,
         **file_open_kwargs: typing.Any,
     ) -> None:
         if 'w' in mode:
@@ -259,6 +274,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         self.mode = mode
         self.truncate = truncate
         self.flags = flags
+        self.raise_on_release_error = raise_on_release_error
         self.file_open_kwargs = file_open_kwargs
         super().__init__(timeout, check_interval, fail_when_locked)
 
@@ -335,19 +351,53 @@ class Lock(LockBase[typing.IO[typing.Any]]):
     def __enter__(self) -> typing.IO[typing.Any]:
         return self.acquire()
 
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: typing.Any,
+    ) -> bool | None:
+        if not self.raise_on_release_error or exc_value is None:
+            self.release()
+            return None
+
+        try:
+            self.release()
+        except Exception as release_error:
+            previous_context: BaseException | None = exc_value.__context__
+            release_error.__context__ = previous_context
+            exc_value.__context__ = release_error
+            with contextlib.suppress(Exception):
+                exc_value.add_note(  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
+                    'portalocker release failed; see exception context',
+                )
+        return None
+
     def release(self) -> None:
-        """Releases the currently locked file handle"""
-        if self.fh:
+        """Release the currently locked file handle."""
+        fh = self.fh
+        if fh:
+            release_errors: list[Exception] = []
             # On Windows, closing the handle also releases the lock. Ensure we
             # always close, even if unlock raises due to edge cases when
             # preparing/restoring file position.
             try:
-                with contextlib.suppress(Exception):
-                    portalocker.unlock(self.fh)
+                try:
+                    portalocker.unlock(fh)
+                except Exception as exception:
+                    release_errors.append(exception)
             finally:
-                with contextlib.suppress(Exception):
-                    self.fh.close()
+                try:
+                    fh.close()
+                except Exception as exception:
+                    release_errors.append(exception)
                 self.fh = None
+
+            if self.raise_on_release_error and release_errors:
+                primary_error: Exception = release_errors[0]
+                if len(release_errors) > 1:
+                    raise primary_error from release_errors[1]
+                raise primary_error
 
     def _get_fh(self) -> types.IO:
         """Get a new filehandle"""
@@ -743,6 +793,14 @@ class PidFileLock(TemporaryFileLock):
             pass
         return None
 
+    def fail_closed(self) -> contextlib.AbstractContextManager[None]:
+        """Return a context that enters only after acquiring this lock.
+
+        :raises AlreadyLocked: if another process holds the lock. Its
+            ``holder_pid`` attribute contains the competing PID when readable.
+        """
+        return _PidFileLockFailClosedContext(self)
+
     # `PidFileLock` deliberately breaks the `Lock.__enter__` contract: it
     # reports the competing PID instead of returning a filehandle.
     def __enter__(self) -> int | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]
@@ -815,6 +873,30 @@ class PidFileLock(TemporaryFileLock):
                 self._inner_lock = None
                 with contextlib.suppress(Exception):
                     inner_lock.release()
+
+
+class _PidFileLockFailClosedContext(
+    contextlib.AbstractContextManager[None],
+):
+    """Fail-closed context adapter for :class:`PidFileLock`."""
+
+    def __init__(self, lock: PidFileLock) -> None:
+        self._lock: PidFileLock = lock
+
+    def __enter__(self) -> None:
+        try:
+            self._lock.acquire()
+        except exceptions.AlreadyLocked as exc:
+            exc.holder_pid = self._lock.read_pid()
+            raise
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: typing.Any,
+    ) -> bool | None:
+        return self._lock.__exit__(exc_type, exc_value, traceback)
 
 
 class BoundedSemaphore(LockBase['Lock | None']):

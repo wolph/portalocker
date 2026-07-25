@@ -1,5 +1,8 @@
 4.0.0:
 
+ * Fixed ``open_atomic()`` replacing a destination created while its context
+   was open on POSIX; publication now raises ``FileExistsError`` and preserves
+   the concurrent winner (#114)
  * Python 3.10 or later is now required; Python 3.9 (EOL) support dropped
  * ``pywin32`` is no longer installed by default on Windows; the msvcrt-based
    locker is the default and works dependency-free for exclusive locks.
@@ -12,6 +15,9 @@
  * ``LockBase`` is now generic over the acquire return type (typing-only
    change; downstream ``Lock`` subclasses are unaffected)
  * Added ``PidFileLock`` for pidfile-based locking (#106)
+ * Added ``PidFileLock.fail_closed()`` for ownership-only contexts; contention
+   raises ``AlreadyLocked`` before entering the body and exposes the competing
+   PID through ``AlreadyLocked.holder_pid`` when readable (#118)
  * Packaging switched to the ``uv_build`` backend; releases are published to
    PyPI through GitHub Actions Trusted Publishing
  * ``python -m portalocker combine``: ``--output-file`` now opens lazily;
@@ -24,7 +30,7 @@
  * Fixed a ``TemporaryFileLock``/``PidFileLock`` unlock-then-unlink race that
    could let two processes hold the same lock (split-brain); release now
    unlinks before unlocking on POSIX and acquire re-verifies file identity
-   (inode) after locking
+   (inode) after locking (#115)
  * Fixed ``BoundedSemaphore`` staying permanently "Already locked" after a
    non-contention error (e.g. a missing directory)
  * Fixed ``RedisLock`` crashed-holder detection: the liveness check was
@@ -44,12 +50,14 @@
    ``LockException`` per the documented contract
  * ``RedisLock`` tests now run everywhere via ``fakeredis``, with a live
    Redis server still tested in CI
- * ``Lock.release()`` no longer propagates unlock errors; the file handle is
-   always closed and cleared so a release can never leave a dangling lock
+ * ``Lock.release()`` continues suppressing unlock and close errors by default;
+   closing is always attempted and the file handle reference is cleared.
+   Callers can opt into reporting cleanup failures with
+   ``Lock(..., raise_on_release_error=True)`` (#117)
  * ``TemporaryFileLock.release()`` and ``PidFileLock.release()`` are now
    no-ops when the object does not hold the lock, so a stale object (double
    release, or garbage collection of a failed acquire) can no longer unlink
-   the lock file out from under the current holder (#115)
+   the lock file out from under the current holder
  * ``TemporaryFileLock`` no longer keeps a strong ``atexit`` reference to
    itself, so unused instances can be garbage collected; cleanup at
    interpreter exit still happens via a weak reference
@@ -123,4 +131,3 @@ https://github.com/WoLpH/portalocker/commits/master
 0.1:
 
  * Initial release
-

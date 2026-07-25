@@ -49,6 +49,35 @@ To report a security vulnerability, please use the
 `Tidelift security contact <https://tidelift.com/security>`_.
 Tidelift will coordinate the fix and disclosure.
 
+PidFileLock contexts
+--------------------
+
+The default context is inspection-oriented: it enters even when another
+process owns the lock and returns that process's PID. A ``None`` value means
+this process acquired the lock:
+
+.. code-block:: python
+
+    import portalocker
+
+    with portalocker.PidFileLock('worker.pid') as holder_pid:
+        if holder_pid is None:
+            run_singleton_worker()
+        else:
+            print(f'worker already running as PID {holder_pid}')
+
+Use ``fail_closed()`` when the protected body must only run after acquisition:
+
+.. code-block:: python
+
+    import portalocker
+
+    try:
+        with portalocker.PidFileLock('worker.pid').fail_closed():
+            run_singleton_worker()
+    except portalocker.AlreadyLocked as exc:
+        print(f'worker already running as PID {exc.holder_pid}')
+
 Redis Locks
 -----------
 
@@ -200,4 +229,3 @@ License
 -------
 
 See the `LICENSE <https://github.com/WoLpH/portalocker/blob/develop/LICENSE>`_ file.
-
