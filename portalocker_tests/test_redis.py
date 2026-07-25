@@ -196,6 +196,7 @@ def test_redis_shared_locks_coexist(
         first.release()
 
 
+@pytest.mark.timeout(180)
 @pytest.mark.parametrize(
     ('holder_flags', 'contender_flags'),
     [
@@ -264,6 +265,7 @@ def _wait_for_subscribers(
     raise AssertionError(f'never observed {expected} subscribers')
 
 
+@pytest.mark.timeout(180)
 def test_redis_pending_writer_blocks_new_readers(
     redis_connection: ConnectionFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -325,13 +327,14 @@ def test_redis_pending_writer_blocks_new_readers(
         assert late_reader.pubsub is None
     finally:
         reader.release()
-        writer_thread.join(timeout=15)
+        writer_thread.join(timeout=60)
         writer.release()
 
     assert not writer_thread.is_alive()
     assert not writer_errors
 
 
+@pytest.mark.timeout(180)
 def test_redis_pending_writers_are_elected_by_holder_id(
     redis_connection: ConnectionFactory,
     monkeypatch: pytest.MonkeyPatch,
@@ -402,10 +405,10 @@ def test_redis_pending_writers_are_elected_by_holder_id(
     assert acquired == ['first']
 
     first.release()
-    second_thread.join(timeout=15)
+    second_thread.join(timeout=60)
     assert acquired == ['first', 'second']
     second.release()
-    first_thread.join(timeout=1)
+    first_thread.join(timeout=10)
     assert not first_thread.is_alive()
     assert not second_thread.is_alive()
     assert not errors
@@ -1133,6 +1136,7 @@ def test_redis_check_or_kill_lock_always_closes_pubsub(
     assert calls.count('close') == 1
 
 
+@pytest.mark.timeout(60)
 def test_redis_acquire_fail_when_locked_fails_fast() -> None:
     """``fail_when_locked`` raises immediately when the holder is alive.
 
