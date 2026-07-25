@@ -1,5 +1,8 @@
 4.0.0:
 
+ * Fixed ``open_atomic()`` replacing a destination created while its context
+   was open on POSIX; publication now raises ``FileExistsError`` and preserves
+   the concurrent winner (#114)
  * Python 3.10 or later is now required; Python 3.9 (EOL) support dropped
  * ``pywin32`` is no longer installed by default on Windows; the msvcrt-based
    locker is the default and works dependency-free for exclusive locks.
@@ -122,4 +125,3 @@ https://github.com/WoLpH/portalocker/commits/master
 0.1:
 
  * Initial release
-
