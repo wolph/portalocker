@@ -18,7 +18,7 @@ import weakref
 from . import constants, exceptions, portalocker, types
 from .types import Filename, Mode
 
-logger: logging.Logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 5
 DEFAULT_CHECK_INTERVAL = 0.25

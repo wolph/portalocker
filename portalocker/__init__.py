@@ -1,5 +1,3 @@
-import typing as _typing
-
 from . import __about__, constants, exceptions, portalocker
 from .utils import (
     BoundedSemaphore,
@@ -16,18 +14,11 @@ try:
 except ImportError:  # pragma: no cover
     # `redis` is an optional dependency; keep the attribute importable so
     # `portalocker.RedisLock` fails at use time, not import time.
-    RedisLock: 'type[_RedisLockType] | None' = None  # type: ignore[no-redef]
-
-if _typing.TYPE_CHECKING:
-    from .redis import RedisLock as _RedisLockType
-
-    # Keep the generated single-file module syntactically valid after the
-    # already-inlined Redis import is deduplicated.
-    pass  # noqa: PIE790
+    RedisLock = None  # type: ignore[assignment,misc]  # ty: ignore[invalid-assignment]
 
 
 #: The package name on Pypi
-__package_name__: str = __about__.__package_name__
+__package_name__ = __about__.__package_name__
 #: Current author and maintainer, view the git history for the previous ones
 __author__ = __about__.__author__
 #: Current author's email address
@@ -35,9 +26,9 @@ __email__ = __about__.__email__
 #: Version number
 __version__ = __about__.__version__
 #: Package description for Pypi
-__description__: str = __about__.__description__
+__description__ = __about__.__description__
 #: Package homepage
-__url__: str = __about__.__url__
+__url__ = __about__.__url__
 
 
 #: Exception thrown when the file is already locked by someone else
@@ -47,14 +38,9 @@ LockException = exceptions.LockException
 
 
 #: Lock a file. Note that this is an advisory lock on Linux/Unix systems
-lock: _typing.Callable[
-    [portalocker.types.FileArgument, constants.LockFlags],
-    None,
-] = portalocker.lock
+lock = portalocker.lock
 #: Unlock a file
-unlock: _typing.Callable[[portalocker.types.FileArgument], None] = (
-    portalocker.unlock
-)
+unlock = portalocker.unlock
 
 #: Place an exclusive lock.
 #: Only one process may hold an exclusive lock for a given file at a given
