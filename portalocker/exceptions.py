@@ -11,9 +11,9 @@ class BaseLockException(Exception):  # noqa: N818
 
     def __init__(
         self,
-        *args: typing.Any,
+        *args: object,
         fh: types.IO | None | int | types.HasFileno = None,
-        **kwargs: typing.Any,
+        **kwargs: object,
     ) -> None:
         self.fh = fh
         self.strerror = (

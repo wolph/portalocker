@@ -9,11 +9,11 @@ import re
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 
-__package_name__ = 'portalocker'
+__package_name__: str = 'portalocker'
 __author__ = 'Rick van Hattem'
 __email__ = 'wolph@wol.ph'
-__description__ = 'Wraps the portalocker recipe for easy usage'
-__url__ = 'https://github.com/WoLpH/portalocker'
+__description__: str = 'Wraps the portalocker recipe for easy usage'
+__url__: str = 'https://github.com/WoLpH/portalocker'
 
 
 def _read_pyproject_version(path: Path) -> str | None:  # pragma: no cover
