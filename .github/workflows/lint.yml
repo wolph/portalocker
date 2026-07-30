@@ -28,7 +28,7 @@ jobs:
     steps:
       # Step 1: Checkout repository
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -41,7 +41,7 @@ jobs:
 
       # Step 3: Check repository best-practices using Scientific Python's repo-review.
       - name: Check repository best-practices
-        uses: scientific-python/repo-review@v0.12.3
+        uses: scientific-python/repo-review@v1.2.1
         with:
           plugins: sp-repo-review # Uses standard Scientific Python plugins.
 
