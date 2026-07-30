@@ -138,6 +138,11 @@ ignore = [
     'PC111', # no blacken-docs because markdown has no code
     'PC140', # manual typecheck pre-commit hooks
     'PC170', # no pygrep-hooks because no rST
+    'PC180', # no markdown formatter on this legacy branch
+    'PC192', # legacy ruff pre-commit hook name is frozen on this branch
+    'PC902', # no custom pre-commit CI autofix message
+    'PC903', # no pre-commit CI schedule
+    'PP304', # pytest log level is not pinned on this legacy branch
     'PY005',  # Tests folder is not named tests
     'PY006', # pre-commit should not be used
     'PY007', # tox configured in tox.toml
