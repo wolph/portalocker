@@ -37,13 +37,11 @@ jobs:
     steps:
       - name: Generate Matrix for Tests
         id: generate-matrix
-        uses: coactions/dynamic-matrix@v4
-        with:
-          platforms: 'linux,macos,windows'
-          min_python: '3.9'
-          linux: full
-          windows: full
-          macos: full
+        # coactions/dynamic-matrix no longer builds on current runner images
+        # (its pinned cffi cannot compile under the bundled Python), so the
+        # matrix that it used to derive is pinned statically here.
+        run: |
+          echo 'matrix={"os":["ubuntu-latest","macos-latest","windows-latest"],"python_version":["3.9","3.10","3.11","3.12"]}' >> "$GITHUB_OUTPUT"
 
   # Job: Perform static type checking across the generated matrix.
   type_checking:
