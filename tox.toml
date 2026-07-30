@@ -19,6 +19,9 @@ skip_missing_interpreters = true
 [env_run_base]
 labels = ['python']
 pass_env = ['FORCE_COLOR']
+# pyright is not part of the package extras; CI environments without a
+# globally installed pyright (e.g. AppVeyor) need it inside the env.
+deps = ['pyright']
 commands = [
     [
         'mypy',
