@@ -5,6 +5,10 @@ image:
   - Visual Studio 2022
 
 environment:
+  # The image's default Python on PATH is 32-bit; packages such as
+  # cryptography no longer ship win32 wheels, so dependency installs fall
+  # back to source builds and fail. Managed interpreters are always x64.
+  UV_PYTHON_PREFERENCE: only-managed
   matrix:
   - TOXENV: py39
   - TOXENV: py310

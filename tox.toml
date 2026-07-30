@@ -19,6 +19,11 @@ skip_missing_interpreters = true
 [env_run_base]
 labels = ['python']
 pass_env = ['FORCE_COLOR']
+# pyright is not part of the package extras; CI environments without a
+# globally installed pyright (e.g. AppVeyor) need it inside the env.
+# Pinned to the version in uv.lock: newer releases add deprecation
+# diagnostics that this frozen branch does not chase.
+deps = ['pyright==1.1.402']
 commands = [
     [
         'mypy',
