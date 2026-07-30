@@ -1,0 +1,26 @@
+# What Python version is installed where:
+# http://www.appveyor.com/docs/installed-software#python
+
+image:
+  - Visual Studio 2022
+
+environment:
+  # The image's default Python on PATH is 32-bit; packages without win32
+  # wheels would fall back to failing source builds. Managed uv
+  # interpreters are always x64 and independent of the image.
+  UV_PYTHON_PREFERENCE: only-managed
+  matrix:
+  - TOXENV: py310
+  - TOXENV: py311
+  - TOXENV: py312
+  - TOXENV: py313
+  - TOXENV: py314
+
+install:
+  - powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+build: false  # Not a C# project, build stuff at the test step instead.
+
+test_script:
+  - dir
+  - C:\Users\appveyor\.local\bin\uvx.exe tox
