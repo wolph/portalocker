@@ -1,3 +1,4 @@
+import importlib.util
 import os
 
 import pytest
@@ -6,9 +7,20 @@ import portalocker
 from portalocker import LockFlags
 from portalocker_tests.conftest import LOCKERS
 
+# Since portalocker 4.0.0 pywin32 is an optional extra. On Windows without it,
+# `win32file` is unavailable and shared locks are unsupported by design
+# (msvcrt has no true shared lock), so they raise ImportError pointing at the
+# `portalocker[win32]` extra. Skip the shared-lock cases in that configuration.
+_needs_win32_extra = pytest.mark.skipif(
+    os.name == 'nt' and importlib.util.find_spec('win32file') is None,
+    reason='shared locks on Windows require the pywin32 extra '
+    '(portalocker[win32])',
+)
 
-def test_exclusive(tmpfile):
+
+def test_exclusive(tmpdir):
     """Test that exclusive lock prevents reading and writing by others."""
+    tmpfile = tmpdir.join('test_exclusive.lock')
     text_0 = 'spam and eggs'
     with open(tmpfile, 'w') as fh:
         fh.write(text_0)
@@ -42,8 +54,10 @@ def test_exclusive(tmpfile):
         portalocker.unlock(fh)
 
 
-def test_shared(tmpfile):
+@_needs_win32_extra
+def test_shared(tmpdir):
     """Test that shared lock allows reading but not writing by others."""
+    tmpfile = tmpdir.join('test_shared.lock')
     with open(tmpfile, 'w') as fh:
         fh.write('spam and eggs')
 
@@ -71,8 +85,9 @@ def test_shared(tmpfile):
 
 
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
-def test_blocking_timeout(tmpfile, locker):
+def test_blocking_timeout(tmpdir, locker):
     """Test that a warning is raised when using a blocking timeout."""
+    tmpfile = tmpdir.join('test_blocking_timeout.lock')
     flags = LockFlags.SHARED
 
     with pytest.warns(UserWarning):  # noqa: SIM117
@@ -90,7 +105,8 @@ def test_blocking_timeout(tmpfile, locker):
     'support NON_BLOCKING flag within a single process.',
 )
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
-def test_nonblocking(tmpfile, locker):
+def test_nonblocking(tmpdir, locker):
     """Test that using NON_BLOCKING flag raises RuntimeError."""
+    tmpfile = tmpdir.join('test_nonblocking.lock')
     with open(tmpfile, 'w') as fh, pytest.raises(RuntimeError):
         portalocker.lock(fh, LockFlags.NON_BLOCKING)

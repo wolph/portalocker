@@ -7,12 +7,12 @@ class BaseLockException(Exception):  # noqa: N818
     # Error codes:
     LOCK_FAILED: typing.Final = 1
 
-    strerror: typing.Optional[str] = None  # ensure attribute always exists
+    strerror: str | None = None  # ensure attribute always exists
 
     def __init__(
         self,
         *args: typing.Any,
-        fh: typing.Union[types.IO, int, types.HasFileno, None] = None,
+        fh: types.IO | None | int | types.HasFileno = None,
         **kwargs: typing.Any,
     ) -> None:
         self.fh = fh
@@ -29,7 +29,16 @@ class LockException(BaseLockException):
 
 
 class AlreadyLocked(LockException):
-    pass
+    holder_pid: int | None = None
+
+    def __init__(
+        self,
+        *args: typing.Any,
+        holder_pid: int | None = None,
+        **kwargs: typing.Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.holder_pid = holder_pid
 
 
 class FileToLarge(LockException):

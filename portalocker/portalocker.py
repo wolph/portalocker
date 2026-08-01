@@ -1,12 +1,26 @@
+# The msvcrt/pywin32 modules are unavailable outside Windows, and `LOCKER`
+# is assigned exactly once per platform-specific branch while pyright
+# analyzes all branches.
 # pyright: reportUnknownMemberType=false, reportAttributeAccessIssue=false
+# pyright: reportConstantRedefinition=false
 """Module portalocker.
 
 This module provides cross-platform file locking functionality.
-The Windows implementation now supports two variants:
 
-  1. A default method using the Win32 API (win32file.LockFileEx/UnlockFileEx).
-  2. An alternative that uses msvcrt.locking for exclusive locks (shared
-     locks still use the Win32 API).
+On POSIX systems locking is provided by ``fcntl.flock`` (or ``fcntl.lockf``
+via :class:`LockfLocker`), with no extra dependencies.
+
+On Windows the default locker is :class:`MsvcrtLocker`, which needs no
+extra dependencies for *exclusive* locks (it uses the built-in ``msvcrt``
+module). *Shared* locks require the Win32 API
+(``win32file.LockFileEx``/``UnlockFileEx``) provided by the optional
+``pywin32`` package, installable through the ``win32`` extra::
+
+    pip install "portalocker[win32]"
+
+Without ``pywin32``, acquiring a shared lock on Windows raises
+``ImportError``. :class:`Win32Locker` can be used directly to lock through
+the Win32 API exclusively; it always requires ``pywin32``.
 
 This version uses classes to encapsulate locking logic, while maintaining
 the original external API, including the LOCKER constant for specific
@@ -16,11 +30,9 @@ backwards compatibility (POSIX) and Windows behavior.
 import io
 import os
 import typing
+from collections.abc import Callable
 from typing import (
     Any,
-    Callable,
-    Optional,
-    Union,
     cast,
 )
 
@@ -54,30 +66,73 @@ class BaseLocker:
 
 
 # Define refined LockerType with more specific types
-LockerType = Union[
+LockerType = (
     # POSIX-style fcntl.flock callable
-    Callable[[Union[int, types.HasFileno], int], Any],
+    Callable[[int | types.HasFileno, int], Any]
     # Tuple of lock and unlock functions
-    tuple[LockCallable, UnlockCallable],
+    | tuple[LockCallable, UnlockCallable]
     # BaseLocker instance
-    BaseLocker,
+    | BaseLocker
     # BaseLocker class
-    type[BaseLocker],
-]
+    | type[BaseLocker]
+)
 
 LOCKER: LockerType
 
-if os.name == 'nt':  # pragma: not-posix
+#: Cache of ``BaseLocker`` subclasses instantiated when ``LOCKER`` is a class
+#: rather than an instance. Shared by the Windows and POSIX dispatchers.
+_locker_instances: dict[type[BaseLocker], BaseLocker] = {}
+
+
+def _resolve_locker_pair(
+    locker: object,
+) -> tuple[LockCallable, UnlockCallable] | None:
+    """Resolve the non-callable ``LockerType`` forms to a ``(lock, unlock)``
+    pair.
+
+    Handles the three high-level forms shared by every platform: a
+    ``BaseLocker`` instance, a ``(lock, unlock)`` tuple, and a ``BaseLocker``
+    subclass (instantiated once and cached in :data:`_locker_instances`).
+
+    Returns ``None`` for the plain POSIX-style ``fcntl`` callable, which each
+    platform resolves itself: POSIX applies its own error translation while
+    Windows rejects it. ``locker`` is typed ``object`` because this is a
+    runtime dispatch over the ``LockerType`` union; the type checkers cannot
+    narrow the parameterised ``tuple`` / ``type`` members from ``isinstance``
+    alone, so the concrete forms are recovered with explicit casts.
+    """
+    if isinstance(locker, BaseLocker):
+        return locker.lock, locker.unlock  # pragma: nt-no-pywin32
+    if isinstance(locker, tuple):
+        pair = cast(
+            'tuple[LockCallable, UnlockCallable]', locker
+        )  # pragma: nt-no-pywin32
+        return pair[0], pair[1]  # pragma: nt-no-pywin32
+    if isinstance(locker, type):
+        locker_cls = cast('type[BaseLocker]', locker)
+        instance = _locker_instances.get(locker_cls)
+        if instance is None:
+            instance = _locker_instances[locker_cls] = locker_cls()
+        return instance.lock, instance.unlock
+    return None  # pragma: not-posix
+
+
+if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
     # Windows-specific helper functions
     def _prepare_windows_file(
         file_obj: types.FileArgument,
-    ) -> tuple[int, Optional[typing.IO[Any]], Optional[int]]:
-        """Prepare file for Windows: get fd, optionally seek and save pos."""
-        if isinstance(file_obj, int):
-            # Plain file descriptor
-            return file_obj, None, None
+    ) -> tuple[int, typing.IO[Any] | None, int | None]:
+        """Prepare file for Windows: get fd, seek to 0 and save prior pos.
 
+        ``msvcrt.locking`` and ``LockFileEx`` lock a byte range relative to
+        the *current* file position, so every path must seek to byte 0 first
+        for consistent mutual exclusion (otherwise two locks taken at
+        different positions on files larger than the lock length do not
+        conflict). Full IO objects are seeked/restored via ``seek``/``tell``;
+        raw descriptors (``int`` / ``HasFileno``) via ``os.lseek``.
+        """
         # Full IO objects (have tell/seek) -> preserve and restore position
+        original_pos: int | None
         if isinstance(file_obj, io.IOBase):
             fd: int = file_obj.fileno()
             original_pos = file_obj.tell()
@@ -86,17 +141,41 @@ if os.name == 'nt':  # pragma: not-posix
             return fd, typing.cast(typing.IO[Any], file_obj), original_pos
             # cast satisfies mypy: IOBase -> IO[Any]
 
-        # Fallback: an object that only implements fileno() (HasFileno)
-        fd = typing.cast(types.HasFileno, file_obj).fileno()  # type: ignore[redundant-cast]
-        return fd, None, None
+        # Raw descriptor (int) or an object that only implements fileno()
+        # (HasFileno). There is no Python-level file object to seek, so use
+        # the fd directly and let the caller restore it with os.lseek.
+        if isinstance(file_obj, int):
+            fd = file_obj
+        else:
+            fd = typing.cast(types.HasFileno, file_obj).fileno()  # type: ignore[redundant-cast]
+        # A raw fd may be non-seekable (a pipe, socket or standard stream),
+        # where os.lseek raises OSError ("Illegal seek"). Such fds have no
+        # meaningful position to normalize, so skip the seek and record no
+        # position to restore.
+        try:
+            original_pos = os.lseek(fd, 0, os.SEEK_CUR)
+            if original_pos != 0:
+                os.lseek(fd, 0, os.SEEK_SET)
+        except OSError:
+            original_pos = None
+        return fd, None, original_pos
 
     def _restore_windows_file_pos(
-        file_io_obj: Optional[typing.IO[Any]],
-        original_pos: Optional[int],
+        fd: int,
+        file_io_obj: typing.IO[Any] | None,
+        original_pos: int | None,
     ) -> None:
-        """Restore file position if it was an IO object and pos was saved."""
-        if file_io_obj and original_pos is not None and original_pos != 0:
+        """Restore a saved file position after a lock/unlock operation.
+
+        IO objects are restored via ``seek``; raw descriptors (no IO object)
+        via ``os.lseek`` on ``fd``.
+        """
+        if original_pos is None or original_pos == 0:
+            return
+        if file_io_obj is not None:
             file_io_obj.seek(original_pos)
+        else:
+            os.lseek(fd, original_pos, os.SEEK_SET)
 
     class Win32Locker(BaseLocker):
         """Locker using Win32 API (LockFileEx/UnlockFileEx)."""
@@ -109,8 +188,8 @@ if os.name == 'nt':  # pragma: not-posix
                 import pywintypes
             except ImportError as e:
                 raise ImportError(
-                    'pywintypes is required for Win32Locker but not '
-                    'found. Please install pywin32.'
+                    'Win32Locker requires the win32 extra (pywin32). '
+                    'Install it with: pip install "portalocker[win32]"'
                 ) from e
             self._overlapped = pywintypes.OVERLAPPED()
 
@@ -122,7 +201,7 @@ if os.name == 'nt':  # pragma: not-posix
                     'msvcrt is required for _get_os_handle on Windows '
                     'but not found.'
                 ) from e
-            return cast(int, msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined,redundant-cast]
+            return cast(int, msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined]
 
         def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
             import pywintypes
@@ -143,7 +222,7 @@ if os.name == 'nt':  # pragma: not-posix
                 win32file.LockFileEx(
                     os_fh, mode, 0, self._lock_bytes_low, self._overlapped
                 )
-            except pywintypes.error as exc_value:  # type: ignore[misc]
+            except pywintypes.error as exc_value:
                 if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
                     raise exceptions.AlreadyLocked(
                         exceptions.LockException.LOCK_FAILED,
@@ -151,9 +230,16 @@ if os.name == 'nt':  # pragma: not-posix
                         fh=file_obj,  # Pass original file_obj
                     ) from exc_value
                 else:
-                    raise
+                    # Any other Win32 error must still surface as a
+                    # LockException per the documented contract, not as a
+                    # raw pywintypes.error.
+                    raise exceptions.LockException(
+                        exceptions.LockException.LOCK_FAILED,
+                        exc_value.strerror,
+                        fh=file_obj,  # Pass original file_obj
+                    ) from exc_value
             finally:
-                _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+                _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
         def unlock(self, file_obj: types.FileArgument) -> None:
             import pywintypes
@@ -167,7 +253,7 @@ if os.name == 'nt':  # pragma: not-posix
                 win32file.UnlockFileEx(
                     os_fh, 0, self._lock_bytes_low, self._overlapped
                 )
-            except pywintypes.error as exc:  # type: ignore[misc]
+            except pywintypes.error as exc:
                 if exc.winerror != winerror.ERROR_NOT_LOCKED:
                     raise exceptions.LockException(
                         exceptions.LockException.LOCK_FAILED,
@@ -181,14 +267,29 @@ if os.name == 'nt':  # pragma: not-posix
                     fh=file_obj,  # Pass original file_obj
                 ) from exc
             finally:
-                _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+                _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
     class MsvcrtLocker(BaseLocker):
-        _win32_locker: Win32Locker
+        """Default Windows locker, based on ``msvcrt.locking``.
+
+        Exclusive locks work without any extra dependencies. Shared locks
+        are delegated to :class:`Win32Locker` and therefore require the
+        optional ``pywin32`` package (``pip install "portalocker[win32]"``);
+        without it, acquiring a shared lock raises ``ImportError``.
+        """
+
+        _win32_locker: Win32Locker | None
         _msvcrt_lock_length: int = 0x10000
 
         def __init__(self) -> None:
-            self._win32_locker = Win32Locker()
+            try:
+                self._win32_locker = Win32Locker()
+            except ImportError:
+                # pywin32 is an optional extra since 4.0.0. Without it,
+                # exclusive locks still work via the pure-msvcrt path
+                # below; shared locks and the unlock() fallback raise
+                # informative errors instead of crashing here.
+                self._win32_locker = None
             try:
                 import msvcrt
             except ImportError as e:
@@ -198,7 +299,7 @@ if os.name == 'nt':  # pragma: not-posix
 
             attrs = ['LK_LOCK', 'LK_RLCK', 'LK_NBLCK', 'LK_UNLCK', 'LK_NBRLCK']
             defaults = [0, 1, 2, 3, 2]  # LK_NBRLCK often same as LK_NBLCK (2)
-            for attr, default_val in zip(attrs, defaults):
+            for attr, default_val in zip(attrs, defaults, strict=True):
                 if not hasattr(msvcrt, attr):
                     setattr(msvcrt, attr, default_val)
 
@@ -206,10 +307,17 @@ if os.name == 'nt':  # pragma: not-posix
             import msvcrt
 
             if flags & LockFlags.SHARED:
+                win32_locker = self._win32_locker
+                if win32_locker is None:
+                    raise ImportError(
+                        'Shared locks on Windows require the win32 extra '
+                        '(pywin32); msvcrt provides no true shared lock. '
+                        'Install it with: pip install "portalocker[win32]"'
+                    )
                 win32_api_flags = LockFlags(0)
                 if flags & LockFlags.NON_BLOCKING:
                     win32_api_flags |= LockFlags.NON_BLOCKING
-                self._win32_locker.lock(file_obj, win32_api_flags)
+                win32_locker.lock(file_obj, win32_api_flags)
                 return
 
             fd, io_obj_ctx, pos_ctx = _prepare_windows_file(file_obj)
@@ -238,7 +346,7 @@ if os.name == 'nt':  # pragma: not-posix
                     fh=file_obj,  # Pass original file_obj
                 ) from exc_value
             finally:
-                _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+                _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
         def unlock(self, file_obj: types.FileArgument) -> None:
             import msvcrt
@@ -254,12 +362,23 @@ if os.name == 'nt':  # pragma: not-posix
                 )
             except OSError as exc:
                 if exc.errno == 13:  # EACCES (Permission denied)
+                    win32_locker = self._win32_locker
+                    if win32_locker is None:
+                        # No pywin32 to fall back to; surface the
+                        # original msvcrt unlock failure instead.
+                        raise exceptions.LockException(
+                            exceptions.LockException.LOCK_FAILED,
+                            f'{exc.strerror} (the win32 unlock fallback '
+                            f'is unavailable without pywin32; install it '
+                            f'with: pip install "portalocker[win32]")',
+                            fh=file_obj,
+                        ) from exc
                     took_fallback_path = True
                     # Restore position before calling win32_locker,
                     # as it will re-prepare.
-                    _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+                    _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
                     try:
-                        self._win32_locker.unlock(
+                        win32_locker.unlock(
                             file_obj
                         )  # win32_locker handles its own seeking
                     except exceptions.LockException as win32_exc:
@@ -285,82 +404,52 @@ if os.name == 'nt':  # pragma: not-posix
                     ) from exc
             finally:
                 if not took_fallback_path:
-                    _restore_windows_file_pos(io_obj_ctx, pos_ctx)
+                    _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
-    _locker_instances: dict[type[BaseLocker], BaseLocker] = dict()
-
-    LOCKER = MsvcrtLocker  # type: ignore[reportConstantRedefinition]
+    LOCKER = MsvcrtLocker
 
     def lock(file: types.FileArgument, flags: LockFlags) -> None:
-        if isinstance(LOCKER, BaseLocker):
-            # If LOCKER is a BaseLocker instance, use its lock method
-            locker: Callable[[types.FileArgument, LockFlags], None] = (
-                LOCKER.lock
-            )
-        elif isinstance(LOCKER, tuple):
-            locker = LOCKER[0]  # type: ignore[reportUnknownVariableType]
-        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable,arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
-            locker_instance = _locker_instances.get(LOCKER)  # type: ignore[arg-type]
-            if locker_instance is None:
-                # Create an instance of the locker class if not already done
-                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[ignore,index,call-arg]
-
-            locker = locker_instance.lock
-        else:
+        pair = _resolve_locker_pair(LOCKER)
+        if pair is None:
+            # Windows has no ``fcntl``-style callable locker.
             raise TypeError(
                 f'LOCKER must be a BaseLocker instance, a tuple of lock and '
                 f'unlock functions, or a subclass of BaseLocker, '
                 f'got {type(LOCKER)}.'
             )
-
-        locker(file, flags)
+        pair[0](file, flags)
 
     def unlock(file: types.FileArgument) -> None:
-        if isinstance(LOCKER, BaseLocker):
-            # If LOCKER is a BaseLocker instance, use its lock method
-            unlocker: Callable[[types.FileArgument], None] = LOCKER.unlock
-        elif isinstance(LOCKER, tuple):
-            unlocker = LOCKER[1]  # type: ignore[reportUnknownVariableType]
-
-        elif issubclass(LOCKER, BaseLocker):  # type: ignore[unreachable,arg-type]  # pyright: ignore [reportUnnecessaryIsInstance]
-            locker_instance = _locker_instances.get(LOCKER)  # type: ignore[arg-type]
-            if locker_instance is None:
-                # Create an instance of the locker class if not already done
-                _locker_instances[LOCKER] = locker_instance = LOCKER()  # type: ignore[ignore,index,call-arg]
-
-            unlocker = locker_instance.unlock
-        else:
+        pair = _resolve_locker_pair(LOCKER)
+        if pair is None:
             raise TypeError(
                 f'LOCKER must be a BaseLocker instance, a tuple of lock and '
                 f'unlock functions, or a subclass of BaseLocker, '
                 f'got {type(LOCKER)}.'
             )
+        pair[1](file)
 
-        unlocker(file)
-
-else:  # pragma: not-nt
+else:  # pragma: not-posix
     import errno
     import fcntl
 
     # PosixLocker methods accept FileArgument | HasFileno
-    PosixFileArgument = Union[types.FileArgument, types.HasFileno]
+    PosixFileArgument = types.FileArgument | types.HasFileno
 
     class PosixLocker(BaseLocker):
         """Locker implementation using the `LOCKER` constant"""
 
-        _locker: Optional[
-            Callable[[Union[int, types.HasFileno], int], Any]
-        ] = None
+        _locker: Callable[[int | types.HasFileno, int], Any] | None = None
 
         @property
-        def locker(self) -> Callable[[Union[int, types.HasFileno], int], Any]:
+        def locker(self) -> Callable[[int | types.HasFileno, int], Any]:
             if self._locker is None:
                 # On POSIX systems ``LOCKER`` is a callable (fcntl.flock) but
                 # mypy also sees the Windows-only tuple assignment.  Explicitly
                 # cast so mypy knows we are returning the callable variant
                 # here.
                 return cast(
-                    Callable[[Union[int, types.HasFileno], int], Any], LOCKER
+                    Callable[[int | types.HasFileno, int], Any], LOCKER
                 )  # pyright: ignore[reportUnnecessaryCast]
 
             # mypy does not realise ``self._locker`` is non-None after the
@@ -374,7 +463,7 @@ else:  # pragma: not-nt
             # Check for fileno() method; covers typing.IO and HasFileno
             elif hasattr(file_obj, 'fileno') and callable(file_obj.fileno):
                 return file_obj.fileno()
-            else:
+            else:  # pragma: no cover - defensive, unreachable in practice
                 # Should not be reached if PosixFileArgument is correct.
                 # isinstance(file_obj, io.IOBase) could be an
                 # alternative check
@@ -400,19 +489,19 @@ else:  # pragma: not-nt
                 if exc_value.errno in (errno.EACCES, errno.EAGAIN):
                     raise exceptions.AlreadyLocked(
                         exc_value,
-                        strerror=str(exc_value),
+                        str(exc_value),
                         fh=file_obj,  # Pass original file_obj
                     ) from exc_value
-                else:
+                else:  # pragma: no cover - non-contention errno, not exercised
                     raise exceptions.LockException(
                         exc_value,
-                        strerror=str(exc_value),
+                        str(exc_value),
                         fh=file_obj,  # Pass original file_obj
                     ) from exc_value
-            except EOFError as exc_value:  # NFS specific
+            except EOFError as exc_value:  # pragma: no cover - NFS-specific
                 raise exceptions.LockException(
                     exc_value,
-                    strerror=str(exc_value),
+                    str(exc_value),
                     fh=file_obj,  # Pass original file_obj
                 ) from exc_value
 
@@ -423,22 +512,42 @@ else:  # pragma: not-nt
     class FlockLocker(PosixLocker):
         """FlockLocker is a PosixLocker implementation using fcntl.flock."""
 
-        LOCKER = fcntl.flock  # type: ignore[attr-defined]
+        # Bind the callable so this locker uses flock regardless of the
+        # module-level ``LOCKER`` fallback. (``fcntl.flock`` is a builtin and
+        # therefore is not bound as a descriptor on attribute access.) The
+        # explicit annotation keeps the type checkers from treating the
+        # class-level callable as a method (which would bind ``self``).
+        _locker: Callable[[int | types.HasFileno, int], Any] | None = (
+            fcntl.flock
+        )
 
     class LockfLocker(PosixLocker):
         """LockfLocker is a PosixLocker implementation using fcntl.lockf."""
 
-        LOCKER = fcntl.lockf  # type: ignore[attr-defined]
+        _locker: Callable[[int | types.HasFileno, int], Any] | None = (
+            fcntl.lockf
+        )
 
     # LOCKER constant for POSIX is fcntl.flock for backward compatibility.
-    # Type matches: Callable[[Union[int, HasFileno], int], Any]
-    LOCKER = fcntl.flock  # type: ignore[attr-defined,reportConstantRedefinition]
+    # Type matches: Callable[[int | HasFileno, int], Any]
+    LOCKER = fcntl.flock
 
     _posix_locker_instance = PosixLocker()
 
-    # Public API for POSIX uses the PosixLocker instance
+    # Public API for POSIX supports every ``LockerType`` form. The plain
+    # ``fcntl`` callable is routed through ``_posix_locker_instance`` (fd
+    # extraction, non-blocking validation and error translation); the tuple,
+    # instance and subclass forms are dispatched via ``_resolve_locker_pair``.
     def lock(file: types.FileArgument, flags: LockFlags) -> None:
-        _posix_locker_instance.lock(file, flags)
+        pair = _resolve_locker_pair(LOCKER)
+        if pair is None:
+            _posix_locker_instance.lock(file, flags)
+        else:
+            pair[0](file, flags)
 
     def unlock(file: types.FileArgument) -> None:
-        _posix_locker_instance.unlock(file)
+        pair = _resolve_locker_pair(LOCKER)
+        if pair is None:
+            _posix_locker_instance.unlock(file)
+        else:
+            pair[1](file)

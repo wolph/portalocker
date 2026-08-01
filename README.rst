@@ -2,18 +2,16 @@
 portalocker - Cross-platform locking library
 ############################################
 
-.. image:: https://github.com/wolph/portalocker/actions/workflows/main.yml/badge.svg?branch=master
-    :alt: Linux Test Status
-    :target: https://github.com/wolph/portalocker/actions/workflows/main.yml
-
-.. image:: https://coveralls.io/repos/WoLpH/portalocker/badge.svg?branch=master
-    :alt: Coverage Status
-    :target: https://coveralls.io/r/WoLpH/portalocker?branch=master
+.. image:: https://github.com/wolph/portalocker/actions/workflows/ci.yml/badge.svg?branch=develop
+    :alt: CI Test Status
+    :target: https://github.com/wolph/portalocker/actions/workflows/ci.yml
 
 Overview
 --------
 
 Portalocker is a library to provide an easy API to file locking.
+
+Portalocker requires Python 3.10 or later.
 
 An important detail to note is that on Linux and Unix systems the locks are
 advisory by default. By specifying the `-o mand` option to the mount command it
@@ -23,6 +21,22 @@ recommended however. For more information about the subject:
  - https://en.wikipedia.org/wiki/File_locking
  - http://stackoverflow.com/questions/39292051/portalocker-does-not-seem-to-lock
  - https://stackoverflow.com/questions/12062466/mandatory-file-lock-on-linux
+
+Windows and the ``pywin32`` dependency
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Since version 4.0.0, ``pywin32`` is no longer installed automatically on
+Windows. Exclusive locks work out of the box without any extra
+dependencies using the built-in `msvcrt` module. Shared locks
+(``LockFlags.SHARED``) on Windows require the optional `pywin32`
+dependency, which can be installed through the ``win32`` extra:
+
+::
+
+    pip install "portalocker[win32]"
+
+Attempting to acquire a shared lock on Windows without `pywin32` raises an
+``ImportError`` explaining this requirement.
 
 The module is currently maintained by Rick van Hattem <Wolph@wol.ph>.
 The project resides at https://github.com/WoLpH/portalocker . Bugs and feature
@@ -34,6 +48,35 @@ Security contact information
 To report a security vulnerability, please use the
 `Tidelift security contact <https://tidelift.com/security>`_.
 Tidelift will coordinate the fix and disclosure.
+
+PidFileLock contexts
+--------------------
+
+The default context is inspection-oriented: it enters even when another
+process owns the lock and returns that process's PID. A ``None`` value means
+this process acquired the lock:
+
+.. code-block:: python
+
+    import portalocker
+
+    with portalocker.PidFileLock('worker.pid') as holder_pid:
+        if holder_pid is None:
+            run_singleton_worker()
+        else:
+            print(f'worker already running as PID {holder_pid}')
+
+Use ``fail_closed()`` when the protected body must only run after acquisition:
+
+.. code-block:: python
+
+    import portalocker
+
+    try:
+        with portalocker.PidFileLock('worker.pid').fail_closed():
+            run_singleton_worker()
+    except portalocker.AlreadyLocked as exc:
+        print(f'worker already running as PID {exc.holder_pid}')
 
 Redis Locks
 -----------
@@ -67,8 +110,37 @@ Usage is really easy:
     with lock:
         print('do something here')
 
+Shared locks allow multiple readers while remaining mutually exclusive with
+writers:
+
+::
+
+    read_lock = portalocker.RedisLock(
+        'some_lock_channel_name',
+        flags=portalocker.LockFlags.SHARED,
+    )
+
+    with read_lock:
+        print('read shared state')
+
+Waiting writers prevent new readers from entering, so a continuous stream of
+readers cannot starve an exclusive lock. New shared locks also interoperate with
+older portalocker clients: legacy Redis locks are treated as exclusive.
+
 The API is essentially identical to the other ``Lock`` classes so in addition
 to the ``with`` statement you can also use ``lock.acquire(...)``.
+
+The normal test suite uses ``fakeredis``. To optionally repeat the Redis tests
+against a locally running server:
+
+::
+
+    redis-server
+    tox -e redis-live
+
+Set ``REDIS_HOST`` or ``REDIS_PORT`` when the server does not use
+``localhost:6379``. The ``redis-live`` environment fails instead of skipping
+when it cannot connect.
 
 Python 2
 --------
@@ -186,4 +258,3 @@ License
 -------
 
 See the `LICENSE <https://github.com/WoLpH/portalocker/blob/develop/LICENSE>`_ file.
-

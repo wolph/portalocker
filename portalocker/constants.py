@@ -4,7 +4,9 @@ Locking constants
 Lock types:
 
 - `EXCLUSIVE` exclusive lock
-- `SHARED` shared lock
+- `SHARED` shared lock. Note: on Windows this requires the optional
+  ``pywin32`` package (``pip install "portalocker[win32]"``); without it,
+  acquiring a shared lock raises ``ImportError``.
 
 Lock flags:
 
@@ -14,6 +16,10 @@ Manually unlock, only needed internally
 
 - `UNBLOCK` unlock
 """
+# The platform-specific `if os.name == ...` branches each assign the module
+# constants exactly once, but pyright analyzes all branches and reports the
+# assignments as redefinitions.
+# pyright: reportConstantRedefinition=false
 
 import enum
 import os
@@ -36,13 +42,13 @@ elif os.name == 'posix':  # pragma: no cover
     import fcntl
 
     #: exclusive lock
-    LOCK_EX = fcntl.LOCK_EX  # type: ignore[attr-defined]
+    LOCK_EX = fcntl.LOCK_EX
     #: shared lock
-    LOCK_SH = fcntl.LOCK_SH  # type: ignore[attr-defined]
+    LOCK_SH = fcntl.LOCK_SH
     #: non-blocking
-    LOCK_NB = fcntl.LOCK_NB  # type: ignore[attr-defined]
+    LOCK_NB = fcntl.LOCK_NB
     #: unlock
-    LOCK_UN = fcntl.LOCK_UN  # type: ignore[attr-defined]
+    LOCK_UN = fcntl.LOCK_UN
 
 else:  # pragma: no cover
     raise RuntimeError('PortaLocker only defined for nt and posix platforms')
@@ -51,7 +57,7 @@ else:  # pragma: no cover
 class LockFlags(enum.IntFlag):
     #: exclusive lock
     EXCLUSIVE = LOCK_EX
-    #: shared lock
+    #: shared lock (on Windows this requires the ``win32`` extra: pywin32)
     SHARED = LOCK_SH
     #: non-blocking
     NON_BLOCKING = LOCK_NB

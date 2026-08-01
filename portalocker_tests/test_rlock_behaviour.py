@@ -3,8 +3,9 @@ import pytest
 import portalocker
 
 
-def test_rlock_acquire_release_count(tmpfile):
+def test_rlock_acquire_release_count(tmpdir):
     """Test that RLock acquire/release count works as expected."""
+    tmpfile = tmpdir.join('test_rlock_acquire_release_count.lock')
     lock = portalocker.RLock(tmpfile)
     # Twice acquire
     h = lock.acquire()
@@ -19,8 +20,9 @@ def test_rlock_acquire_release_count(tmpfile):
     assert h.closed
 
 
-def test_rlock_acquire_release(tmpfile):
+def test_rlock_acquire_release(tmpdir):
     """Test that RLock acquire/release works as expected."""
+    tmpfile = tmpdir.join('test_rlock_acquire_release.lock')
     lock = portalocker.RLock(tmpfile)
     lock2 = portalocker.RLock(tmpfile, fail_when_locked=False)
 

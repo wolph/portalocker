@@ -5,16 +5,16 @@ image:
   - Visual Studio 2022
 
 environment:
-  # The image's default Python on PATH is 32-bit; packages such as
-  # cryptography no longer ship win32 wheels, so dependency installs fall
-  # back to source builds and fail. Managed interpreters are always x64.
+  # The image's default Python on PATH is 32-bit; packages without win32
+  # wheels would fall back to failing source builds. Managed uv
+  # interpreters are always x64 and independent of the image.
   UV_PYTHON_PREFERENCE: only-managed
   matrix:
-  - TOXENV: py39
   - TOXENV: py310
   - TOXENV: py311
   - TOXENV: py312
   - TOXENV: py313
+  - TOXENV: py314
 
 install:
   - powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"

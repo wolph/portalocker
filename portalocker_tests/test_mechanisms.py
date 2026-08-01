@@ -1,4 +1,3 @@
-import types
 import typing
 
 import pytest
@@ -13,8 +12,9 @@ from portalocker_tests.conftest import LOCKERS
 #     reason='Locking on Windows requires a file object',
 # )
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
-def test_lock_fileno(tmpfile, locker):
+def test_lock_fileno(tmpdir, locker):
     """Test that locking using fileno() works as expected."""
+    tmpfile = tmpdir.join('test_lock_fileno.lock')
     with open(tmpfile, 'a+') as a, open(tmpfile, 'a+') as b:
         # Lock shared non-blocking
         flags = LockFlags.SHARED | LockFlags.NON_BLOCKING
@@ -27,19 +27,22 @@ def test_lock_fileno(tmpfile, locker):
 
 
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
-def test_locker_mechanism(tmpfile, locker):
+def test_locker_mechanism(tmpdir, locker):
     """Can we switch the locking mechanism?"""
+    tmpfile = tmpdir.join('test_locker_mechanism.lock')
     # We can test for flock vs lockf based on their different behaviour re.
     # locking the same file.
     with portalocker.Lock(tmpfile, 'a+', flags=LockFlags.EXCLUSIVE):
         # If we have lockf(), we cannot get another lock on the same file.
-        fcntl: typing.Optional[types.ModuleType]
+        lockf: typing.Callable[..., typing.Any] | None
         try:
             import fcntl
-        except ImportError:
-            fcntl = None
 
-        if fcntl is not None and locker is fcntl.lockf:  # type: ignore[attr-defined]
+            lockf = fcntl.lockf
+        except ImportError:
+            lockf = None
+
+        if lockf is not None and locker is lockf:
             portalocker.Lock(
                 tmpfile,
                 'r+',
