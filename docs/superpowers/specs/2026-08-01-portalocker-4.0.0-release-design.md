@@ -44,11 +44,12 @@ worktree is clean, and verify the configured GPG secret key and GitHub
 authentication.
 
 Use the complete `4.0.0` section of `CHANGELOG.rst` as one multiline release
-message. Invoke `/Users/rick/bin/build_and_upload_release` from updated
-`develop` with that message and no version-bump argument. The helper runs local
-gates, creates the signed release merge and signed tag, fast-forwards `develop`
-back to the release commit, builds and signs artifacts, pushes both branches and
-the tag, triggers Trusted Publishing, and creates the GitHub Release.
+message. Resolve `build_and_upload_release` from `PATH`, verify that it is the
+requested helper, and invoke it from updated `develop` with that message and no
+version-bump argument. The helper runs local gates, creates the signed release
+merge and signed tag, fast-forwards `develop` back to the release commit, builds
+and signs artifacts, pushes both branches and the tag, triggers Trusted
+Publishing, and creates the GitHub Release.
 
 The helper does not wait for Trusted Publishing. Completion requires monitoring
 the tag-triggered workflow and independently verifying GitHub, Git, GPG, and

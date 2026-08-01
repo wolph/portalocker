@@ -4,7 +4,7 @@
 `superpowers:executing-plans` to execute this plan task-by-task.
 
 **Goal:** Integrate `master` into `develop`, publish signed portalocker 4.0.0
-with `/Users/rick/bin/build_and_upload_release`, and verify GitHub and PyPI.
+with `build_and_upload_release`, and verify GitHub and PyPI.
 
 **Architecture:** Work only in the isolated
 `.worktrees/release-4.0.0` checkout. First make `master` an ancestor of
@@ -245,12 +245,15 @@ curl -fsSL https://pypi.org/pypi/portalocker/json \
 key_id=$(git config --get user.signingkey)
 gpg --batch --list-secret-keys "$key_id"
 gh auth status
-zsh -n /Users/rick/bin/build_and_upload_release
+release_helper=$(command -v build_and_upload_release)
+test -n "$release_helper"
+zsh -n "$release_helper"
 ```
 
 Expected: clean worktree on `develop`; `master` is an ancestor; tag, GitHub
 Release, and PyPI files are absent; signing key and GitHub auth are available;
-helper syntax is valid. `gh release view` must fail with release-not-found.
+the requested helper resolves from `PATH` and has valid syntax. `gh release
+view` must fail with release-not-found.
 
 - [ ] **Step 2: Extract and inspect the exact release message**
 
@@ -272,10 +275,11 @@ history is included.
 
 - [ ] **Step 3: Execute the approved helper without a bump argument**
 
-Run in the same zsh process that defines `release_message`:
+Run in the same zsh process that defines `release_helper` and
+`release_message`:
 
 ```bash
-/Users/rick/bin/build_and_upload_release "$release_message"
+"$release_helper" "$release_message"
 ```
 
 Expected: helper reports `Done: v4.0.0`, after passing local gates, signing the
@@ -292,9 +296,19 @@ asynchronous.
 Run:
 
 ```bash
-run_id=$(gh run list --repo wolph/portalocker \
-  --workflow publish.yml --branch v4.0.0 --limit 1 \
-  --json databaseId --jq '.[0].databaseId')
+release_sha=$(git rev-parse 'v4.0.0^{}')
+run_id=''
+for attempt in {1..30}; do
+  run_json=$(gh run list --repo wolph/portalocker \
+    --workflow publish.yml --event push --limit 20 \
+    --json databaseId,headSha)
+  run_id=$(printf '%s' "$run_json" \
+    | jq -r --arg sha "$release_sha" \
+      '.[] | select(.headSha == $sha) | .databaseId' \
+    | head -1)
+  test -n "$run_id" && break
+  sleep 10
+done
 test -n "$run_id"
 gh run watch "$run_id" --repo wolph/portalocker --exit-status
 gh run view "$run_id" --repo wolph/portalocker \
@@ -363,7 +377,7 @@ Expected: PyPI has the wheel and sdist, and an index installation imports as
 From the primary checkout, after every previous step succeeds, run:
 
 ```bash
-git worktree remove /Users/rick/workspace/portalocker/.worktrees/release-4.0.0
+git worktree remove .worktrees/release-4.0.0
 git branch -d release/4.0.0-integration
 git status --short --branch
 ```
