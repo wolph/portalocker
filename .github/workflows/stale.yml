@@ -7,9 +7,12 @@ on:
 
 jobs:
   stale:
+    permissions:
+      issues: write
+      pull-requests: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/stale@v9
+      - uses: actions/stale@v11
         with:
           days-before-stale: 30
           days-before-pr-stale: -1
