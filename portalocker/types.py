@@ -4,7 +4,6 @@ from __future__ import annotations
 import io
 import pathlib
 import typing
-from typing import Union
 
 # spellchecker: off
 # fmt: off
@@ -50,11 +49,8 @@ Mode = typing.Literal[
     'rbU', 'rUb', 'Urb', 'brU', 'bUr', 'Ubr',
 ]
 # spellchecker: on
-Filename = Union[str, pathlib.Path]
-IO = Union[  # type: ignore[name-defined]
-    typing.IO[str],
-    typing.IO[bytes],
-]
+Filename = str | pathlib.Path
+IO = typing.IO[str] | typing.IO[bytes]
 
 
 class FileOpenKwargs(typing.TypedDict):
@@ -72,4 +68,4 @@ class HasFileno(typing.Protocol):
     def fileno(self) -> int: ...
 
 # Type alias for file arguments used in lock/unlock functions
-FileArgument = Union[typing.IO[typing.Any], io.TextIOWrapper, int, HasFileno]
+FileArgument = typing.IO[typing.Any] | io.TextIOWrapper | int | HasFileno

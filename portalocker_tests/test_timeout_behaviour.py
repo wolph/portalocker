@@ -3,10 +3,11 @@ import pytest
 import portalocker
 
 
-def test_with_timeout(tmpfile):
+def test_with_timeout(tmpdir):
     """
     Test that AlreadyLocked is raised when a file is locked with a timeout.
     """
+    tmpfile = tmpdir.join('test_with_timeout.lock')
     # Open the file 2 times
     with pytest.raises(portalocker.AlreadyLocked):  # noqa: SIM117
         with portalocker.Lock(tmpfile, timeout=0.1) as fh:
@@ -21,10 +22,11 @@ def test_with_timeout(tmpfile):
             print('writing more stuff to my cache...', file=fh)
 
 
-def test_without_timeout(tmpfile):
+def test_without_timeout(tmpdir):
     """
     Test that LockException is raised when a file is locked without a
     timeout."""
+    tmpfile = tmpdir.join('test_without_timeout.lock')
     # Open the file 2 times
     with pytest.raises(portalocker.LockException):  # noqa: SIM117
         with portalocker.Lock(tmpfile, timeout=None) as fh:
@@ -34,8 +36,9 @@ def test_without_timeout(tmpfile):
             print('writing more stuff to my cache...', file=fh)
 
 
-def test_without_fail(tmpfile):
+def test_without_fail(tmpdir):
     """Test that LockException is raised when fail_when_locked is False."""
+    tmpfile = tmpdir.join('test_without_fail.lock')
     # Open the file 2 times
     with pytest.raises(portalocker.LockException):  # noqa: SIM117
         with portalocker.Lock(tmpfile, timeout=0.1) as fh:

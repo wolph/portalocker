@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, master]
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [ruff, mypy, basedpyright, pyrefly, ty, codespell, repo-review, docs]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.13'
+      - run: uv run tox -e ${{ matrix.env }}
+
+  test:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+        include:
+          - os: ubuntu-latest
+            python-version: pypy3.11
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Start redis
+        if: runner.os == 'Linux' && !startsWith(matrix.python-version, 'pypy')
+        uses: shogo82148/actions-setup-redis@v1
+        with:
+          redis-version: '7.x'
+      - name: Run tests
+        run: uv run --no-default-groups --extra tests pytest -v
+
+  test-windows-pywin32:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.13'
+      - name: Run tests with pywin32 installed
+        run: uv run --no-default-groups --extra tests --extra win32 pytest -v

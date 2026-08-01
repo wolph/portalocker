@@ -32,3 +32,28 @@ def test_bounded_semaphore(timeout, check_interval, monkeypatch):
         timeout=timeout,
         fail_when_locked=False,
     )
+
+
+def test_bounded_semaphore_recovers_after_acquire_error(tmp_path):
+    """A3: a non-AlreadyLocked failure (e.g. a missing directory raising
+    FileNotFoundError) must not leave ``self.lock`` set. Otherwise the
+    ``assert not self.lock`` guard bricks the instance for every later
+    acquire."""
+    missing = tmp_path / 'missing'
+    semaphore = portalocker.NamedBoundedSemaphore(
+        1,
+        name='recover',
+        directory=str(missing),
+        timeout=0,
+    )
+
+    with pytest.raises(FileNotFoundError):
+        semaphore.acquire()
+    assert semaphore.lock is None, 'a failed acquire must not leak self.lock'
+
+    # Create the directory the second time around; the SAME instance must now
+    # acquire cleanly instead of raising AssertionError.
+    missing.mkdir()
+    lock = semaphore.acquire()
+    assert lock is not None
+    semaphore.release()

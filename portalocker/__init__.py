@@ -2,15 +2,19 @@ from . import __about__, constants, exceptions, portalocker
 from .utils import (
     BoundedSemaphore,
     Lock,
+    NamedBoundedSemaphore,
+    PidFileLock,
     RLock,
     TemporaryFileLock,
     open_atomic,
 )
 
-try:  # pragma: no cover
+try:
     from .redis import RedisLock
 except ImportError:  # pragma: no cover
-    RedisLock = None  # type: ignore[assignment,misc]
+    # `redis` is an optional dependency; keep the attribute importable so
+    # `portalocker.RedisLock` fails at use time, not import time.
+    RedisLock = None  # type: ignore[assignment,misc]  # ty: ignore[invalid-assignment]
 
 
 #: The package name on Pypi
@@ -20,7 +24,7 @@ __author__ = __about__.__author__
 #: Current author's email address
 __email__ = __about__.__email__
 #: Version number
-__version__ = '3.2.0'
+__version__ = __about__.__version__
 #: Package description for Pypi
 __description__ = __about__.__description__
 #: Package homepage
@@ -70,6 +74,8 @@ __all__ = [
     'Lock',
     'LockException',
     'LockFlags',
+    'NamedBoundedSemaphore',
+    'PidFileLock',
     'RLock',
     'RedisLock',
     'TemporaryFileLock',
