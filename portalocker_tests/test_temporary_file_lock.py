@@ -27,7 +27,8 @@ posix_inode_only = pytest.mark.skipif(
 
 def test_temporary_file_lock(tmpfile):
     """The lock file must be deleted on context exit and GC must close
-    the lock gracefully."""
+    the lock gracefully.
+    """
     with portalocker.TemporaryFileLock(tmpfile):
         pass
 
@@ -47,7 +48,8 @@ def test_temporary_file_lock(tmpfile):
 @posix_inode_only
 def test_fh_matches_path_detects_swap(tmpfile):
     """A2: the inode helper must accept a live handle and reject a handle
-    whose path was unlinked or recreated behind its back."""
+    whose path was unlinked or recreated behind its back.
+    """
     fh = open(tmpfile, 'a')  # noqa: SIM115
     try:
         assert utils._fh_matches_path(fh, tmpfile) is True
@@ -64,7 +66,8 @@ def test_fh_matches_path_detects_swap(tmpfile):
 @posix_release_only
 def test_temporaryfilelock_unlinks_before_unlock(tmpfile, monkeypatch):
     """A2: release must unlink the file while the lock is still held (unlink
-    before unlock) to avoid a split-brain window."""
+    before unlock) to avoid a split-brain window.
+    """
     events: list[str] = []
 
     real_unlink = os.unlink
@@ -95,7 +98,8 @@ def test_temporaryfilelock_unlocks_even_when_unlink_fails(
 ):
     """Fix round 1: a non-FileNotFoundError unlink failure must still
     propagate, but the OS lock must be freed regardless — otherwise the
-    error would leave the lock held forever."""
+    error would leave the lock held forever.
+    """
     lock = portalocker.TemporaryFileLock(tmpfile)
     lock.acquire()
 
@@ -117,7 +121,8 @@ def test_temporaryfilelock_unlocks_even_when_unlink_fails(
 @posix_inode_only
 def test_temporaryfilelock_recovers_from_stale_handle(tmpfile, monkeypatch):
     """A2: if the locked handle no longer names the current path, acquire must
-    drop it and re-acquire within the timeout."""
+    drop it and re-acquire within the timeout.
+    """
     calls: list[str] = []
     real_matches = utils._fh_matches_path
 
@@ -144,7 +149,8 @@ def test_temporaryfilelock_recovers_from_stale_handle(tmpfile, monkeypatch):
 @posix_inode_only
 def test_temporaryfilelock_gives_up_on_persistent_swap(tmpfile, monkeypatch):
     """A2: a path that keeps being replaced must surface as AlreadyLocked
-    within the timeout rather than spinning forever."""
+    within the timeout rather than spinning forever.
+    """
     monkeypatch.setattr(utils, '_fh_matches_path', lambda fh, filename: False)
 
     lock = portalocker.TemporaryFileLock(tmpfile, timeout=0)
@@ -154,7 +160,8 @@ def test_temporaryfilelock_gives_up_on_persistent_swap(tmpfile, monkeypatch):
 
 def test_temporaryfilelock_sequential_cycles(tmpfile):
     """A2: two lock/release cycles on the same path must both succeed and
-    clean up the file each time."""
+    clean up the file each time.
+    """
     for _ in range(2):
         lock = portalocker.TemporaryFileLock(tmpfile)
         lock.acquire()

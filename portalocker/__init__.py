@@ -1,3 +1,35 @@
+"""Cross-platform file locking, with optional Redis-backed distributed locks.
+
+This is the public entry point of the ``portalocker`` package. Most of what
+you need lives directly on this module:
+
+- `Lock` and `RLock` open a file and hold an OS-level advisory lock on it
+  for the lifetime of the ``with`` block; `RLock` additionally allows the
+  same thread to re-enter the lock.
+- `BoundedSemaphore` and `NamedBoundedSemaphore` cap the number of
+  processes that may hold a lock concurrently, using a directory of lock
+  files rather than a single one.
+- `PidFileLock` writes the current process ID into the lock file, so a
+  stale lock left behind by a crashed process can be recognised.
+- `TemporaryFileLock` is a short-lived variant of `Lock` intended for
+  small, throwaway critical sections.
+- `RedisLock` is a distributed lock built on Redis pubsub, for
+  coordinating processes that do not share a filesystem. It requires the
+  optional ``redis`` dependency; when that package is not installed,
+  `RedisLock` is still importable as ``None`` so that
+  ``import portalocker`` never fails, but constructing it raises at that
+  point rather than at import time. Install it with
+  ``pip install "portalocker[redis]"``.
+- `lock` and `unlock` are the low-level, platform-specific primitives that
+  the classes above are built on; reach for them only if the context
+  managers do not fit your use case.
+
+Example:
+    >>> import portalocker
+    >>> with portalocker.Lock('somefile', timeout=1) as fh:
+    ...     _ = fh.write('writing some stuff to my cache')
+"""
+
 from . import __about__, constants, exceptions, portalocker
 from .utils import (
     BoundedSemaphore,

@@ -142,17 +142,15 @@ Set ``REDIS_HOST`` or ``REDIS_PORT`` when the server does not use
 ``localhost:6379``. The ``redis-live`` environment fails instead of skipping
 when it cannot connect.
 
-Python 2
---------
+Upgrading from 3.x to 4.0.0
+---------------------------
 
-Python 2 was supported in versions before Portalocker 2.0. If you are still
-using
-Python 2,
-you can run this to install:
-
-::
-
-    pip install "portalocker<2"
+Version 4.0.0 raised the minimum Python to 3.10, stopped installing
+``pywin32`` on Windows by default, and changed what ``str()`` returns for
+POSIX lock exceptions. The `migration guide
+<https://portalocker.readthedocs.io/en/latest/migration.html>`_ walks
+through every change that can require an edit, with the reason and the
+fix for each.
 
 Tips
 ----
@@ -199,9 +197,8 @@ To customize the opening and locking a manual approach is also possible:
 >>> import portalocker
 >>> file = open('somefile', 'r+')
 >>> portalocker.lock(file, portalocker.LockFlags.EXCLUSIVE)
->>> file.seek(12)
->>> file.write('foo')
->>> file.close()
+>>> _ = file.seek(12)
+>>> _ = file.write('foo')
 
 Explicitly unlocking is not needed in most cases but omitting it has been known
 to cause issues:
@@ -210,21 +207,27 @@ https://github.com/AzureAD/microsoft-authentication-extensions-for-python/issues
 If needed, it can be done through:
 
 >>> portalocker.unlock(file)
+>>> file.close()
 
 Do note that your data might still be in a buffer so it is possible that your
 data is not available until you `flush()` or `close()`.
 
 To create a cross platform bounded semaphore across multiple processes you can
-use the `BoundedSemaphore` class which functions somewhat similar to
-`threading.BoundedSemaphore`:
+use the `NamedBoundedSemaphore` class which functions somewhat similar to
+`threading.BoundedSemaphore`. The name is what ties the participating
+processes to the same set of slots, so give it one you control:
 
 >>> import portalocker
 >>> n = 2
 >>> timeout = 0.1
+>>> name = 'readme_example'
 
->>> semaphore_a = portalocker.BoundedSemaphore(n, timeout=timeout)
->>> semaphore_b = portalocker.BoundedSemaphore(n, timeout=timeout)
->>> semaphore_c = portalocker.BoundedSemaphore(n, timeout=timeout)
+>>> semaphore_a = portalocker.NamedBoundedSemaphore(
+...     n, name=name, timeout=timeout)
+>>> semaphore_b = portalocker.NamedBoundedSemaphore(
+...     n, name=name, timeout=timeout)
+>>> semaphore_c = portalocker.NamedBoundedSemaphore(
+...     n, name=name, timeout=timeout)
 
 >>> semaphore_a.acquire()
 <portalocker.utils.Lock object at ...>
@@ -234,6 +237,9 @@ use the `BoundedSemaphore` class which functions somewhat similar to
 Traceback (most recent call last):
   ...
 portalocker.exceptions.AlreadyLocked
+
+>>> semaphore_a.release()
+>>> semaphore_b.release()
 
 
 More examples can be found in the

@@ -44,24 +44,93 @@ LockFlags = constants.LockFlags
 
 # Define a protocol for callable lockers
 class LockCallable(typing.Protocol):
-    def __call__(
-        self, file_obj: types.FileArgument, flags: LockFlags
-    ) -> None: ...
+    """Call signature of the locking half of a ``LOCKER`` pair.
+
+    `LOCKER` may be set to a ``(lock, unlock)`` tuple of two plain
+    callables instead of to a `BaseLocker`; this protocol describes the
+    first element. It is a typing construct only: it types `LockerType`
+    and the pair returned by `_resolve_locker_pair`, and nothing checks
+    it at runtime.
+
+    The bound `lock` method of every locker in this module matches it,
+    which is why ``(locker.lock, locker.unlock)`` is a valid `LOCKER`.
+
+    See Also:
+        `UnlockCallable`: the unlocking half of the same pair.
+    """
+
+    def __call__(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
+        """Acquire a lock on `file_obj`.
+
+        Args:
+            file_obj: An open file object, an object exposing `fileno()`,
+                or a raw file descriptor.
+            flags: The `LockFlags` combination describing the lock to
+                take, e.g. ``EXCLUSIVE | NON_BLOCKING``.
+        """
+        ...
 
 
 class UnlockCallable(typing.Protocol):
-    def __call__(self, file_obj: types.FileArgument) -> None: ...
+    """Call signature of the unlocking half of a ``LOCKER`` pair.
+
+    The counterpart of `LockCallable`: the second element of a
+    ``(lock, unlock)`` tuple assigned to `LOCKER`. It takes no flags
+    because releasing a lock needs no options - the locker already knows
+    what it took.
+
+    See Also:
+        `LockCallable`: the locking half of the same pair.
+    """
+
+    def __call__(self, file_obj: types.FileArgument) -> None:
+        """Release a lock previously taken on `file_obj`.
+
+        Args:
+            file_obj: The same file object, `fileno()` provider or raw
+                file descriptor that was passed to the lock callable.
+        """
+        ...
 
 
 class BaseLocker:
-    """Base class for locker implementations."""
+    """Base class for locker implementations.
+
+    A locker is the thin layer between `portalocker.lock` and the
+    platform's locking system call. Each platform branch of this module
+    defines its own subclasses - `Win32Locker` and `MsvcrtLocker` on
+    Windows, `PosixLocker` and friends on POSIX - and `LOCKER` names the
+    one the module-level `lock` / `unlock` dispatch to.
+
+    Subclass it to plug in a custom mechanism: implement both methods,
+    then assign the class or an instance of it to `LOCKER`. Both forms
+    are accepted (see `_resolve_locker_pair`); the class form is
+    instantiated once, on first use, and cached.
+    """
 
     def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
-        """Lock the file."""
+        """Lock `file_obj` according to `flags`.
+
+        Args:
+            file_obj: An open file object, an object exposing `fileno()`,
+                or a raw file descriptor.
+            flags: The `LockFlags` combination to apply.
+
+        Raises:
+            NotImplementedError: Always; subclasses must override this.
+        """
         raise NotImplementedError
 
     def unlock(self, file_obj: types.FileArgument) -> None:
-        """Unlock the file."""
+        """Release a lock previously taken by `lock`.
+
+        Args:
+            file_obj: The same file object, `fileno()` provider or raw
+                file descriptor that was passed to `lock`.
+
+        Raises:
+            NotImplementedError: Always; subclasses must override this.
+        """
         raise NotImplementedError
 
 
@@ -130,6 +199,18 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
         different positions on files larger than the lock length do not
         conflict). Full IO objects are seeked/restored via ``seek``/``tell``;
         raw descriptors (``int`` / ``HasFileno``) via ``os.lseek``.
+
+        Args:
+            file_obj: An open file object, an object exposing `fileno()`,
+                or a raw file descriptor.
+
+        Returns:
+            A ``(fd, io_obj, original_pos)`` triple to hand straight to
+            `_restore_windows_file_pos` once the lock or unlock call has
+            returned. ``io_obj`` is the file object when there was one and
+            `None` for raw descriptors; ``original_pos`` is `None` when the
+            descriptor is not seekable (a pipe, socket or standard stream)
+            and therefore has no position worth restoring.
         """
         # Full IO objects (have tell/seek) -> preserve and restore position
         original_pos: int | None
@@ -169,6 +250,13 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
 
         IO objects are restored via ``seek``; raw descriptors (no IO object)
         via ``os.lseek`` on ``fd``.
+
+        Args:
+            fd: The file descriptor `_prepare_windows_file` returned.
+            file_io_obj: The file object it returned, or `None` when the
+                caller passed a raw descriptor.
+            original_pos: The position it returned. `None` (non-seekable)
+                and ``0`` (already at the start) are both no-ops.
         """
         if original_pos is None or original_pos == 0:
             return
@@ -178,12 +266,43 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
             os.lseek(fd, original_pos, os.SEEK_SET)
 
     class Win32Locker(BaseLocker):
-        """Locker using Win32 API (LockFileEx/UnlockFileEx)."""
+        """Locker using Win32 API (LockFileEx/UnlockFileEx).
+
+        This is the only locker on Windows that can take a *shared* lock:
+        ``LockFileEx`` locks shared unless ``LOCKFILE_EXCLUSIVE_LOCK`` is
+        requested, whereas ``msvcrt.locking`` has no shared mode at all.
+        `MsvcrtLocker`, the default, delegates its shared locks here.
+
+        It is not the default because it needs the optional ``pywin32``
+        package. Since 4.0.0 that package is no longer installed with
+        portalocker; ``pip install "portalocker[win32]"`` adds it, and
+        without it merely constructing this class raises `ImportError`.
+
+        Example:
+            .. code-block:: python
+
+                from portalocker import LockFlags
+                from portalocker.portalocker import Win32Locker
+
+                locker = Win32Locker()
+                with open('example.txt', 'w') as fh:
+                    locker.lock(fh, LockFlags.SHARED)
+                    locker.unlock(fh)
+
+        See Also:
+            `MsvcrtLocker`: the dependency-free Windows default.
+        """
 
         _overlapped: Any  # pywintypes.OVERLAPPED
         _lock_bytes_low: int = -0x10000
 
         def __init__(self) -> None:
+            """Create the ``OVERLAPPED`` structure reused by every call.
+
+            Raises:
+                ImportError: ``pywin32`` is not installed. The message
+                    names the ``win32`` extra that provides it.
+            """
             try:
                 import pywintypes
             except ImportError as e:
@@ -194,6 +313,21 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
             self._overlapped = pywintypes.OVERLAPPED()
 
         def _get_os_handle(self, fd: int) -> int:
+            """Translate a C runtime descriptor into a Win32 file handle.
+
+            ``LockFileEx`` and ``UnlockFileEx`` operate on OS handles
+            rather than on the descriptors Python hands out, so both go
+            through ``msvcrt.get_osfhandle`` first.
+
+            Args:
+                fd: The file descriptor to translate.
+
+            Returns:
+                The Win32 file handle owning `fd`.
+
+            Raises:
+                ImportError: The built-in ``msvcrt`` module is missing.
+            """
             try:
                 import msvcrt
             except ImportError as e:
@@ -204,6 +338,30 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
             return cast(int, msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined]
 
         def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
+            """Lock `file_obj` through ``win32file.LockFileEx``.
+
+            The file position is normalized to byte 0 before the call and
+            restored afterwards (see `_prepare_windows_file`), so that two
+            processes holding the file at different offsets still contend
+            for the same range.
+
+            Args:
+                file_obj: An open file object, an object exposing
+                    `fileno()`, or a raw file descriptor.
+                flags: `LockFlags.EXCLUSIVE` adds
+                    ``LOCKFILE_EXCLUSIVE_LOCK`` and
+                    `LockFlags.NON_BLOCKING` adds
+                    ``LOCKFILE_FAIL_IMMEDIATELY``. `LockFlags.SHARED` sets
+                    neither, which is ``LockFileEx``'s own default and is
+                    how a shared lock is expressed.
+
+            Raises:
+                ~portalocker.exceptions.AlreadyLocked: Windows reported
+                    ``ERROR_LOCK_VIOLATION``, i.e. someone else holds a
+                    conflicting lock on the range.
+                ~portalocker.exceptions.LockException: Any other Win32 error. A
+                    raw ``pywintypes.error`` never escapes this method.
+            """
             import pywintypes
             import win32con
             import win32file
@@ -242,6 +400,21 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                 _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
         def unlock(self, file_obj: types.FileArgument) -> None:
+            """Release a lock through ``win32file.UnlockFileEx``.
+
+            ``ERROR_NOT_LOCKED`` is swallowed, so unlocking a range that
+            is not locked - releasing twice, or releasing a lock Windows
+            already dropped - is harmless.
+
+            Args:
+                file_obj: The same file object, `fileno()` provider or
+                    raw file descriptor that was passed to `lock`.
+
+            Raises:
+                ~portalocker.exceptions.LockException: Any Win32 error other
+                    than ``ERROR_NOT_LOCKED``, or any `OSError` raised while
+                    unlocking.
+            """
             import pywintypes
             import win32file
             import winerror
@@ -282,6 +455,23 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
         _msvcrt_lock_length: int = 0x10000
 
         def __init__(self) -> None:
+            """Set up the msvcrt locker and its optional win32 fallback.
+
+            A `Win32Locker` is built eagerly, because two paths need the
+            Win32 API: shared locks in `lock`, and the ``EACCES`` retry in
+            `unlock`. ``pywin32`` is optional since 4.0.0, so its absence
+            is recorded as `None` here rather than raised, and is only
+            reported if one of those two paths is actually taken.
+
+            Any ``LK_*`` constant the running interpreter's ``msvcrt``
+            module happens not to expose is set on that module with a
+            conventional value, so the lock modes can be referenced
+            unconditionally further down.
+
+            Raises:
+                ImportError: The built-in ``msvcrt`` module is missing,
+                    i.e. this is not a Windows Python build.
+            """
             try:
                 self._win32_locker = Win32Locker()
             except ImportError:
@@ -304,6 +494,51 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                     setattr(msvcrt, attr, default_val)
 
         def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
+            """Lock `file_obj`, handing shared locks to `Win32Locker`.
+
+            Exclusive locks go through ``msvcrt.locking`` and need no
+            extra dependency. `LockFlags.SHARED` has no ``msvcrt``
+            equivalent, so it is forwarded to the `Win32Locker` built in
+            `__init__` with only `LockFlags.NON_BLOCKING` carried across.
+
+            The msvcrt path locks ``_msvcrt_lock_length`` bytes (64 KiB)
+            starting at byte 0; `_prepare_windows_file` normalizes and
+            restores the position around the call because
+            ``msvcrt.locking`` works relative to the current one. Before
+            4.0.0 raw file descriptors were locked from wherever they
+            happened to be positioned, which could leave two holders
+            locking different ranges of a file larger than 64 KiB and so
+            not excluding each other at all.
+
+            Args:
+                file_obj: An open file object, an object exposing
+                    `fileno()`, or a raw file descriptor.
+                flags: `LockFlags.NON_BLOCKING` selects ``LK_NBLCK``
+                    instead of ``LK_LOCK``; `LockFlags.SHARED` switches to
+                    the `Win32Locker` path entirely.
+
+            Raises:
+                ImportError: `LockFlags.SHARED` was requested but
+                    ``pywin32`` is not installed. The message names the
+                    ``win32`` extra that provides it.
+                ~portalocker.exceptions.AlreadyLocked: ``msvcrt.locking``
+                    failed with an errno that means contention (13, 16, 33 or
+                    36).
+                ~portalocker.exceptions.LockException: ``msvcrt.locking``
+                    failed for any other reason.
+
+            Example:
+                .. code-block:: python
+
+                    from portalocker import LockFlags
+                    from portalocker.portalocker import MsvcrtLocker
+
+                    locker = MsvcrtLocker()
+                    with open('example.txt', 'w') as fh:
+                        # No pywin32 needed for an exclusive lock.
+                        locker.lock(fh, LockFlags.EXCLUSIVE)
+                        locker.unlock(fh)
+            """
             import msvcrt
 
             if flags & LockFlags.SHARED:
@@ -349,6 +584,25 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                 _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
         def unlock(self, file_obj: types.FileArgument) -> None:
+            """Release a lock through ``msvcrt.locking`` with ``LK_UNLCK``.
+
+            If that fails with ``EACCES`` the unlock is retried through
+            `Win32Locker.unlock`, which is how a lock taken by the shared
+            path in `lock` gets released. When ``pywin32`` is not
+            installed there is no fallback to retry with, so the original
+            msvcrt failure is raised with a note naming the missing extra.
+
+            Args:
+                file_obj: The same file object, `fileno()` provider or
+                    raw file descriptor that was passed to `lock`.
+
+            Raises:
+                ~portalocker.exceptions.LockException: ``msvcrt.locking``
+                    failed with something other than ``EACCES``; or it failed
+                    with ``EACCES`` and no fallback was available; or the
+                    fallback itself failed, in which case the message reports
+                    both failures.
+            """
             import msvcrt
 
             fd, io_obj_ctx, pos_ctx = _prepare_windows_file(file_obj)
@@ -409,6 +663,38 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
     LOCKER = MsvcrtLocker
 
     def lock(file: types.FileArgument, flags: LockFlags) -> None:
+        """Lock `file` with the locker named by the module-level `LOCKER`.
+
+        This is the Windows implementation of `portalocker.lock`; the
+        POSIX branch of this module defines a separate one. `LOCKER`
+        defaults to the `MsvcrtLocker` class and may be replaced with a
+        `BaseLocker` instance, a `BaseLocker` subclass, or a
+        ``(lock, unlock)`` tuple. The bare-callable form that POSIX
+        accepts has no counterpart here, because there is no ``fcntl``.
+
+        Args:
+            file: An open file object, an object exposing `fileno()`, or a
+                raw file descriptor.
+            flags: The `LockFlags` combination to apply. Note that
+                `LockFlags.SHARED` needs ``pywin32``; see `MsvcrtLocker`.
+
+        Raises:
+            TypeError: `LOCKER` holds none of the supported forms - most
+                likely a plain callable copied from POSIX code.
+            ~portalocker.exceptions.AlreadyLocked: The lock is held by someone
+                else and `LockFlags.NON_BLOCKING` was set.
+            ~portalocker.exceptions.LockException: The locking call failed for
+                any other reason.
+
+        Example:
+            .. code-block:: python
+
+                import portalocker
+
+                with open('example.txt', 'w') as fh:
+                    portalocker.lock(fh, portalocker.LockFlags.EXCLUSIVE)
+                    portalocker.unlock(fh)
+        """
         pair = _resolve_locker_pair(LOCKER)
         if pair is None:
             # Windows has no ``fcntl``-style callable locker.
@@ -420,6 +706,20 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
         pair[0](file, flags)
 
     def unlock(file: types.FileArgument) -> None:
+        """Release a lock taken by the Windows `lock`.
+
+        Resolves `LOCKER` the same way `lock` does, so a lock and its
+        unlock always go to the same implementation as long as `LOCKER`
+        is not reassigned in between.
+
+        Args:
+            file: The same file object, `fileno()` provider or raw file
+                descriptor that was passed to `lock`.
+
+        Raises:
+            TypeError: `LOCKER` holds none of the supported forms.
+            ~portalocker.exceptions.LockException: The unlocking call failed.
+        """
         pair = _resolve_locker_pair(LOCKER)
         if pair is None:
             raise TypeError(
@@ -437,12 +737,59 @@ else:  # pragma: not-posix
     PosixFileArgument = types.FileArgument | types.HasFileno
 
     class PosixLocker(BaseLocker):
-        """Locker implementation using the `LOCKER` constant"""
+        """Locker implementation using the `LOCKER` constant.
+
+        Wraps a ``fcntl``-style callable with the parts every POSIX lock
+        needs: extracting the file descriptor, rejecting a non-blocking
+        request that names no lock type, and translating ``OSError`` into
+        `AlreadyLocked` / `LockException`.
+
+        Which callable it wraps depends on the class. `FlockLocker` and
+        `LockfLocker` bind ``fcntl.flock`` and ``fcntl.lockf``
+        respectively, while a plain `PosixLocker` follows the module-level
+        `LOCKER` - so `LOCKER` selects the primitive for the default
+        dispatch, and the subclasses pin one regardless of it. Both
+        primitives are exposed because a program usually has to match
+        whatever the other processes sharing the file already use. The
+        subclasses honouring their own callable is a 4.0.0 fix; before
+        that they silently used the global `LOCKER` too.
+
+        Example:
+            >>> import fcntl
+            >>> from portalocker.portalocker import (
+            ...     FlockLocker,
+            ...     LockfLocker,
+            ...     PosixLocker,
+            ... )
+            >>> PosixLocker().locker is fcntl.flock
+            True
+            >>> FlockLocker().locker is fcntl.flock
+            True
+            >>> LockfLocker().locker is fcntl.lockf
+            True
+        """
 
         _locker: Callable[[int | types.HasFileno, int], Any] | None = None
 
         @property
         def locker(self) -> Callable[[int | types.HasFileno, int], Any]:
+            """The ``fcntl``-style callable this locker locks with.
+
+            Subclasses set `_locker` at class level and always return
+            that. An unbound `PosixLocker` returns the module-level
+            `LOCKER`, read on every access, so reassigning `LOCKER`
+            redirects existing instances too.
+
+            Returns:
+                A callable taking ``(fd, operation)``, normally
+                ``fcntl.flock`` or ``fcntl.lockf``.
+
+            Example:
+                >>> import fcntl
+                >>> from portalocker.portalocker import LockfLocker
+                >>> LockfLocker().locker is fcntl.lockf
+                True
+            """
             if self._locker is None:
                 # On POSIX systems ``LOCKER`` is a callable (fcntl.flock) but
                 # mypy also sees the Windows-only tuple assignment.  Explicitly
@@ -458,6 +805,28 @@ else:  # pragma: not-posix
             return self._locker
 
         def _get_fd(self, file_obj: PosixFileArgument) -> int:
+            """Extract the file descriptor the ``fcntl`` call needs.
+
+            Args:
+                file_obj: A raw file descriptor, returned unchanged, or
+                    any object with a callable `fileno()`.
+
+            Returns:
+                The integer file descriptor to lock.
+
+            Raises:
+                TypeError: `file_obj` is neither an `int` nor exposes a
+                    callable `fileno()`.
+
+            Example:
+                >>> from portalocker.portalocker import PosixLocker
+                >>> locker = PosixLocker()
+                >>> locker._get_fd(0)
+                0
+                >>> with open('example.txt', 'w') as fh:
+                ...     locker._get_fd(fh) == fh.fileno()
+                True
+            """
             if isinstance(file_obj, int):
                 return file_obj
             # Check for fileno() method; covers typing.IO and HasFileno
@@ -474,6 +843,36 @@ else:  # pragma: not-posix
                 )
 
         def lock(self, file_obj: PosixFileArgument, flags: LockFlags) -> None:
+            """Lock `file_obj` by calling `locker` with `flags`.
+
+            Args:
+                file_obj: An open file object, an object exposing
+                    `fileno()`, or a raw file descriptor.
+                flags: The `LockFlags` combination to apply.
+                    `LockFlags.NON_BLOCKING` only says *how* to wait, so
+                    it has to be combined with `LockFlags.SHARED` or
+                    `LockFlags.EXCLUSIVE` to say what to take.
+
+            Raises:
+                RuntimeError: `LockFlags.NON_BLOCKING` was passed on its
+                    own, without `LockFlags.SHARED` or
+                    `LockFlags.EXCLUSIVE`.
+                ~portalocker.exceptions.AlreadyLocked: ``fcntl`` reported
+                    ``EACCES`` or ``EAGAIN``, i.e. someone else holds a
+                    conflicting lock.
+                ~portalocker.exceptions.LockException: Any other ``OSError``,
+                    or the ``EOFError`` seen on some network filesystems.
+
+            Example:
+                >>> from portalocker import LockFlags
+                >>> from portalocker.portalocker import PosixLocker
+                >>> locker = PosixLocker()
+                >>> with open('example.txt', 'w') as fh:
+                ...     locker.lock(
+                ...         fh, LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING
+                ...     )
+                ...     locker.unlock(fh)
+            """
             if (flags & LockFlags.NON_BLOCKING) and not flags & (
                 LockFlags.SHARED | LockFlags.EXCLUSIVE
             ):
@@ -506,6 +905,15 @@ else:  # pragma: not-posix
                 ) from exc_value
 
         def unlock(self, file_obj: PosixFileArgument) -> None:
+            """Release a lock by calling `locker` with `LockFlags.UNBLOCK`.
+
+            Unlike `lock`, this does not translate errors: an ``OSError``
+            from ``fcntl`` propagates to the caller unchanged.
+
+            Args:
+                file_obj: The same file object, `fileno()` provider or raw
+                    file descriptor that was passed to `lock`.
+            """
             fd = self._get_fd(file_obj)
             self.locker(fd, LockFlags.UNBLOCK)
 
@@ -539,6 +947,41 @@ else:  # pragma: not-posix
     # extraction, non-blocking validation and error translation); the tuple,
     # instance and subclass forms are dispatched via ``_resolve_locker_pair``.
     def lock(file: types.FileArgument, flags: LockFlags) -> None:
+        """Lock `file` with the locker named by the module-level `LOCKER`.
+
+        This is the POSIX implementation of `portalocker.lock`; the
+        Windows branch of this module defines a separate one. Every
+        `LockerType` form is accepted:
+
+        - a bare ``fcntl``-style callable, the default (``fcntl.flock``),
+          which is routed through a shared `PosixLocker` so that it still
+          gets descriptor extraction, flag validation and error
+          translation;
+        - a ``(lock, unlock)`` tuple, a `BaseLocker` instance, or a
+          `BaseLocker` subclass, all resolved by `_resolve_locker_pair`.
+
+        Honouring all of those forms is a 4.0.0 fix; earlier versions only
+        honoured the bare callable here.
+
+        Args:
+            file: An open file object, an object exposing `fileno()`, or a
+                raw file descriptor.
+            flags: The `LockFlags` combination to apply.
+                `LockFlags.NON_BLOCKING` must be combined with
+                `LockFlags.SHARED` or `LockFlags.EXCLUSIVE`.
+
+        Raises:
+            ~portalocker.exceptions.AlreadyLocked: The lock is held elsewhere
+                and `LockFlags.NON_BLOCKING` was set.
+            ~portalocker.exceptions.LockException: The locking call failed for
+                another reason.
+
+        Example:
+            >>> import portalocker
+            >>> with open('example.txt', 'w') as fh:
+            ...     portalocker.lock(fh, portalocker.LockFlags.EXCLUSIVE)
+            ...     portalocker.unlock(fh)
+        """
         pair = _resolve_locker_pair(LOCKER)
         if pair is None:
             _posix_locker_instance.lock(file, flags)
@@ -546,6 +989,22 @@ else:  # pragma: not-posix
             pair[0](file, flags)
 
     def unlock(file: types.FileArgument) -> None:
+        """Release a lock taken by the POSIX `lock`.
+
+        Resolves `LOCKER` the same way `lock` does, so a lock and its
+        unlock always go to the same implementation as long as `LOCKER`
+        is not reassigned in between.
+
+        Args:
+            file: The same file object, `fileno()` provider or raw file
+                descriptor that was passed to `lock`.
+
+        Example:
+            >>> import portalocker
+            >>> with open('example.txt', 'w') as fh:
+            ...     portalocker.lock(fh, portalocker.LockFlags.EXCLUSIVE)
+            ...     portalocker.unlock(fh)
+        """
         pair = _resolve_locker_pair(LOCKER)
         if pair is None:
             _posix_locker_instance.unlock(file)
