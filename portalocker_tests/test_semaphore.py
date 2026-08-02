@@ -12,7 +12,8 @@ from portalocker import utils
 @pytest.mark.parametrize('check_interval', [None, 0, 0.0005])
 def test_bounded_semaphore(timeout, check_interval, monkeypatch):
     """Ensure that the semaphore honours *maximum*, *timeout* and
-    *check_interval* and raises AlreadyLocked when exhausted."""
+    *check_interval* and raises AlreadyLocked when exhausted.
+    """
     n = 2
     name: str = str(random.random())
     monkeypatch.setattr(utils, 'DEFAULT_TIMEOUT', 0.0001)
@@ -38,7 +39,8 @@ def test_bounded_semaphore_recovers_after_acquire_error(tmp_path):
     """A3: a non-AlreadyLocked failure (e.g. a missing directory raising
     FileNotFoundError) must not leave ``self.lock`` set. Otherwise the
     ``assert not self.lock`` guard bricks the instance for every later
-    acquire."""
+    acquire.
+    """
     missing = tmp_path / 'missing'
     semaphore = portalocker.NamedBoundedSemaphore(
         1,

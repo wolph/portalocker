@@ -19,7 +19,8 @@ class FakeLock(redis.RedisLock):
 
 def test_timeout_generator_with_positive_check_interval(monkeypatch):
     """When check_interval > 0 the generator must sleep for a fraction
-    of that value (0.5 ≤ factor < 1.5)."""
+    of that value (0.5 ≤ factor < 1.5).
+    """
     sleep_times = []
 
     def fake_sleep(t):
@@ -39,7 +40,8 @@ def test_timeout_generator_with_positive_check_interval(monkeypatch):
 
 def test_timeout_generator_with_zero_check_interval(monkeypatch):
     """When check_interval == 0 the generator must sleep for a fraction
-    of thread_sleep_time (0.5 ≤ factor < 1.5)."""
+    of thread_sleep_time (0.5 ≤ factor < 1.5).
+    """
     sleep_times = []
 
     def fake_sleep(t):
@@ -59,7 +61,8 @@ def test_timeout_generator_with_zero_check_interval(monkeypatch):
 
 def test_timeout_generator_with_none_values(monkeypatch):
     """`None` timeout means 0.0 (one attempt); `None` check_interval falls
-    back to thread_sleep_time."""
+    back to thread_sleep_time.
+    """
     sleep_times = []
 
     def fake_sleep(t):
@@ -81,7 +84,8 @@ def test_timeout_generator_with_none_values(monkeypatch):
 
 def test_timeout_generator_with_negative_check_interval(monkeypatch):
     """When check_interval < 0 the generator must sleep for a fraction
-    of thread_sleep_time (0.5 ≤ factor < 1.5)."""
+    of thread_sleep_time (0.5 ≤ factor < 1.5).
+    """
     sleep_times = []
 
     def fake_sleep(t):

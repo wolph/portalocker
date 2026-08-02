@@ -6,10 +6,18 @@ Welcome to portalocker's documentation!
 Contents:
 
 .. toctree::
-   :maxdepth: 4
+    :maxdepth: 2
 
-   portalocker
-   license
+    quickstart
+    lock-types
+    platforms
+    redis
+    cli
+    troubleshooting
+    migration
+    api/index
+    changelog
+    license
 
 Indices and tables
 ==================
@@ -17,4 +25,3 @@ Indices and tables
 * :ref:`genindex`
 * :ref:`modindex`
 * :ref:`search`
-

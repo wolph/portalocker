@@ -118,6 +118,7 @@ ignore = [
 minversion = '6.0'
 addopts = [
     '--doctest-modules',
+    '--doctest-glob=*.rst',
     '--cov=portalocker',
     '--cov-report=term-missing',
     '--cov-fail-under=100',
@@ -129,7 +130,9 @@ addopts = [
 ]
 log_level = 'INFO'
 xfail_strict = true
-testpaths = ['portalocker', 'portalocker_tests']
+testpaths = ['portalocker', 'portalocker_tests', 'docs', 'README.rst']
+doctest_optionflags = ['ELLIPSIS']
+norecursedirs = ['_build', '_theme']
 filterwarnings = [
     'error',
     'ignore::DeprecationWarning',
