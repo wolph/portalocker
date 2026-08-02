@@ -1,6 +1,6 @@
 [build-system]
 build-backend = 'uv_build'
-requires = ['uv_build>=0.11,<0.12']
+requires = ['uv_build>=0.11,<0.13']
 
 [project]
 name = 'portalocker'
