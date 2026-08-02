@@ -411,7 +411,8 @@ def test_multiprocess_locking():
 def test_pidfilelock_timeout_waits_when_not_fail_when_locked(tmp_path):
     """A1: with ``fail_when_locked=False`` a contended acquire must honour
     the timeout (block, then raise ``AlreadyLocked``); with
-    ``fail_when_locked=True`` it must fail fast."""
+    ``fail_when_locked=True`` it must fail fast.
+    """
     lock_file = tmp_path / 'pidfilelock_timeout.pid'
     holder = utils.PidFileLock(str(lock_file))
     holder.acquire()
@@ -440,7 +441,8 @@ def test_pidfilelock_normalizes_plain_lockexception(tmp_path, monkeypatch):
     """A1: when a timed-out sidecar acquire re-raises a plain ``LockException``
     (rather than ``AlreadyLocked``, as can happen on Windows), ``acquire`` must
     normalize it to ``AlreadyLocked`` so ``__enter__`` and callers see one
-    predictable surface."""
+    predictable surface.
+    """
     lock_file = tmp_path / 'pidfilelock_normalize.pid'
 
     def boom(self, *args, **kwargs):
@@ -463,7 +465,8 @@ def test_pidfilelock_normalizes_plain_lockexception(tmp_path, monkeypatch):
 )
 def test_pidfilelock_unlinks_sidecar_before_unlock(tmp_path, monkeypatch):
     """A2: release must unlink the sidecar lock file while the sidecar lock is
-    still held (unlink before unlock) to avoid a split-brain window."""
+    still held (unlink before unlock) to avoid a split-brain window.
+    """
     lock_file = tmp_path / 'pidfilelock_order.pid'
     sidecar = f'{lock_file}.lock'
     events: list[tuple[str, str]] = []
@@ -500,7 +503,8 @@ def test_pidfilelock_unlinks_sidecar_before_unlock(tmp_path, monkeypatch):
 def test_pidfilelock_unlocks_even_when_unlink_fails(tmp_path, monkeypatch):
     """Fix round 1: a non-FileNotFoundError unlink failure must still
     propagate, but the sidecar lock must be freed regardless — otherwise the
-    error would leave the sidecar held forever."""
+    error would leave the sidecar held forever.
+    """
     lock_file = tmp_path / 'pidfilelock_unlink_fail.pid'
     lock = utils.PidFileLock(str(lock_file))
     lock.acquire()
@@ -531,7 +535,8 @@ def test_pidfilelock_unlocks_even_when_unlink_fails(tmp_path, monkeypatch):
 
 def test_pidfilelock_release_without_acquire(tmp_path):
     """A2: releasing a never-acquired PidFileLock must be a safe no-op even
-    though no sidecar lock is held."""
+    though no sidecar lock is held.
+    """
     lock_file = tmp_path / 'pidfilelock_no_acquire.pid'
     lock = utils.PidFileLock(str(lock_file))
     # No acquire: ``_inner_lock`` is None and neither file exists.

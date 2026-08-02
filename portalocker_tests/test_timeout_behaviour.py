@@ -4,9 +4,7 @@ import portalocker
 
 
 def test_with_timeout(tmpdir):
-    """
-    Test that AlreadyLocked is raised when a file is locked with a timeout.
-    """
+    """Test that AlreadyLocked is raised when a lock is already held."""
     tmpfile = tmpdir.join('test_with_timeout.lock')
     # Open the file 2 times
     with pytest.raises(portalocker.AlreadyLocked):  # noqa: SIM117
@@ -25,7 +23,8 @@ def test_with_timeout(tmpdir):
 def test_without_timeout(tmpdir):
     """
     Test that LockException is raised when a file is locked without a
-    timeout."""
+    timeout.
+    """
     tmpfile = tmpdir.join('test_without_timeout.lock')
     # Open the file 2 times
     with pytest.raises(portalocker.LockException):  # noqa: SIM117

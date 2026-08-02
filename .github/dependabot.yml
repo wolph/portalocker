@@ -7,6 +7,8 @@ updates:
       - "meta: CI"
     schedule:
       interval: monthly
+    cooldown:
+      default-days: 14
     groups:
       actions:
         patterns:
@@ -19,6 +21,8 @@ updates:
       - "meta: deps"
     schedule:
       interval: monthly
+    cooldown:
+      default-days: 14
     groups:
       actions:
         patterns:
