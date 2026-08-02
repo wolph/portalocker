@@ -46,9 +46,7 @@ select = [
     'C4', # flake8-comprehensions
     'C90', # mccabe
     'COM', # flake8-commas
-
-    ## Require docstrings for all public methods, would be good to enable at some point
-    # 'D',     # pydocstyle
+    'D',   # pydocstyle
 
     'E', # pycodestyle error ('W' for warning)
     'F', # pyflakes
@@ -73,6 +71,10 @@ select = [
 
 [lint.per-file-ignores]
 'portalocker_tests/tests.py' = ['SIM115', 'SIM117', 'T201']
+# Test modules are not part of the documented API — commit 8961865 removed
+# tests.rst from the docs for that reason — so the missing-docstring rules
+# stay off here. The style rules (D200/D209/D300) still apply.
+'portalocker_tests/*' = ['D100', 'D101', 'D102', 'D103', 'D104', 'D105', 'D107']
 
 [lint.pydocstyle]
 convention = 'google'

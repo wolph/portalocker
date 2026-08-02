@@ -1,5 +1,4 @@
-"""
-Locking constants
+"""Locking constants.
 
 Lock types:
 
@@ -55,11 +54,47 @@ else:  # pragma: no cover
 
 
 class LockFlags(enum.IntFlag):
-    #: exclusive lock
+    """Flags selecting how `portalocker.lock` acquires a file lock.
+
+    Members combine with the bitwise ``|`` operator to build up the
+    behavior you want. The library's own default, used when no `flags`
+    argument is given, is ``LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING``:
+    take an exclusive lock and fail immediately rather than wait.
+
+    On POSIX platforms these map onto ``fcntl`` locks, which are
+    advisory: the OS only enforces them against other processes that
+    also lock the file through ``fcntl``/``flock``. A process that opens
+    and writes the file without locking it is never blocked. On Windows
+    they map onto ``msvcrt`` locks, except `SHARED`, which requires the
+    optional ``pywin32`` package (``pip install "portalocker[win32]"``);
+    without it, acquiring a shared lock raises `ImportError`.
+
+    Example:
+        >>> import portalocker
+        >>> flags = (
+        ...     portalocker.LockFlags.EXCLUSIVE
+        ...     | portalocker.LockFlags.NON_BLOCKING
+        ... )
+        >>> bool(flags & portalocker.LockFlags.NON_BLOCKING)
+        True
+    """
+
+    #: Request an exclusive lock. Only one process may hold `EXCLUSIVE`
+    #: (or `SHARED`) on a given file at the same time; other processes
+    #: attempting to lock it either block or fail, depending on whether
+    #: `NON_BLOCKING` is also set.
     EXCLUSIVE = LOCK_EX
-    #: shared lock (on Windows this requires the ``win32`` extra: pywin32)
+    #: Request a shared lock. Multiple processes may hold `SHARED` locks
+    #: on the same file concurrently, but none may hold `EXCLUSIVE` while
+    #: any `SHARED` lock is held. On Windows this requires the optional
+    #: ``win32`` extra (``pip install "portalocker[win32]"``); without
+    #: it, acquiring a shared lock raises `ImportError`.
     SHARED = LOCK_SH
-    #: non-blocking
+    #: Don't wait for the lock: fail with `AlreadyLocked` immediately if
+    #: it can't be acquired right away, instead of blocking until it
+    #: becomes available.
     NON_BLOCKING = LOCK_NB
-    #: unlock
+    #: Release a lock previously acquired on the same file. Used
+    #: internally by `portalocker.unlock`; most callers use a context
+    #: manager (`Lock`/`RLock`) instead of applying this flag directly.
     UNBLOCK = LOCK_UN

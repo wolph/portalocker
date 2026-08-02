@@ -1,4 +1,11 @@
 # noqa: A005
+"""Shared type aliases and protocols used across portalocker's public API.
+
+These are pure typing constructs with no runtime behaviour of their own;
+they exist so the locking functions in `portalocker.portalocker` and
+`portalocker.utils` can share consistent, precise signatures.
+"""
+
 from __future__ import annotations
 
 import io
@@ -7,6 +14,10 @@ import typing
 
 # spellchecker: off
 # fmt: off
+#: Every mode string accepted by the built-in `open()`, spelled out
+#: explicitly - including the binary and legacy universal-newline (`U`)
+#: forms - so type checkers reject a typo'd mode string instead of letting
+#: it fail at runtime.
 Mode = typing.Literal[
     # Text modes
     # Read text
@@ -49,23 +60,73 @@ Mode = typing.Literal[
     'rbU', 'rUb', 'Urb', 'brU', 'bUr', 'Ubr',
 ]
 # spellchecker: on
+#: A filename argument: either a plain string path or a `pathlib.Path`.
+#: Accepting both lets callers pass whichever they already have on hand
+#: without converting first.
 Filename = str | pathlib.Path
+#: A file-like object already opened for reading or writing, in either text
+#: or binary mode.
 IO = typing.IO[str] | typing.IO[bytes]
 
 
 class FileOpenKwargs(typing.TypedDict):
+    """Keyword arguments accepted by the built-in `open()`.
+
+    Mirrors `open()`'s signature (minus `file` and `mode`) so helpers that
+    accept a filename can forward arbitrary open-related keyword arguments
+    straight through to the underlying `open()` call.
+    """
+
+    # Note: Napoleon reads a leading ``something: rest`` on the first line
+    # of an attribute docstring as a type declaration, so first lines here
+    # deliberately avoid colons.
     buffering: int | None
+    """Buffering policy. `0` disables buffering (binary mode only), `1`
+    selects line buffering (text mode), and any larger integer fixes the
+    buffer size in bytes.
+    """
+
     encoding: str | None
+    """Text encoding to use; ignored in binary mode."""
+
     errors: str | None
+    """How encoding/decoding errors are handled, e.g. `'strict'` or
+    `'ignore'`.
+    """
+
     newline: str | None
+    r"""Controls how universal newlines mode works, e.g. `''`, `'\\n'`,
+    `'\\r'`, or `'\\r\\n'`.
+    """
+
     closefd: bool | None
+    """Whether the underlying file descriptor is closed when the file
+    object is closed. Must be `True` (the default) when a filename rather
+    than a file descriptor was passed to `open()`.
+    """
+
     opener: typing.Callable[[str, int], int] | None
+    """A custom opener, called as `opener(file, flags)` to obtain the
+    underlying file descriptor, used instead of the default `os.open`.
+    """
 
 
-# Protocol for objects with a fileno() method.
-# Used for type-hinting fcntl.flock.
 class HasFileno(typing.Protocol):
-    def fileno(self) -> int: ...
+    """Structural protocol for objects exposing a `fileno()` method.
 
-# Type alias for file arguments used in lock/unlock functions
+    Exists so functions that ultimately call `fcntl.flock` can be typed
+    against anything with a file descriptor - open files, sockets, and so
+    on - without requiring those objects to share a common base class.
+    """
+
+    def fileno(self) -> int:
+        """Return the underlying file descriptor, as used by `fcntl.flock`."""
+        ...
+
+
+#: The type accepted by the module-level `lock()`/`unlock()` functions: an
+#: already-open file object, anything exposing a `fileno()` method, or a
+#: bare file descriptor (`int`). The `int` case exists because
+#: `fcntl.flock`/`msvcrt.locking()` operate on raw file descriptors, which
+#: callers may already have without an open file object wrapping them.
 FileArgument = typing.IO[typing.Any] | io.TextIOWrapper | int | HasFileno

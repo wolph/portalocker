@@ -83,9 +83,9 @@ labels = ['docs']
 extras = ['docs']
 allowlist_externals = ['rm', 'mkdir']
 commands = [
-    ['rm', '-f', 'docs/modules.rst'],
+    ['rm', '-f', 'docs/api/modules.rst'],
     ['mkdir', '-p', 'docs/_static'],
-    ['sphinx-apidoc', '-e', '-o', 'docs/', 'portalocker'],
-    ['rm', '-f', 'docs/modules.rst'],
+    ['sphinx-apidoc', '-e', '-o', 'docs/api', 'portalocker'],
+    ['rm', '-f', 'docs/api/modules.rst'],
     ['sphinx-build', '-W', '-b', 'html', 'docs', 'docs/_build/html'],
 ]
