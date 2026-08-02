@@ -4,7 +4,7 @@ requires = ['uv_build>=0.11,<0.13']
 
 [project]
 name = 'portalocker'
-version = '4.0.0'
+version = '4.1.0'
 dynamic = []
 description = 'Cross-platform file locking, with Redis, PID-file and bounded-semaphore locks'
 readme = 'README.rst'

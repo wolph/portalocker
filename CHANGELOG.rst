@@ -1,3 +1,30 @@
+4.1.0:
+
+ * Documentation release. No runtime behaviour changed; the only edits to
+   executable code replaced two ``...`` bodies on the abstract
+   ``LockBase.acquire``/``LockBase.release`` stubs with docstrings.
+ * Every module, class, function, private helper and dunder method in the
+   package now carries a Google-style docstring. ``ruff``'s pydocstyle rules
+   are enabled for ``portalocker/`` with no exemptions
+ * Added seven narrative guides: quickstart, lock types, platform behaviour,
+   Redis locks, the ``combine`` CLI, troubleshooting, and a 3.x to 4.0.0
+   migration guide. The API reference moved under ``docs/api/`` and a
+   changelog page was added
+ * ``docs/platforms.rst`` documents the advisory-versus-mandatory
+   distinction, ``flock`` versus ``lockf``, msvcrt versus pywin32, and the
+   networked-filesystem caveats that cause most locking confusion
+ * ``docs/cli.rst`` documents the combiner's ASCII-only requirement on
+   ``portalocker/*.py``, ``README.rst`` and ``LICENSE``, which was previously
+   only discoverable by reading ``__main__.py``
+ * Doctests now run for ``docs/*.rst`` and ``README.rst`` as well as the
+   package, so every documented example is executed on each supported
+   platform and interpreter. No ``# doctest: +SKIP`` remains anywhere
+ * Fixed the README telling readers to unlock a filehandle it had already
+   closed, which raised ``ValueError: I/O operation on closed file``
+ * Fixed the README demonstrating ``BoundedSemaphore`` without a ``name``,
+   which the library itself deprecates in favour of ``NamedBoundedSemaphore``
+ * Removed the obsolete Python 2 installation section from the README
+
 4.0.0:
 
  * Fixed ``open_atomic()`` replacing a destination created while its context
