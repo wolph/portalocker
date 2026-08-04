@@ -1,0 +1,40 @@
+name: Test release job
+# Temporary: manually exercises the release job from publish.yml against an
+# existing tag, so the job can be verified without publishing to PyPI.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to create a GitHub release for
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Extract this version's changelog section
+        run: |
+          version="${RELEASE_TAG#v}"
+          awk -v ver="$version" '
+            $0 == ver ":" { found = 1 }
+            found && $0 != ver ":" && /^[0-9][0-9.]*:$/ { exit }
+            found { print }
+          ' CHANGELOG.rst | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' > notes.txt
+          if ! [ -s notes.txt ]; then
+            echo "No CHANGELOG.rst section found for $version" >&2
+            exit 1
+          fi
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$RELEASE_TAG" --title "$RELEASE_TAG"
+          --notes-file notes.txt --verify-tag

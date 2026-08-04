@@ -1,4 +1,4 @@
-name: Publish to PyPI
+name: Publish to PyPI and GitHub releases
 
 on:
   push:
@@ -36,3 +36,32 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # GitHub releases used to be a manual step and were silently skipped when
+  # forgotten; create one here so a tag push publishes everywhere at once.
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Extract this version's changelog section
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="$version" '
+            $0 == ver ":" { found = 1 }
+            found && $0 != ver ":" && /^[0-9][0-9.]*:$/ { exit }
+            found { print }
+          ' CHANGELOG.rst | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' > notes.txt
+          if ! [ -s notes.txt ]; then
+            echo "No CHANGELOG.rst section found for $version" >&2
+            exit 1
+          fi
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME"
+          --notes-file notes.txt --verify-tag
