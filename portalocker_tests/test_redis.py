@@ -524,6 +524,7 @@ def test_redis_elected_writer_reuses_subscription(
     def start_subscription(connection_: client.Redis) -> None:
         start_calls.append(connection_)
         lock.pubsub = sentinel_pubsub
+        lock.thread = _alive_worker_thread()
 
     def get_subscriber_count(connection_: client.Redis) -> int:
         return subscriber_counts.pop(0)
@@ -543,6 +544,7 @@ def test_redis_elected_writer_reuses_subscription(
     assert start_calls == [connection]
     assert lock.mode is redis.RedisLockMode.EXCLUSIVE
     lock.pubsub = None
+    lock.thread = None
     connection.close()
 
 
@@ -562,6 +564,31 @@ class _IdlePubSub:
 
 def _idle_pubsub() -> client.PubSub:
     return typing.cast('client.PubSub', _IdlePubSub())
+
+
+class _AliveWorkerThread:
+    """Stand-in worker thread that reports itself alive.
+
+    Tests that stub ``_start_subscription`` must uphold its invariant
+    that a live ``pubsub`` comes with a live worker thread, or the
+    ``_confirm_held`` handshake correctly refuses the acquisition and
+    ``_waiting_attempt_failed`` abandons the stubbed subscription.
+    """
+
+    ident: int | None = 1
+
+    def is_alive(self) -> bool:
+        return True
+
+    def stop(self) -> None:
+        pass
+
+    def join(self) -> None:
+        pass
+
+
+def _alive_worker_thread() -> redis.PubSubWorkerThread:
+    return typing.cast('redis.PubSubWorkerThread', _AliveWorkerThread())
 
 
 def test_redis_nonblocking_election_winner_promotes() -> None:
@@ -1064,6 +1091,7 @@ def test_redis_nonblocking_inconclusive_probe_retries(
 
     def start_subscription(connection_: client.Redis) -> None:
         lock.pubsub = _idle_pubsub()
+        lock.thread = _alive_worker_thread()
 
     monkeypatch.setattr(lock, '_start_subscription', start_subscription)
     monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection_: 2)
@@ -1078,6 +1106,7 @@ def test_redis_nonblocking_inconclusive_probe_retries(
     assert lock.mode is redis.RedisLockMode.EXCLUSIVE
     assert probes == []
     lock.pubsub = None
+    lock.thread = None
     connection.close()
 
 
@@ -1110,6 +1139,7 @@ def test_redis_nonblocking_zero_timeout_keeps_single_attempt(
 
     def start_subscription(connection_: client.Redis) -> None:
         lock.pubsub = _idle_pubsub()
+        lock.thread = _alive_worker_thread()
 
     monkeypatch.setattr(lock, '_start_subscription', start_subscription)
     monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection_: 2)
@@ -2748,6 +2778,7 @@ def _make_stub_worker_thread(calls: list[str]) -> type:
             pubsub: typing.Any,
             sleep_time: float,
             daemon: bool = False,
+            exception_handler: typing.Any = None,
         ) -> None:
             calls.append('thread_created')
 
@@ -2963,6 +2994,7 @@ def test_redis_fast_path_promotion_takes_mode_lock(
 
     def start_subscription(connection_: client.Redis) -> None:
         lock.pubsub = sentinel_pubsub
+        lock.thread = _alive_worker_thread()
 
     monkeypatch.setattr(lock, '_start_subscription', start_subscription)
     monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection: 1)
@@ -2972,6 +3004,7 @@ def test_redis_fast_path_promotion_takes_mode_lock(
     assert lock.mode is redis.RedisLockMode.EXCLUSIVE
     assert recording.entries == 2
     lock.pubsub = None
+    lock.thread = None
     connection.close()
 
 
@@ -3361,23 +3394,48 @@ def test_redis_release_raises_connection_close_error(
     assert lock.connection is None
 
 
-def test_pubsub_worker_thread_failure_interrupts_main(
+def test_pubsub_worker_run_routes_escaped_error_to_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A dying pubsub reader must interrupt the main thread, then re-raise.
+    """An error escaping the redis-py read loop still reaches the handler.
 
-    The subscription this thread services *is* the lock, so a quietly
-    dying reader would leave the process believing it holds a lock the
-    rest of the world considers released. The escalation path runs the
-    thread body directly (no thread is started) with the underlying
-    redis-py reader patched to fail, and the ``interrupt_main`` call is
-    recorded instead of actually interrupting the test process.
+    redis-py's own loop hands read errors to the exception handler, but
+    an error inside the handler itself, or inside the ``pubsub.close()``
+    after the loop, escapes ``run``. The subclass routes those into the
+    same handler as a last-ditch layer, ``BaseException`` included, so
+    a worker death can never bypass the loss classifier (#141). The
+    thread body runs directly (no thread is started) with the redis-py
+    loop patched to raise.
     """
-    interrupts: list[bool] = []
-    monkeypatch.setattr(
-        _thread, 'interrupt_main', lambda: interrupts.append(True)
+    failure: SystemExit = SystemExit('worker killed')
+
+    def broken_reader(self: client.PubSubWorkerThread) -> None:
+        raise failure
+
+    monkeypatch.setattr(client.PubSubWorkerThread, 'run', broken_reader)
+
+    handled: list[BaseException] = []
+    pubsub: client.PubSub = fakeredis.FakeStrictRedis(
+        decode_responses=True
+    ).pubsub()  # type: ignore[no-untyped-call]
+    worker: redis.PubSubWorkerThread = redis.PubSubWorkerThread(
+        pubsub,
+        sleep_time=0.01,
+        daemon=True,
+        exception_handler=lambda error, pubsub_, thread_: handled.append(
+            error
+        ),
     )
 
+    worker.run()
+
+    assert handled == [failure]
+
+
+def test_pubsub_worker_run_reraises_without_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a registered handler the escaped error propagates."""
     failure: RuntimeError = RuntimeError('connection dropped')
 
     def broken_reader(self: client.PubSubWorkerThread) -> None:
@@ -3398,7 +3456,6 @@ def test_pubsub_worker_thread_failure_interrupts_main(
         worker.run()
 
     assert exc_info.value is failure
-    assert interrupts == [True]
 
 
 def test_channel_handler_ignores_control_frames(

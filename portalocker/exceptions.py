@@ -5,11 +5,13 @@ Hierarchy::
     BaseLockException
       LockException
         AlreadyLocked
+        LockLostError
         FileToLarge  (deprecated, never raised)
 
 `BaseLockException` is the shared base and is rarely raised directly;
-catch `LockException` to handle any locking failure, or `AlreadyLocked`
-to handle contention specifically.
+catch `LockException` to handle any locking failure, `AlreadyLocked` to
+handle contention specifically, or `LockLostError` to handle a
+distributed lock that was revoked while held.
 """
 
 import contextlib
@@ -233,6 +235,66 @@ class AlreadyLocked(LockException):
         """
         super().__init__(*args, **kwargs)
         self.holder_pid = holder_pid
+
+
+class LockLostError(LockException):
+    """Raised when a lock that was successfully acquired is lost again.
+
+    `portalocker.RedisLock` keeps its lock in a live pubsub
+    subscription, so the lock can be revoked from outside the holding
+    process: a severed network connection, a ``CLIENT KILL`` issued by
+    an administrator, or a reap by another contender that saw this
+    holder stop answering pings. This exception is how that revocation
+    reaches the code that thought it still held the lock. It is raised
+    by `portalocker.RedisLock.ensure_held` and by the ``with`` block
+    exit of a lock that was lost while the block ran; the underlying
+    cause (usually a ``redis.exceptions.ConnectionError``) is attached
+    as ``__cause__``.
+
+    Beyond the `LockException` payload, instances carry `channel` and
+    `holder_id` so a handler that manages several locks can tell which
+    one died.
+
+    Example:
+        >>> from portalocker import exceptions
+        >>> error = exceptions.LockLostError(
+        ...     exceptions.LockException.LOCK_FAILED,
+        ...     'lock lost',
+        ...     channel='jobs',
+        ...     holder_id='a1b2',
+        ... )
+        >>> error.channel, error.holder_id
+        ('jobs', 'a1b2')
+
+    .. versionadded:: 4.2.0
+    """
+
+    channel: str | None = None
+    """The pubsub channel the lost lock lived on, when known."""
+
+    holder_id: str | None = None
+    """The `RedisLock.holder_id` of the holder that lost the lock."""
+
+    def __init__(
+        self,
+        *args: typing.Any,
+        channel: str | None = None,
+        holder_id: str | None = None,
+        **kwargs: typing.Any,
+    ) -> None:
+        """Initialise like `LockException`, plus record the lock identity.
+
+        Args:
+            *args: Forwarded to `LockException.__init__`.
+            channel: The pubsub channel the lost lock lived on. Stored
+                on `self.channel`.
+            holder_id: The holder id of the lock instance that lost the
+                lock. Stored on `self.holder_id`.
+            **kwargs: Forwarded to `LockException.__init__`.
+        """
+        super().__init__(*args, **kwargs)
+        self.channel = channel
+        self.holder_id = holder_id
 
 
 class FileToLarge(LockException):

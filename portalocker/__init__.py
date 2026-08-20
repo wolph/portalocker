@@ -95,6 +95,8 @@ __url__ = __about__.__url__
 AlreadyLocked = exceptions.AlreadyLocked
 #: Exception thrown if an error occurred during locking
 LockException = exceptions.LockException
+#: Exception thrown when a held `RedisLock` was revoked from outside
+LockLostError = exceptions.LockLostError
 
 
 #: Lock a file. Note that this is an advisory lock on Linux/Unix systems
@@ -135,6 +137,7 @@ __all__ = [
     'Lock',
     'LockException',
     'LockFlags',
+    'LockLostError',
     'NamedBoundedSemaphore',
     'PidFileLock',
     'RLock',

@@ -43,6 +43,31 @@ Subscribers that Redis still counts but that stopped answering are
 crashed processes, and their connections are killed so that the channel
 becomes consistent again.
 
+Losing the connection releases the lock, and since 4.2.0 the holder is
+told about it just as promptly. The subscription lives on a dedicated
+connection that never reconnects (a resurrected subscription would be a
+silent re-acquisition that skipped the election), so the first read
+error after a revocation marks the lock as lost: `RedisLock.ensure_held`
+raises `~portalocker.exceptions.LockLostError`, the ``with`` block exit
+raises it too once the body finished cleanly, an ``on_lost`` callback
+fires on the reader thread, and by default the main thread receives a
+``KeyboardInterrupt`` (``interrupt_on_lost``, opt-in from 5.0.0
+onwards). Three caveats that follow from this design:
+
+- Under redis-py's default ``socket_timeout`` of five seconds, a read
+  stalled for that long raises ``TimeoutError`` and counts as a loss. A
+  holder that cannot complete a read cannot confirm ownership either,
+  so this is deliberate, but pathologically slow links can produce
+  false losses.
+- The zero-reconnect policy is applied on a RESP2 connection because
+  RESP3 maintenance notifications carry their own reconnect path that
+  bypasses the retry policy. Callers who need RESP3 on the subscription
+  must supply ``subscription_connection_factory`` and disable
+  maintenance notifications themselves.
+- A holder running portalocker 4.1 or older still resubscribes silently
+  after a kill, so the loss guarantee only covers channels where every
+  participant runs 4.2 or later.
+
 Set ``health_check_interval`` on the connection (it is part of
 `RedisLock.DEFAULT_REDIS_KWARGS`) so that both sides notice a dead peer
 promptly.
@@ -72,8 +97,13 @@ import threading
 import time
 import typing
 import uuid
+import warnings
 
+import redis.backoff
 import redis.client
+import redis.connection
+import redis.exceptions
+import redis.retry
 
 from . import constants, exceptions, utils
 
@@ -120,6 +150,48 @@ def _keep_first_error(
         error,
     )
     return first_error
+
+
+#: Errors that mean the subscription connection itself died, as opposed
+#: to a bug inside the message handler or the redis-py reader. The
+#: distinction only affects how the failure is logged and reported: any
+#: worker failure while the lock is held is treated as a loss, because a
+#: subscription nobody services stops answering pings and gets reaped by
+#: the next prober regardless of why its reader died.
+_CONNECTION_LOSS_ERRORS: tuple[type[BaseException], ...] = (
+    redis.exceptions.ConnectionError,
+    redis.exceptions.TimeoutError,
+    OSError,
+)
+
+
+class _LockState(enum.Enum):
+    """Lifecycle of one `RedisLock` instance.
+
+    The state answers one question for the failure paths: when the
+    keep-alive worker dies, was this lock merely trying to acquire
+    (`ACQUIRING`, the failure costs one attempt) or did it own the lock
+    (`HELD`, the failure is a loss the application must hear about)?
+    `RedisLock._on_worker_exception` makes that call on the worker
+    thread while `RedisLock.acquire` transitions on the calling thread,
+    so every transition and read runs under ``RedisLock._state_lock``.
+
+    `LOST` is deliberately sticky: `RedisLock.release` keeps it (and the
+    causal error) so the loss stays observable through
+    `RedisLock.lost` and the ``with`` block exit after the teardown ran.
+    Only the next `RedisLock.acquire` resets a lost instance.
+    """
+
+    #: Nothing acquired and nothing in flight.
+    IDLE = 'idle'
+    #: `RedisLock.acquire` is running but has not confirmed ownership.
+    #: A worker failure in this state fails one attempt, nothing more.
+    ACQUIRING = 'acquiring'
+    #: The lock is owned. Set by `RedisLock._confirm_held` only.
+    HELD = 'held'
+    #: The lock was owned and was revoked from outside. Set by
+    #: `RedisLock._on_worker_exception` only.
+    LOST = 'lost'
 
 
 class RedisLockMode(str, enum.Enum):
@@ -183,7 +255,7 @@ class RedisLockHolder(typing.NamedTuple):
 
 
 class PubSubWorkerThread(redis.client.PubSubWorkerThread):
-    """redis-py's pubsub reader thread, with failures escalated to main.
+    """redis-py's pubsub reader thread, with failures routed to the lock.
 
     The subscription this thread services *is* the lock. While it runs,
     the holder answers liveness pings and Redis keeps counting it as a
@@ -192,25 +264,51 @@ class PubSubWorkerThread(redis.client.PubSubWorkerThread):
     still holds a lock that every other process now considers released,
     which is exactly the split-brain this lock exists to avoid.
 
-    Interrupting the main thread turns that silent divergence into a loud
-    failure the process cannot miss.
+    redis-py already catches `BaseException` inside its read loop and
+    hands it to the ``exception_handler`` passed at construction, which
+    is `RedisLock._on_worker_exception` here. That handler decides
+    whether the failure is a loss (the lock was held) or a failed
+    attempt (the lock was still being acquired). This subclass only adds
+    a last-ditch layer: an exception escaping ``run`` itself - a failure
+    inside the handler, or inside the ``pubsub.close()`` redis-py runs
+    after the loop - is routed into the same handler instead of dying
+    with the thread.
     """
 
     def run(self) -> None:
-        """Read from the subscription, interrupting main on failure.
+        """Read from the subscription, routing every failure to the lock.
 
         Raises:
-            Exception: Whatever the underlying reader raised, re-raised
-                after `_thread.interrupt_main` has queued a
-                `KeyboardInterrupt` in the main thread. Re-raising only
-                ends this worker thread; the queued interrupt is what the
-                rest of the process actually sees.
+            BaseException: Whatever escaped the underlying reader, only
+                when no ``exception_handler`` was registered. With a
+                handler registered nothing propagates: the handler is
+                the escalation path and this thread simply ends.
         """
         try:
             super().run()
-        except Exception:
-            _thread.interrupt_main()
-            raise
+        except BaseException as error:
+            # redis-py's ``run`` passes BaseException to the handler but
+            # annotates the handler parameter as Exception; mirror the
+            # runtime behaviour, not the annotation.
+            handler: (
+                typing.Callable[
+                    [
+                        BaseException,
+                        redis.client.PubSub,
+                        redis.client.PubSubWorkerThread,
+                    ],
+                    None,
+                ]
+                | None
+            ) = typing.cast(
+                'typing.Callable['
+                '[BaseException, redis.client.PubSub,'
+                ' redis.client.PubSubWorkerThread], None] | None',
+                self.exception_handler,
+            )
+            if handler is None:
+                raise
+            handler(error, self.pubsub, self)
 
 
 class RedisLock(utils.LockBase['RedisLock']):
@@ -223,6 +321,18 @@ class RedisLock(utils.LockBase['RedisLock']):
     that if the connection gets killed due to network issues, crashing
     processes or otherwise, it will still immediately unlock instead of
     waiting for a lock timeout.
+
+    The flip side of that immediacy is handled too: the *holder* learns
+    about a revocation as soon as its keep-alive thread observes the
+    dead connection. `lost` turns True, `ensure_held` and the ``with``
+    block exit raise `~portalocker.exceptions.LockLostError`, an
+    optional `on_lost` callback fires, and (by default in 4.2, opt-in
+    from 5.0.0) the main thread is interrupted. The subscription lives
+    on a dedicated connection that never retries or reconnects, because
+    a transparently resurrected subscription would be a silent
+    re-acquisition; one consequence worth knowing is that redis-py's
+    default ``socket_timeout`` turns a read stalled for five seconds
+    into a loss.
 
     To make sure both sides of the lock know about the connection state it is
     recommended to set the `health_check_interval` when creating the redis
@@ -267,6 +377,33 @@ class RedisLock(utils.LockBase['RedisLock']):
             Shared holders may coexist, while an exclusive holder waits for
             all shared holders to release. Other flag combinations are
             rejected; use `fail_when_locked` for non-blocking acquisition.
+        on_lost: Callback invoked exactly once when a held lock is lost,
+            with this lock as its only argument. It runs on the
+            keep-alive worker thread, so keep it short, do not block in
+            it, and do not take application locks inside it; anything it
+            raises is caught and logged rather than propagated. `None`
+            (the default) disables the callback.
+        interrupt_on_lost: Whether losing a held lock also interrupts
+            the main thread with a `KeyboardInterrupt`. The default
+            (`None`) currently behaves as `True` and emits a
+            `DeprecationWarning` at the moment a loss actually triggers
+            the interrupt: portalocker 5.0.0 flips the default to
+            `False`, surfacing losses only through
+            `~portalocker.exceptions.LockLostError`, `ensure_held`,
+            `lost`, the ``with`` block exit and `on_lost`. Pass an
+            explicit `True` or `False` to opt out of the warning.
+            Delivery of the interrupt is best effort either way: it is
+            a no-op under a custom ``SIGINT`` disposition, deferred
+            while the main thread blocks in a C call, and catchable as
+            an ordinary `KeyboardInterrupt`.
+        subscription_connection_factory: Escape hatch for connection
+            setups the built-in derivation cannot reproduce (Sentinel,
+            cluster, custom pools). When given, every subscription
+            attempt calls it for a fresh client instead of deriving one
+            from the command connection, and the lock closes that
+            client again when the attempt ends. The returned client
+            must yield connections that do not retry or reconnect, or
+            the loss guarantee above silently disappears.
 
     Example:
         Two readers can hold the same channel at the same time, while a
@@ -303,6 +440,40 @@ class RedisLock(utils.LockBase['RedisLock']):
     holder_id: str
     mode: RedisLockMode
     writer_elected: bool
+    #: Callback fired once per loss on the worker thread, or `None`.
+    on_lost: typing.Callable[[RedisLock], None] | None
+    #: Whether a loss also interrupts the main thread. Defaults to True
+    #: in 4.2.0; the default flips to False in 5.0.0.
+    interrupt_on_lost: bool
+    #: Factory for the dedicated subscription client, or `None` to
+    #: derive one from the command connection.
+    subscription_connection_factory: (
+        typing.Callable[[], redis.client.Redis] | None
+    )
+    #: Whether the caller chose `interrupt_on_lost` explicitly. When
+    #: False, the 4.2.0 default of True is in effect and a loss that
+    #: interrupts also announces the 5.0.0 default change.
+    _interrupt_on_lost_set: bool
+    #: The client owning the zero-retry subscription connection, built
+    #: per attempt by `_start_subscription` and closed with it. Always
+    #: owned by the lock, also when it came out of
+    #: `subscription_connection_factory`.
+    _subscription_client: redis.client.Redis | None
+    #: Guards `_lock_state` and `_lost_error`. The worker thread records
+    #: failures under it while `acquire` confirms ownership under it,
+    #: which is what makes the loss-versus-confirm race safe (see
+    #: `_confirm_held`). Deliberately separate from `_mode_lock`: that
+    #: lock serializes the ``(mode, elected)`` snapshot taken for every
+    #: ping answer, a hot path that must not contend with lifecycle
+    #: transitions, and no code path ever holds both locks at once, so
+    #: no lock ordering needs to exist between them.
+    _state_lock: threading.Lock
+    #: Where this instance is in its lifecycle. See `_LockState`.
+    _lock_state: _LockState
+    #: The error that killed the keep-alive worker, kept until the next
+    #: `acquire` so `~portalocker.exceptions.LockLostError` can carry it
+    #: as ``__cause__``. Guarded by `_state_lock`.
+    _lost_error: BaseException | None
     #: Serializes `mode` and `writer_elected` transitions with
     #: `channel_handler`'s snapshot of ``(holder_id, mode, elected)``.
     #: The handler runs on the worker thread while `acquire` promotes on
@@ -327,6 +498,11 @@ class RedisLock(utils.LockBase['RedisLock']):
         unavailable_timeout: float = DEFAULT_UNAVAILABLE_TIMEOUT,
         redis_kwargs: dict[str, typing.Any] | None = None,
         flags: constants.LockFlags = constants.LockFlags.EXCLUSIVE,
+        on_lost: typing.Callable[[RedisLock], None] | None = None,
+        interrupt_on_lost: bool | None = None,
+        subscription_connection_factory: (
+            typing.Callable[[], redis.client.Redis] | None
+        ) = None,
     ) -> None:
         """Configure the lock without touching Redis.
 
@@ -371,6 +547,23 @@ class RedisLock(utils.LockBase['RedisLock']):
         self.flags = flags
         self.holder_id = uuid.uuid4().hex
         self.writer_elected = False
+        self.on_lost = on_lost
+        # `None` means "the caller left the choice to the library": the
+        # 4.2.0 default of True applies, and the loss that actually
+        # triggers an interrupt announces the 5.0.0 default flip. An
+        # explicit True or False opts out of that warning.
+        self.interrupt_on_lost = (
+            True if interrupt_on_lost is None else interrupt_on_lost
+        )
+        self._interrupt_on_lost_set = interrupt_on_lost is not None
+        self.subscription_connection_factory = subscription_connection_factory
+        self._subscription_client = None
+        # Guards `_lock_state` and `_lost_error` from here on; like
+        # `_mode_lock` below, only the constructor may assign without
+        # holding it.
+        self._state_lock = threading.Lock()
+        self._lock_state = _LockState.IDLE
+        self._lost_error = None
         # Guards every `mode` and `writer_elected` transition made once
         # a subscription can exist. Only the constructor runs strictly
         # before any worker thread, so only these two assignments above
@@ -519,13 +712,14 @@ class RedisLock(utils.LockBase['RedisLock']):
     def client_name(self) -> str:
         """Name given to this holder's subscriber connection.
 
-        `_start_subscription` sends ``CLIENT SETNAME`` over the pubsub
-        connection itself, so the name lands on the connection that
-        actually holds the subscription and shows up against it in
-        ``CLIENT LIST``. `_kill_unavailable_locks` reads it back the
-        other way around: a listed connection whose name carries a
-        `holder_id` that did not answer the last ping belongs to a
-        crashed holder, and killing it releases the lock.
+        `_make_subscription_client` sets this as the connection-level
+        ``client_name`` of the dedicated subscription client, so the
+        name is part of the handshake of the connection that actually
+        holds the subscription and shows up against it in ``CLIENT
+        LIST``. `_kill_unavailable_locks` reads it back the other way
+        around: a listed connection whose name carries a `holder_id`
+        that did not answer the last ping belongs to a crashed holder,
+        and killing it releases the lock.
 
         Returns:
             `legacy_client_name` with this instance's `holder_id`
@@ -621,6 +815,104 @@ class RedisLock(utils.LockBase['RedisLock']):
             time.sleep(effective_interval * (0.5 + random.random()))
             yield 0
 
+    def _make_subscription_client(
+        self,
+        connection: redis.client.Redis,
+    ) -> redis.client.Redis:
+        """Build the dedicated client the subscription will live on.
+
+        The subscription is the lock, so its connection follows a
+        stricter policy than the command connection (#137):
+
+        - ``retry=Retry(NoBackoff(), 0, supported_errors=())``. redis-py
+          wraps every pubsub read in the connection's retry policy, and
+          its failure callback reconnects *before* the retry budget is
+          checked, so even ``retries=0`` resurrects the connection once.
+          A reconnected pubsub resubscribes with its handlers intact,
+          which silently re-acquires a lock this holder may have lost to
+          somebody else in the meantime. Only an empty
+          ``supported_errors`` tuple makes the retry machinery catch
+          nothing at all, so a dead socket kills the subscription with
+          zero reconnects and the worker reports the loss instead.
+          ``retry_on_error`` and ``retry_on_timeout`` are cleared too,
+          because redis-py merges them back into the retry policy's
+          supported errors.
+        - ``client_name`` at the connection level, so the name is part
+          of the handshake rather than a separately sent command.
+        - ``protocol=2`` with the maintenance-notification kwargs
+          stripped, because RESP3 maintenance notifications drive a
+          second reconnect path in redis-py's pubsub that ignores the
+          retry policy entirely.
+        - The lock's ``health_check_interval`` and decoded responses,
+          matching `DEFAULT_REDIS_KWARGS`.
+
+        The client is built on a fresh connection pool cloned from the
+        command connection's pool (same connection class, same
+        connection arguments, the overrides above applied), never by
+        mutating a pooled connection: a mutated connection would go back
+        into the caller's pool on release and hand some later, unrelated
+        command a zero-retry connection named like a lock holder, which
+        the reaper would then kill. Cloning the pool works for both a
+        connection the lock created itself and one the caller supplied,
+        including one built around a custom pool.
+
+        Args:
+            connection: The command connection to derive the
+                subscription client from. Only its pool's class and
+                connection arguments are read; the connection itself is
+                not touched.
+
+        Returns:
+            A client owned by this lock, with
+            `subscription_connection_factory` taking precedence over the
+            derivation when the caller supplied one.
+
+        Raises:
+            ~portalocker.exceptions.LockException: The pool could not be
+                cloned, typically because an exotic pool class takes
+                constructor arguments this derivation does not know
+                about. The message points at
+                `subscription_connection_factory`, which exists for
+                exactly that situation.
+        """
+        if self.subscription_connection_factory is not None:
+            return self.subscription_connection_factory()
+
+        pool: redis.connection.ConnectionPool = connection.connection_pool
+        subscription_kwargs: dict[str, typing.Any] = {
+            key: value
+            for key, value in connection.get_connection_kwargs().items()
+            # The maintenance-notification machinery is RESP3-only and
+            # rejects (or bypasses) the RESP2 zero-retry setup below.
+            if 'maint' not in key and key != 'connection_class'
+        }
+        subscription_kwargs.update(
+            retry=redis.retry.Retry(
+                redis.backoff.NoBackoff(),
+                retries=0,
+                supported_errors=(),
+            ),
+            retry_on_error=[],
+            retry_on_timeout=False,
+            client_name=self.client_name,
+            protocol=2,
+            health_check_interval=self.redis_kwargs['health_check_interval'],
+            decode_responses=True,
+        )
+        try:
+            subscription_pool: redis.connection.ConnectionPool = type(pool)(
+                connection_class=pool.connection_class,
+                **subscription_kwargs,
+            )
+        except TypeError as error:
+            raise exceptions.LockException(
+                exceptions.LockException.LOCK_FAILED,
+                'RedisLock could not derive a subscription client from '
+                f'connection pool class {type(pool).__name__}; pass '
+                'subscription_connection_factory to build one yourself',
+            ) from error
+        return redis.client.Redis(connection_pool=subscription_pool)
+
     def _start_subscription(
         self,
         connection: redis.client.Redis,
@@ -634,12 +926,13 @@ class RedisLock(utils.LockBase['RedisLock']):
 
         The order of operations matters:
 
-        1. ``CLIENT SETNAME`` is sent over the pubsub connection rather
-           than the command connection, so the name identifies the
-           connection that actually holds the subscription - the one
-           `_kill_unavailable_locks` looks for in ``CLIENT LIST``. Its
-           reply is consumed with ``parse_response`` so it cannot later
-           be mistaken for a pubsub message.
+        1. The subscription gets its own client (see
+           `_make_subscription_client`): connection-level
+           ``client_name`` so the connection that actually holds the
+           subscription is the one `_kill_unavailable_locks` finds in
+           ``CLIENT LIST``, and a zero-reconnect retry policy so a
+           revoked subscription dies loudly instead of resurrecting
+           itself. The command connection is left completely alone.
         2. The subscription is registered with `channel_handler` as its
            callback, so pings are answered from now on.
         3. The server's subscribe confirmation is drained here, on the
@@ -650,10 +943,14 @@ class RedisLock(utils.LockBase['RedisLock']):
            Without that proof a delayed ``SUBSCRIBE`` would let `acquire`
            read ``subscribers == 1`` while another holder exists and take
            the uncontended fast path against a contended channel.
-        4. A `PubSubWorkerThread` starts reading. It is a daemon thread:
-           an unreleased lock must never keep the interpreter alive, and
-           since losing the connection *is* releasing the lock, dying at
-           process exit is the correct behaviour rather than a leak.
+        4. A `PubSubWorkerThread` starts reading, with
+           `_on_worker_exception` registered as its exception handler,
+           so any failure of the reader - `BaseException` included -
+           lands in the loss classifier instead of dying with the
+           thread. It is a daemon thread: an unreleased lock must never
+           keep the interpreter alive, and since losing the connection
+           *is* releasing the lock, dying at process exit is the
+           correct behaviour rather than a leak.
 
         Any failure rolls the whole thing back through `release` before
         re-raising, leaving `pubsub` as `None`. Without that rollback a
@@ -665,25 +962,27 @@ class RedisLock(utils.LockBase['RedisLock']):
         of `acquire`.
 
         Args:
-            connection: The connection to subscribe on.
+            connection: The command connection the subscription client
+                is derived from.
 
         Raises:
             ~portalocker.exceptions.LockException: The server did not
                 confirm the subscription within `unavailable_timeout`
                 seconds, raised after the rollback.
-            Exception: Anything the Redis client raises while naming,
-                subscribing or starting the thread, re-raised unchanged
-                after the rollback.
+            Exception: Anything the Redis client raises while
+                connecting, subscribing or starting the thread,
+                re-raised unchanged after the rollback. `acquire`
+                treats a ``redis.exceptions.ConnectionError`` or
+                ``redis.exceptions.TimeoutError`` from here as one
+                failed attempt and retries within its timeout budget.
         """
-        pubsub: redis.client.PubSub = self._get_pubsub(connection)
+        subscription_client: redis.client.Redis = (
+            self._make_subscription_client(connection)
+        )
+        self._subscription_client = subscription_client
+        pubsub: redis.client.PubSub = self._get_pubsub(subscription_client)
         self.pubsub = pubsub
         try:
-            pubsub.execute_command(  # type: ignore[no-untyped-call]
-                'CLIENT',
-                'SETNAME',
-                self.client_name,
-            )
-            pubsub.parse_response()  # type: ignore[no-untyped-call]
             pubsub.subscribe(**{self.channel: self.channel_handler})
             self._wait_for_subscribe_confirmation(pubsub)
             # A daemon thread so an unreleased lock can never block
@@ -693,6 +992,7 @@ class RedisLock(utils.LockBase['RedisLock']):
                 pubsub,
                 sleep_time=self.thread_sleep_time,
                 daemon=True,
+                exception_handler=self._on_worker_exception,
             )
             self.thread.start()
         except Exception:
@@ -762,6 +1062,318 @@ class RedisLock(utils.LockBase['RedisLock']):
             'Redis did not confirm the lock channel subscription within '
             f'{self.unavailable_timeout} seconds',
         )
+
+    def _on_worker_exception(
+        self,
+        error: BaseException,
+        pubsub: redis.client.PubSub,
+        worker: redis.client.PubSubWorkerThread,
+    ) -> None:
+        """Classify a keep-alive worker failure and escalate a loss.
+
+        Registered as the redis-py ``exception_handler`` of the worker
+        thread, so it runs *on* that thread for anything the reader
+        raises, `BaseException` included (redis-py catches that wide
+        deliberately, and a `KeyboardInterrupt` landing on the worker
+        must not vanish either). `PubSubWorkerThread.run` additionally
+        routes anything that escapes the handler itself back in here, so
+        a bug in this method still ends in the classifier on its second
+        pass instead of dying silently (#141).
+
+        What happens depends on where the lock is in its lifecycle,
+        decided under `_state_lock`:
+
+        - `_LockState.HELD`: the lock is lost. The state moves to
+          `_LockState.LOST`, the error is recorded for
+          `~portalocker.exceptions.LockLostError`, `on_lost` fires, and
+          when `interrupt_on_lost` is set the main thread is
+          interrupted. Connection errors log as an error without a
+          traceback (an expected lifecycle event, just a bad one),
+          anything else logs with the traceback because it is a handler
+          or library bug.
+        - Any other state: the failure is scoped to the running acquire
+          attempt. It is recorded so `acquire` notices, logged as a
+          warning, and nothing escalates - a waiter that loses its
+          subscription simply retries (#141).
+        - `_LockState.LOST` already: a second failure from the same
+          teardown (usually the ``pubsub.close()`` after the loop dying
+          on the same dead socket). The first error is kept and the
+          repeat is logged at debug level.
+
+        The worker is always told to stop, which makes redis-py's read
+        loop exit and close the pubsub.
+
+        Args:
+            error: What the reader (or a previous pass of this handler)
+                raised.
+            pubsub: The pubsub the worker was reading; unused, part of
+                the redis-py handler signature.
+            worker: The worker thread to stop.
+        """
+        del pubsub  # Part of the redis-py handler signature only.
+        with self._state_lock:
+            already_lost: bool = self._lock_state is _LockState.LOST
+            if self._lost_error is None:
+                self._lost_error = error
+            was_held: bool = self._lock_state is _LockState.HELD
+            if was_held:
+                self._lock_state = _LockState.LOST
+        worker.stop()
+        if already_lost:
+            logger.debug(
+                'Redis lock %s worker raised again after the loss was '
+                'recorded: %r',
+                self.holder_id,
+                error,
+            )
+            return
+        connection_lost: bool = isinstance(error, _CONNECTION_LOSS_ERRORS)
+        if was_held:
+            if connection_lost:
+                logger.error(
+                    'Redis lock %s lost its subscription connection while '
+                    'holding channel %r: %r',
+                    self.holder_id,
+                    self.channel,
+                    error,
+                )
+            else:
+                logger.error(
+                    'Redis lock %s worker failed while holding channel %r, '
+                    'the lock is lost',
+                    self.holder_id,
+                    self.channel,
+                    exc_info=error,
+                )
+            self._fire_on_lost()
+            if self.interrupt_on_lost:
+                if not self._interrupt_on_lost_set:
+                    warnings.warn(
+                        'RedisLock lost a held lock and interrupted the '
+                        'main thread because interrupt_on_lost defaults to '
+                        'True in portalocker 4.2. portalocker 5.0.0 flips '
+                        'that default to False; pass interrupt_on_lost '
+                        'explicitly to keep or drop the interrupt.',
+                        DeprecationWarning,
+                        stacklevel=2,
+                    )
+                _thread.interrupt_main()
+        elif connection_lost:
+            logger.warning(
+                'Redis lock %s lost its subscription while waiting for '
+                'channel %r, the attempt is retried: %r',
+                self.holder_id,
+                self.channel,
+                error,
+            )
+        else:
+            logger.warning(
+                'Redis lock %s worker failed while waiting for channel %r, '
+                'the attempt is retried',
+                self.holder_id,
+                self.channel,
+                exc_info=error,
+            )
+
+    def _fire_on_lost(self) -> None:
+        """Invoke the `on_lost` callback, containing whatever it raises.
+
+        Runs on the worker thread as part of the HELD to LOST
+        transition. A callback failure must not break that transition or
+        the thread teardown around it, so anything the callback raises
+        is logged with its traceback and swallowed.
+        """
+        callback: typing.Callable[[RedisLock], None] | None = self.on_lost
+        if callback is None:
+            return
+        try:
+            callback(self)
+        except Exception:
+            logger.exception(
+                'Redis lock %s on_lost callback failed',
+                self.holder_id,
+            )
+
+    def _confirm_held(self) -> bool:
+        """Promote a won acquisition to `_LockState.HELD`, or refuse.
+
+        The confirm handshake that closes the flag-transition race: the
+        subscription connection can die in the microseconds between the
+        probe result that decided the acquisition and the state update
+        that records it. Both `acquire` success sites call this under
+        `_state_lock`, the same lock `_on_worker_exception` takes, so
+        exactly two interleavings exist. Handler first: the error is
+        recorded while the state is still `_LockState.ACQUIRING`, the
+        handler takes its quiet attempt-scoped path, and this method
+        sees the error and refuses. Confirm first: the state is
+        `_LockState.HELD` by the time the handler runs, so the loud
+        LOST path fires. In neither ordering does `acquire` return
+        success with a dead worker and no notification.
+
+        The liveness check additionally covers a worker that died
+        without the handler running at all, which redis-py permits when
+        ``pubsub.close()`` raises after a clean stop.
+
+        Returns:
+            True when the lock is now held. False when the attempt must
+            be treated as failed because the worker already died or
+            recorded an error.
+        """
+        thread: PubSubWorkerThread | None = self.thread
+        with self._state_lock:
+            if self._lost_error is not None:
+                return False
+            if thread is None or not thread.is_alive():
+                return False
+            self._lock_state = _LockState.HELD
+            return True
+
+    def _waiting_attempt_failed(self) -> bool:
+        """Report whether the current attempt's worker is already dead.
+
+        Checked by `acquire` before reusing an existing subscription for
+        the next attempt. A recorded error or a worker thread that is no
+        longer alive both mean the subscription backing this attempt is
+        gone: Redis dropped the subscriber with the connection, so
+        continuing to probe on top of it would wait on a lock this
+        process is no longer counted for.
+
+        Returns:
+            True when the attempt must be abandoned and the next one
+            should subscribe from scratch.
+        """
+        with self._state_lock:
+            if self._lost_error is not None:
+                return True
+        thread: PubSubWorkerThread | None = self.thread
+        return thread is None or not thread.is_alive()
+
+    def _abandon_failed_attempt(self) -> None:
+        """Consume a failed attempt so the next one starts from scratch.
+
+        Clears the recorded worker error, resets the lifecycle to
+        `_LockState.ACQUIRING`, rolls an exclusive lock's mode back to
+        `RedisLockMode.PENDING` (forgetting any election, which a lock
+        without a live subscription may not advertise), and tears the
+        dead subscription down. The teardown is best effort: it usually
+        runs against the same dead connection that killed the attempt,
+        so a teardown failure is logged rather than allowed to abort
+        the retry loop that exists to survive exactly these failures.
+
+        Also used by `acquire` to reset an instance whose previous hold
+        ended in `_LockState.LOST`, which is what makes lost instances
+        reusable.
+        """
+        with self._state_lock:
+            self._lost_error = None
+            self._lock_state = _LockState.ACQUIRING
+        if self.flags == constants.LockFlags.EXCLUSIVE:
+            with self._mode_lock:
+                self.mode = RedisLockMode.PENDING
+                self.writer_elected = False
+        try:
+            self._unsubscribe()
+        except Exception:
+            logger.warning(
+                'Redis lock %s failed to tear down a dead subscription '
+                'attempt',
+                self.holder_id,
+                exc_info=True,
+            )
+
+    @property
+    def lost(self) -> bool:
+        """Whether a held lock was revoked and the loss is unhandled.
+
+        True from the moment the keep-alive worker observed the
+        revocation until the next `acquire` resets the instance.
+        Deliberately still True after `release`, so code using bare
+        ``acquire()``/``release()`` can check it afterwards; the raising
+        counterpart is `ensure_held`.
+
+        Returns:
+            True when the lock is in the lost state.
+        """
+        with self._state_lock:
+            return self._lock_state is _LockState.LOST
+
+    def ensure_held(self) -> None:
+        """Raise if the lock was lost, return quietly otherwise.
+
+        The check to sprinkle through a long critical section: cheap
+        (one mutex acquisition, no network traffic), and the only way a
+        loss interrupts a running body deterministically, since the
+        optional main-thread interrupt is best effort by nature.
+
+        This reports revocation, not acquisition: it also returns
+        quietly on a lock that is idle or still acquiring, so calling
+        it only makes sense between a successful `acquire` and the
+        matching `release`.
+
+        Raises:
+            ~portalocker.exceptions.LockLostError: The lock was revoked
+                while held. The error that killed the subscription is
+                attached as ``__cause__``.
+        """
+        if self.lost:
+            raise self._lock_lost_error()
+
+    def _lock_lost_error(self) -> exceptions.LockLostError:
+        """Build the `LockLostError` describing this lock's loss.
+
+        Returns:
+            The error, carrying `channel` and `holder_id`, with the
+            exception that killed the keep-alive worker attached as
+            ``__cause__`` so tracebacks show the revocation and its
+            cause as one chain.
+        """
+        with self._state_lock:
+            cause: BaseException | None = self._lost_error
+        error: exceptions.LockLostError = exceptions.LockLostError(
+            exceptions.LockException.LOCK_FAILED,
+            f'Redis lock {self.holder_id} on channel {self.channel!r} was '
+            'revoked while held',
+            channel=self.channel,
+            holder_id=self.holder_id,
+        )
+        error.__cause__ = cause
+        return error
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: typing.Any,
+    ) -> bool | None:
+        """Release the lock, raising `LockLostError` for a silent loss.
+
+        A lock that was lost mid-block and whose body nevertheless
+        finished cleanly would otherwise end the ``with`` statement
+        looking successful, which is exactly the silent divergence a
+        revoked lock must not produce. The loss is therefore re-raised
+        here - after the release, so the teardown always runs - but only
+        when no exception is already propagating out of the body: the
+        body's own failure is the more specific signal and must not be
+        masked (the loss stays observable through `lost` either way).
+
+        Args:
+            exc_type: Type of the exception leaving the block, if any.
+            exc_value: The exception instance, if any.
+            traceback: The traceback of that exception, if any.
+
+        Returns:
+            `None`, so a body exception keeps propagating once the lock
+            has been released.
+
+        Raises:
+            ~portalocker.exceptions.LockLostError: The lock was revoked
+                while the block ran and the block raised nothing itself.
+        """
+        was_lost: bool = self.lost
+        self.release()
+        if exc_type is None and was_lost:
+            raise self._lock_lost_error()
+        return None
 
     def _parse_lock_response(
         self,
@@ -964,6 +1576,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         connection: redis.client.Redis,
         expected_subscribers: int,
         timeout: float,
+        reap: bool = True,
     ) -> list[RedisLockHolder] | None:
         """Probe the channel and report who is holding the lock.
 
@@ -1043,6 +1656,10 @@ class RedisLock(utils.LockBase['RedisLock']):
                 confirmation and, separately, for the replies. Polling
                 uses `thread_sleep_time` or a tenth of this timeout,
                 whichever is smaller.
+            reap: Whether inconclusive case 3 above may kill the silent
+                subscribers. `acquire` reaps; the read-only `probe`
+                passes False so observing a channel can never modify
+                it.
 
         Returns:
             The holders that answered, or `None` when the probe was
@@ -1101,7 +1718,11 @@ class RedisLock(utils.LockBase['RedisLock']):
             if current_subscribers != expected_subscribers:
                 return None
             if len(holders) < expected_subscribers:
-                self._kill_unavailable_locks(connection, holders.values())
+                if reap:
+                    self._kill_unavailable_locks(
+                        connection,
+                        holders.values(),
+                    )
                 return None
             return list(holders.values())
         finally:
@@ -1557,6 +2178,14 @@ class RedisLock(utils.LockBase['RedisLock']):
         iteration subscribes from scratch; an elected writer is the
         exception and holds on to its subscription between attempts.
 
+        Either way, success is only reported after `_confirm_held`
+        verified - under the state lock the worker's failure handler
+        also takes - that the keep-alive worker is still alive and
+        recorded no error. A subscription that died in the microseconds
+        after the winning probe therefore costs one attempt instead of
+        producing a lock that is held in this process's imagination
+        only.
+
         `fail_when_locked` means the caller will not wait for a held
         channel: the first conclusive probe showing the lock actually
         held raises `AlreadyLocked` instead of polling the holder until
@@ -1568,9 +2197,19 @@ class RedisLock(utils.LockBase['RedisLock']):
         retried within the timeout. Pass ``timeout=0`` to bound a
         non-blocking acquisition to exactly one attempt.
 
-        If subscribing itself fails, `_start_subscription` rolls back
-        before re-raising, so the original error propagates with the lock
-        left inactive and the same object can be used again.
+        Transient connection trouble while merely *waiting* is scoped
+        to the attempt (#141): a subscribe that fails with a
+        ``redis.exceptions.ConnectionError`` or ``TimeoutError``, and a
+        keep-alive worker that dies before the lock is held, both count
+        as one failed attempt and are retried within the timeout
+        budget. Any other subscribe failure rolls back through
+        `_start_subscription` and propagates, with the lock left
+        inactive and the same object usable again.
+
+        Calling this on an instance whose previous hold ended in a loss
+        resets it: the recorded error is consumed, the dead
+        subscription is torn down, and the acquisition proceeds from
+        scratch.
 
         Args:
             timeout: Seconds to keep retrying. Defaults to the instance's
@@ -1627,8 +2266,15 @@ class RedisLock(utils.LockBase['RedisLock']):
             utils.coalesce(fail_when_locked, self.fail_when_locked, False),
         )
 
+        if self.lost:
+            # The previous hold ended in a revocation; consume it so the
+            # instance is reusable, as documented above.
+            self._abandon_failed_attempt()
         if self.pubsub is not None:
             raise exceptions.LockException('This lock is already active')
+        with self._state_lock:
+            self._lost_error = None
+            self._lock_state = _LockState.ACQUIRING
         if self.flags == constants.LockFlags.EXCLUSIVE:
             with self._mode_lock:
                 self.mode = RedisLockMode.PENDING
@@ -1639,39 +2285,202 @@ class RedisLock(utils.LockBase['RedisLock']):
             effective_timeout,
             effective_check_interval,
         ):
-            if self.pubsub is None:
-                self._start_subscription(connection)
-            subscribers: int = self._get_subscriber_count(connection)
-            logger.debug(
-                'Redis lock %s mode=%s observed %d subscribers',
-                self.holder_id,
-                self.mode.value,
-                subscribers,
-            )
-            if subscribers == 1:
-                if self.flags == constants.LockFlags.EXCLUSIVE:
-                    with self._mode_lock:
-                        self.mode = RedisLockMode.EXCLUSIVE
-                return self
-
-            holders: list[RedisLockHolder] | None = self._collect_lock_holders(
-                connection,
-                subscribers,
-                self.unavailable_timeout,
-            )
-            logger.debug(
-                'Redis lock %s observed holders=%r',
-                self.holder_id,
-                holders,
-            )
-            if self._resolve_lock_holders(
-                holders,
-                effective_fail_when_locked,
-            ):
+            if self._acquire_attempt(connection, effective_fail_when_locked):
                 return self
 
         self.release()
         raise exceptions.AlreadyLocked()
+
+    def _acquire_attempt(
+        self,
+        connection: redis.client.Redis,
+        fail_when_locked: bool,
+    ) -> bool:
+        """Run one iteration of `acquire`'s retry loop.
+
+        Ensures a live subscription exists (abandoning one whose worker
+        died while waiting, see `_waiting_attempt_failed`), then takes
+        the uncontended fast path or hands a probe to
+        `_resolve_lock_holders`, and finally confirms the win through
+        `_confirm_or_abandon`.
+
+        Args:
+            connection: The command connection of this acquisition.
+            fail_when_locked: Forwarded to `_resolve_lock_holders`.
+
+        Returns:
+            True when the lock is now held and confirmed. False when
+            this attempt failed and `acquire` should retry within its
+            timeout budget.
+
+        Raises:
+            AlreadyLocked: Propagated from `_resolve_lock_holders` when
+                `fail_when_locked` is set and the channel is
+                conclusively held.
+            Exception: A non-transient subscription failure, propagated
+                from `_start_subscription` after its rollback.
+        """
+        if self.pubsub is not None and self._waiting_attempt_failed():
+            # The worker backing the previous attempt died while we
+            # were merely waiting; that attempt is over, nothing
+            # more (#141).
+            self._abandon_failed_attempt()
+        if self.pubsub is None and not self._try_subscribe(connection):
+            return False
+        subscribers: int = self._get_subscriber_count(connection)
+        logger.debug(
+            'Redis lock %s mode=%s observed %d subscribers',
+            self.holder_id,
+            self.mode.value,
+            subscribers,
+        )
+        if subscribers == 1:
+            if self.flags == constants.LockFlags.EXCLUSIVE:
+                with self._mode_lock:
+                    self.mode = RedisLockMode.EXCLUSIVE
+            return self._confirm_or_abandon()
+
+        holders: list[RedisLockHolder] | None = self._collect_lock_holders(
+            connection,
+            subscribers,
+            self.unavailable_timeout,
+        )
+        logger.debug(
+            'Redis lock %s observed holders=%r',
+            self.holder_id,
+            holders,
+        )
+        if self._resolve_lock_holders(holders, fail_when_locked):
+            return self._confirm_or_abandon()
+        return False
+
+    def _try_subscribe(self, connection: redis.client.Redis) -> bool:
+        """Subscribe for one attempt, absorbing transient failures.
+
+        A subscribe that dies with a connection or timeout error is the
+        waiter-side blip `acquire` promises to tolerate: the rollback
+        inside `_start_subscription` already ran, so this only logs,
+        restores the `_LockState.ACQUIRING` lifecycle the rollback's
+        `release` reset, and reports the attempt as failed. Every other
+        error propagates, because an unexpected failure should surface
+        rather than burn the whole timeout retrying it.
+
+        Args:
+            connection: The command connection to derive the
+                subscription client from.
+
+        Returns:
+            True when the subscription is live, False when the attempt
+            failed transiently and should be retried.
+        """
+        try:
+            self._start_subscription(connection)
+        except (
+            redis.exceptions.ConnectionError,
+            redis.exceptions.TimeoutError,
+        ):
+            logger.warning(
+                'Redis lock %s could not subscribe, retrying within the '
+                'timeout',
+                self.holder_id,
+                exc_info=True,
+            )
+            with self._state_lock:
+                self._lock_state = _LockState.ACQUIRING
+            return False
+        return True
+
+    def _confirm_or_abandon(self) -> bool:
+        """Confirm a won attempt, or abandon it for the next round.
+
+        Wraps `_confirm_held` so every `acquire` success site treats a
+        refused confirmation the same way: the attempt is consumed by
+        `_abandon_failed_attempt` and the retry loop carries on.
+
+        Returns:
+            True when the lock is held, False when the attempt failed at
+            the last moment and was cleaned up.
+        """
+        if self._confirm_held():
+            return True
+        self._abandon_failed_attempt()
+        return False
+
+    def probe(
+        self,
+        timeout: float | None = None,
+    ) -> list[RedisLockHolder]:
+        """Report who currently holds the channel, changing nothing.
+
+        The read-only companion to `acquire` and the replacement for the
+        deprecated `check_or_kill_lock`: it publishes the same liveness
+        ping a real acquisition would, collects the answers, and stops
+        there. No connection is killed, no subscription outlives the
+        call, and the lock's own state does not change, so this is safe
+        to run against a channel in production to see who is on it.
+
+        When this lock currently holds the channel its own record is
+        part of the answer, since its keep-alive worker answers the ping
+        like any other holder's.
+
+        Args:
+            timeout: Seconds to wait for the holders to answer,
+                defaulting to `unavailable_timeout`. Inconclusive probes
+                are retried within this budget.
+
+        Returns:
+            One `RedisLockHolder` per subscriber, or an empty list when
+            nobody is subscribed to the channel.
+
+        Raises:
+            ~portalocker.exceptions.LockException: The channel stayed
+                inconclusive for the whole timeout: subscribers kept
+                joining or leaving mid-probe, or a counted subscriber
+                never answered. An unanswered probe is deliberately not
+                reported as an empty channel, because treating it as
+                one is exactly the misreading that hands out double
+                locks; `acquire` is the code path that may reap such a
+                silent subscriber.
+
+        Example:
+            >>> import fakeredis
+            >>> import portalocker
+            >>> connection = fakeredis.FakeStrictRedis(
+            ...     server=fakeredis.FakeServer(), decode_responses=True
+            ... )
+            >>> lock = portalocker.RedisLock(
+            ...     'probed_channel', connection=connection
+            ... )
+            >>> lock.probe()
+            []
+            >>> _ = lock.acquire()
+            >>> [holder.mode.value for holder in lock.probe()]
+            ['exclusive']
+            >>> lock.release()
+
+        .. versionadded:: 4.2.0
+        """
+        effective_timeout: float = (
+            timeout if timeout is not None else self.unavailable_timeout
+        )
+        connection: redis.client.Redis = self.get_connection()
+        for _ in self._timeout_generator(effective_timeout, None):
+            subscribers: int = self._get_subscriber_count(connection)
+            if subscribers == 0:
+                return []
+            holders: list[RedisLockHolder] | None = self._collect_lock_holders(
+                connection,
+                subscribers,
+                effective_timeout,
+                reap=False,
+            )
+            if holders is not None:
+                return holders
+        raise exceptions.LockException(
+            exceptions.LockException.LOCK_FAILED,
+            f'Redis lock channel {self.channel!r} could not be probed '
+            f'conclusively within {effective_timeout} seconds',
+        )
 
     def check_or_kill_lock(
         self,
@@ -1679,6 +2488,13 @@ class RedisLock(utils.LockBase['RedisLock']):
         timeout: float,
     ) -> bool | None:
         """Ask whether anyone is alive on the channel, and reap if not.
+
+        .. deprecated:: 4.2.0
+            Use `probe` for a read-only view of the channel; the
+            reaping of crashed holders happens inside `acquire`, where
+            the protocol's timeout discipline protects live-but-slow
+            holders from a caller-chosen timeout. This method will be
+            removed in portalocker 5.0.0.
 
         The public liveness check from before 4.0.0. `acquire` no longer
         uses it: it probes with `_collect_lock_holders` and reaps with
@@ -1715,7 +2531,18 @@ class RedisLock(utils.LockBase['RedisLock']):
             True as soon as any reply arrives. `None` when nothing
             answered in time, after killing the matching pubsub
             connections. False is never returned.
+
+        Warns:
+            DeprecationWarning: Always, naming `probe` as the
+                replacement.
         """
+        warnings.warn(
+            'check_or_kill_lock is deprecated and will be removed in '
+            'portalocker 5.0.0; use probe() for a read-only view of the '
+            'channel. Crashed holders are reaped inside acquire().',
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # Random channel name to get messages back from the lock
         response_channel = f'{self.channel}-{random.random()}'
         check_interval = min(self.thread_sleep_time, timeout / 10)
@@ -1769,14 +2596,16 @@ class RedisLock(utils.LockBase['RedisLock']):
             pubsub.close()
 
     def _unsubscribe(self) -> None:
-        """Drop the subscription but keep the connection.
+        """Drop the subscription but keep the command connection.
 
-        Stops and joins the keep-alive thread, then closes the pubsub,
-        unsubscribing first when the pubsub still owns a connection.
+        Stops and joins the keep-alive thread, closes the pubsub
+        (unsubscribing first when the pubsub still owns a connection),
+        and closes the dedicated subscription client and its pool.
         This is the back-off between attempts: `_resolve_lock_holders`
         calls it after an unsuccessful probe so that a waiting lock
         stops being counted as a subscriber, and the next attempt
-        subscribes from scratch on the same connection.
+        subscribes from scratch, on a fresh subscription client but the
+        same command connection.
 
         The teardown is exception safe. `thread` and `pubsub` are
         cleared before their cleanup steps run, every step runs even
@@ -1854,8 +2683,50 @@ class RedisLock(utils.LockBase['RedisLock']):
             except Exception as error:
                 first_error = _keep_first_error(first_error, error)
 
+        first_error = self._close_subscription_client(first_error)
+
         if first_error is not None:
             raise first_error
+
+    def _close_subscription_client(
+        self,
+        first_error: Exception | None,
+    ) -> Exception | None:
+        """Close the dedicated subscription client and its pool.
+
+        The client is per attempt and always owned by this lock, also
+        when it came from `subscription_connection_factory`, so it goes
+        down with the subscription. Its pool is disconnected explicitly
+        because ``Redis.close`` leaves an externally supplied pool
+        alone, and the pubsub connection was checked out of exactly
+        that pool. Follows the same exception-safe teardown discipline
+        as the rest of `_unsubscribe`: the reference is cleared first,
+        both steps always run, failures are folded through
+        `_keep_first_error`.
+
+        Args:
+            first_error: The error the surrounding teardown kept so
+                far, or `None`.
+
+        Returns:
+            The error the caller should keep: `first_error` when it was
+            already set, otherwise the first failure raised here, or
+            `None` when everything succeeded.
+        """
+        subscription_client: redis.client.Redis | None = (
+            self._subscription_client
+        )
+        self._subscription_client = None
+        if subscription_client is not None:
+            try:
+                subscription_client.close()
+            except Exception as error:
+                first_error = _keep_first_error(first_error, error)
+            try:
+                subscription_client.connection_pool.disconnect()
+            except Exception as error:
+                first_error = _keep_first_error(first_error, error)
+        return first_error
 
     def release(self) -> None:
         """Give up the lock and undo everything `acquire` set up.
@@ -1891,6 +2762,14 @@ class RedisLock(utils.LockBase['RedisLock']):
         closes a self-created connection if one exists - which is what
         makes both that rollback and `__del__` safe.
 
+        A loss is *not* erased here: releasing a lock that was revoked
+        while held leaves `lost` True (and the causal error in place)
+        until the next `acquire`, so the loss stays observable after
+        the teardown - the ``with`` block exit and code checking `lost`
+        after a bare `release` both rely on that. Releasing never
+        raises on account of a loss; only genuine teardown failures
+        propagate.
+
         Raises:
             Exception: The first error any teardown step raised,
                 re-raised after the remaining steps have run.
@@ -1898,6 +2777,10 @@ class RedisLock(utils.LockBase['RedisLock']):
         first_error: Exception | None = None
         with self._mode_lock:
             self.writer_elected = False
+        with self._state_lock:
+            if self._lock_state is not _LockState.LOST:
+                self._lock_state = _LockState.IDLE
+                self._lost_error = None
         try:
             self._unsubscribe()
         except Exception as error:
