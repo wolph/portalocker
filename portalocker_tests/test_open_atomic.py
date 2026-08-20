@@ -200,7 +200,7 @@ def test_open_atomic_preserves_destination_created_before_publication(
 @posix_hard_link_only
 @pytest.mark.parametrize(
     'errno_code',
-    [errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK],
+    [errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK],
 )
 def test_open_atomic_falls_back_to_rename_without_hard_links(
     tmp_path: pathlib.Path,
@@ -256,6 +256,39 @@ def test_open_atomic_fallback_refuses_existing_destination(
     assert str(exc_info.value.__cause__) == (
         f'[Errno {errno.ENOTSUP}] hard links unsupported'
     )
+
+
+@posix_hard_link_only
+def test_open_atomic_fallback_refuses_dangling_symlink_destination(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rename fallback must refuse a dangling symlink destination.
+
+    The hard link refuses it (the symlink itself occupies the name), so
+    the fallback's existence check has to use ``lexists``. A plain
+    ``exists`` follows the symlink, reports the name as free and lets
+    the rename silently replace the symlink.
+    """
+    target: pathlib.Path = tmp_path / 'destination.bin'
+
+    def fail_link(source: str, destination: pathlib.Path) -> None:
+        raise OSError(errno.ENOTSUP, 'hard links unsupported')
+
+    monkeypatch.setattr(os, 'link', fail_link)
+
+    with (
+        pytest.raises(FileExistsError) as exc_info,
+        portalocker.open_atomic(target) as file_handle,
+    ):
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'losing payload')
+        assert written == len(b'losing payload')
+        target.symlink_to(tmp_path / 'nowhere')
+
+    assert exc_info.value.filename == str(target)
+    assert target.is_symlink(), 'the fallback replaced the symlink'
+    assert not (tmp_path / 'nowhere').exists()
 
 
 @posix_hard_link_only
@@ -336,6 +369,65 @@ def test_open_atomic_tolerates_handle_closed_in_body(
 
     assert target.read_bytes() == b'closed early'
     assert set(tmp_path.iterdir()) == {target}
+
+
+def test_open_atomic_retries_a_colliding_temporary_name(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A random temporary name that already exists must be rolled again.
+
+    The exclusive create refuses the occupied name instead of truncating
+    it, and the occupant must survive untouched.
+    """
+    target: pathlib.Path = tmp_path / 'destination.bin'
+    tokens: list[bytes] = [b'\x00' * 8, b'\xff' * 8]
+
+    def fake_urandom(count: int) -> bytes:
+        assert count == 8
+        return tokens.pop(0)
+
+    first_token_hex: str = tokens[0].hex()
+    colliding: pathlib.Path = (
+        tmp_path / f'.destination.bin.{first_token_hex}.tmp'
+    )
+    colliding.write_bytes(b'occupied')
+    monkeypatch.setattr(os, 'urandom', fake_urandom)
+
+    with portalocker.open_atomic(target) as file_handle:
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'payload')
+        assert written == len(b'payload')
+
+    assert tokens == [], 'expected exactly one retry'
+    assert target.read_bytes() == b'payload'
+    assert colliding.read_bytes() == b'occupied'
+
+
+def test_open_atomic_never_touches_the_process_umask(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The umask must never be modified, not even briefly.
+
+    ``os.umask`` is process-global: a round-trip to read it opens a
+    window in which every other thread creates world-writable files.
+    The permissions have to come from the kernel applying the umask at
+    creation instead.
+    """
+    target: pathlib.Path = tmp_path / 'destination.bin'
+
+    def forbidden_umask(mask: int) -> int:
+        raise AssertionError(f'os.umask({mask:#o}) called during publish')
+
+    monkeypatch.setattr(os, 'umask', forbidden_umask)
+
+    with portalocker.open_atomic(target) as file_handle:
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'payload')
+        assert written == len(b'payload')
+
+    assert target.read_bytes() == b'payload'
 
 
 def test_open_atomic_publishes_with_plain_open_permissions(

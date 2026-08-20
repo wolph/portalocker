@@ -73,15 +73,17 @@
    losing waiters retry. Also documented that ``RedisLock`` requires a
    single standalone Redis endpoint, since ``PUBSUB NUMSUB`` is node-local
    in cluster and replica setups (#139)
- * Behaviour change: a full ``BoundedSemaphore`` with
-   ``fail_when_locked=True`` (the default) now raises ``AlreadyLocked``
-   right after the first sweep of the slots, as its documentation always
-   promised, instead of first retrying for the whole ``timeout`` (5
-   seconds by default). With ``fail_when_locked=False`` the semaphore
-   still retries for the full timeout and then returns ``None`` rather
-   than raising. That ``None`` return is the long-documented contract of
-   this class, diverging from every other lock, and is now called out
-   explicitly in the class documentation
+ * Documentation fix: the 4.1.0 documentation gave ``BoundedSemaphore``
+   two contradicting ``fail_when_locked`` contracts. The constructor
+   docstring promised that a full semaphore raises ``AlreadyLocked``
+   straight away, while ``acquire`` documented what the code has
+   actually done since 3.2.0: the flag is consulted only once the
+   ``timeout`` has expired. The runtime behaviour is unchanged and the
+   constructor docstring was the one corrected. A full semaphore retries
+   for the whole timeout and then raises ``AlreadyLocked``, or returns
+   ``None`` with ``fail_when_locked=False``. Both the timing and that
+   ``None`` return diverge from the other lock classes and are now
+   called out loudly in the documentation
  * Behaviour change: acquiring a ``BoundedSemaphore`` or
    ``NamedBoundedSemaphore`` instance that already holds a slot now
    raises ``portalocker.LockException`` instead of ``AssertionError``.
@@ -99,12 +101,16 @@
    through short-lived locks. A single module level hook registered once
    at import now releases whichever locks are still held at interpreter
    exit
- * Fixed a forked child releasing its parent's ``TemporaryFileLock`` or
-   ``PidFileLock`` on its own normal exit. The child inherits the live
-   lock objects, and the interpreter-exit cleanup unlinked the parent's
-   lock files while the parent still believed it held them, breaking the
-   classic acquire-then-fork daemonize sequence. The exit hook now only
-   releases locks constructed by the exiting process itself
+ * The interpreter-exit cleanup for ``TemporaryFileLock`` and
+   ``PidFileLock`` no longer releases locks a forked child inherited
+   from its parent: the exit hook now only releases locks constructed by
+   the exiting process itself. The child inherits the live lock objects,
+   and its normal exit unlinked the parent's lock files while the parent
+   still believed it held them, breaking the classic acquire-then-fork
+   daemonize sequence. Together with 4.1.1's removal of lock teardown at
+   garbage collection time this closes that fork hole for locks acquired
+   before forking. A lock constructed in the parent but acquired inside
+   a forked child is still not cleaned up at that child's exit
  * Behaviour change: ``portalocker.open_atomic`` now raises
    ``FileExistsError`` when the destination already exists on entry,
    matching its documentation and the publication-time race. It raised
@@ -114,8 +120,10 @@
    hard link support (exFAT and some SMB, NFS and FUSE mounts) where
    3.2.0's rename worked, and the cleanup then deleted the freshly
    written payload as well. Publication now falls back to an existence
-   check plus rename on those filesystems, preserving the no-replace
-   guarantee up to a narrow, documented race window
+   check plus rename on those filesystems. The fallback still publishes
+   content atomically but cannot reliably refuse concurrent publishers,
+   so the strong no-replace guarantee continues to require hard link
+   support, as the documentation now states
  * Behaviour change: when ``open_atomic`` fails to publish, for any
    reason, the temporary file is now kept and the raised exception names
    its path, where the payload was previously deleted without a trace.
@@ -124,9 +132,11 @@
    handle itself no longer breaks publication because the payload is
    synchronized through a fresh descriptor
  * Fixed ``open_atomic`` publishing destinations with the private
-   ``0o600`` permissions of its ``NamedTemporaryFile``. The destination
-   now carries the ``0o666`` minus umask mode a plain ``open`` would
-   have produced
+   ``0o600`` permissions of its temporary file. The temporary file is
+   now created with mode ``0o666`` so the kernel applies the process
+   umask at creation, and the destination carries the permissions a
+   plain ``open`` would have produced, without portalocker ever touching
+   the process-wide umask
  * Documented two ``BoundedSemaphore`` operational hazards: a slot file
    deleted externally mid-hold silently admits an extra holder, and the
    default directory is the tmp-cleaner-patrolled system temporary

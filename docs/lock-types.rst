@@ -128,12 +128,13 @@ Guarantees:
 - `BoundedSemaphore.acquire` sweeps the slots in a fixed numerical order
   on every attempt, so all contenders race for slot 0 first, then slot
   1, and so on.
-- With ``fail_when_locked=True`` (the default) a full semaphore raises
-  ``AlreadyLocked`` right after the first sweep, without waiting out the
-  ``timeout``. With ``fail_when_locked=False`` the sweep repeats until
-  the timeout expires and then returns ``None`` instead of raising: a
-  divergence from every other lock in this module, kept for backward
-  compatibility, so check the return value.
+- ``fail_when_locked`` is consulted only after the ``timeout`` has
+  expired, unlike every other lock class here: a full semaphore always
+  retries for the whole timeout, even with the flag set. Running out of
+  time then raises ``AlreadyLocked`` with ``fail_when_locked=True``
+  (the default) and returns ``None`` with ``fail_when_locked=False``.
+  Both are divergences kept as they have behaved since 3.2.0, so check
+  the return value when you pass ``fail_when_locked=False``.
 - `BoundedSemaphore.release` only unlocks the held slot; the lock files
   themselves stay on disk so the same slots can be reused later.
 
@@ -241,9 +242,8 @@ keeping, and leaving it behind afterwards would just be litter.
 
 Guarantees:
 
-- `TemporaryFileLock.release` unlinks the lock file. Two fallbacks catch
-  a caller that forgets to release: `LockBase.__del__` on garbage
-  collection, and a single module level `atexit` hook that releases any
+- `TemporaryFileLock.release` unlinks the lock file. For a caller that
+  forgets to release, a single module level `atexit` hook releases any
   lock still held when the interpreter shuts down. The hook only acts in
   the process that constructed the lock, so a forked child exiting does
   not unlink the file of a lock its parent still holds.

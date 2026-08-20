@@ -66,10 +66,14 @@ def test_bounded_semaphore_recovers_after_acquire_error(tmp_path):
     semaphore.release()
 
 
-def test_bounded_semaphore_full_fails_fast_by_default() -> None:
+def test_bounded_semaphore_full_waits_out_timeout_then_raises() -> None:
     """A full semaphore with ``fail_when_locked=True`` (the default) must
-    raise ``AlreadyLocked`` right after the first full sweep instead of
-    blocking for the whole timeout first.
+    retry for the whole timeout before raising ``AlreadyLocked``.
+
+    This wait-then-raise timing has been the behaviour since 3.2.0 and
+    diverges from the fail-fast handling of the other lock classes. The
+    4.1.0 constructor docstring wrongly promised fail-fast, so this test
+    pins the real contract with a measured lower bound.
     """
     name: str = str(random.random())
     holder_a = portalocker.BoundedSemaphore(2, name=name)
@@ -77,14 +81,19 @@ def test_bounded_semaphore_full_fails_fast_by_default() -> None:
     holder_a.acquire()
     holder_b.acquire()
 
-    # A timeout long enough that waiting it out would trip the global
-    # pytest timeout: failing fast is the only way this test passes.
-    contender = portalocker.BoundedSemaphore(2, name=name, timeout=30)
+    contender = portalocker.BoundedSemaphore(
+        2,
+        name=name,
+        timeout=0.3,
+        check_interval=0.05,
+    )
     start: float = time.perf_counter()
     with pytest.raises(portalocker.AlreadyLocked):
         contender.acquire()
     elapsed: float = time.perf_counter() - start
-    assert elapsed < 5, 'fail_when_locked=True must not wait out the timeout'
+    assert elapsed >= 0.29, (
+        'fail_when_locked=True must wait out the whole timeout first'
+    )
 
     holder_a.release()
     holder_b.release()
