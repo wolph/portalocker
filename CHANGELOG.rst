@@ -1,5 +1,52 @@
 4.2.0:
 
+ * **Connection policy change**: the ``RedisLock`` subscription now
+   lives on a dedicated connection that never retries and never
+   reconnects (``retry=Retry(NoBackoff(), 0, supported_errors=())``,
+   holder name set at the connection level, RESP2 with maintenance
+   notifications disabled), derived per attempt from the command
+   connection's pool. Previously a killed or dropped holder connection
+   was silently resurrected by redis-py's retry machinery: the holder
+   resubscribed *without its name*, kept believing it held the lock
+   while the channel had already released it, inflated the subscriber
+   count, and could never be reaped again, permanently blocking
+   exclusive acquisition. Holders on flaky networks now lose their
+   locks loudly instead of keeping them incorrectly, which is the
+   correctness fix. The command connection keeps its default retry
+   policy, and waiter-side blips still only cost one acquire attempt.
+   Exotic setups (Sentinel, cluster, custom pools) can supply the new
+   ``subscription_connection_factory`` parameter. Note that under
+   redis-py's default ``socket_timeout`` of five seconds a read
+   stalled that long now counts as a loss, and that a pre-4.2 holder
+   on the same channel still resubscribes silently when killed, so the
+   guarantee covers a channel once every participant runs 4.2+ (#137)
+ * Added loss surfacing to ``RedisLock``: a new
+   ``portalocker.LockLostError`` (carrying ``channel``, ``holder_id``
+   and the causal exception as ``__cause__``), a ``lost`` property, an
+   ``ensure_held()`` check for long critical sections, an ``on_lost``
+   callback invoked exactly once per loss on the keep-alive thread,
+   and a ``with`` block exit that raises ``LockLostError`` after
+   releasing when the body finished cleanly. ``release()`` never
+   raises on account of a loss and leaves the loss observable;
+   ``acquire()`` on a lost instance resets it (#137, #141)
+ * Scoped ``RedisLock`` worker failures to what actually failed: a
+   waiter whose subscription dies retries within its timeout budget
+   with no process-wide interrupt, while a *held* lock's worker death
+   marks the lock lost, and the escalation now catches
+   ``BaseException`` (a ``SystemExit`` or ``KeyboardInterrupt``
+   landing on the worker no longer dies silently). The
+   main-thread interrupt is governed by the new ``interrupt_on_lost``
+   parameter, defaulting to True in 4.2 with a ``DeprecationWarning``
+   at loss time when left unset; portalocker 5.0.0 flips the default
+   to False. Acquisition success is confirmed against the worker's
+   state under a lock, so a subscription dying between the winning
+   probe and the bookkeeping costs one attempt instead of producing an
+   imaginary hold (#141)
+ * Deprecated ``RedisLock.check_or_kill_lock`` (removal in 5.0.0): its
+   reap arm kills connections on a caller-chosen timeout without the
+   protocol discipline that protects live-but-slow holders inside
+   ``acquire``. The new read-only ``RedisLock.probe()`` answers "who
+   is on this channel" without side effects (#137)
  * Fixed ``RedisLock`` non-blocking acquisition raising ``AlreadyLocked``
    for the writer that had just won the election. The fail check ran
    before the promotion check, so two ``fail_when_locked`` writers on a

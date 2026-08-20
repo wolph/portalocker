@@ -6,8 +6,9 @@ channel rather than a shared filesystem; see :doc:`lock-types` for where it
 fits next to the file-based locks, and :doc:`quickstart` for installing
 portalocker itself. This page is the deep dive: why the lock works this
 way, installing the extra it needs, everyday usage, who owns the
-underlying connection, how a wedged holder gets cleaned up, and how to
-exercise all of it with `fakeredis` instead of a real server.
+underlying connection, how a holder learns that it lost the lock, how a
+wedged holder gets cleaned up, and how to exercise all of it with
+`fakeredis` instead of a real server.
 
 Why a pubsub lock
 ------------------
@@ -26,8 +27,9 @@ subscribes to the lock channel, and a background thread keeps reading
 from it, so ownership is a property of a live connection rather than a
 stored value. The moment that connection drops - a clean release, a
 crash, or a severed network - Redis drops the subscriber and the lock is
-released at once. There is no expiry to wait out and no heartbeat to
-refresh. The trade is that nothing is stored anywhere, so every
+released at once, and since 4.2.0 the holder is told at once as well
+(see `Losing a lock`_). There is no expiry to wait out and no heartbeat
+to refresh. The trade is that nothing is stored anywhere, so every
 acquisition attempt has to ask the channel who is currently there instead
 of reading a key.
 
@@ -147,6 +149,16 @@ rather than reusing a closed one. Against a real server that looks like:
         lock.connection is not None  # True: created on first use
     lock.connection is None  # True: release() closed and cleared it
 
+Since 4.2.0 the connection above is only the *command* connection
+(probes, pings, ``CLIENT LIST``). The subscription that actually holds
+the lock lives on a dedicated client the lock builds for every
+attempt, derived from the command connection's pool but configured to
+never retry and never reconnect, with the holder's name set at the
+connection level; see `Losing a lock`_ for why. Exotic setups whose
+pools the derivation cannot clone (Sentinel, cluster, custom pool
+classes) pass ``subscription_connection_factory`` to build that client
+themselves.
+
 The same lifecycle is observable end to end without a real server, by
 pointing the connection `RedisLock` would normally build at a `fakeredis`
 server instead of a real one:
@@ -168,6 +180,99 @@ True
 >>> built.connection is None
 True
 
+Losing a lock
+---------------
+
+The pubsub design releases a lock the instant its connection dies, and
+since 4.2.0 the holder is told just as promptly. The subscription lives
+on a dedicated connection with a zero-retry, zero-reconnect policy: a
+transparently resurrected subscription would be a silent re-acquisition
+of a lock the holder may have lost to someone else in the gap, so the
+first read error after a revocation is terminal, and the keep-alive
+thread turns it into a loss the application can observe on four
+channels:
+
+- `RedisLock.lost` turns `True` and stays `True` through
+  `RedisLock.release`, until the next `RedisLock.acquire` resets the
+  instance.
+- `RedisLock.ensure_held` raises
+  :class:`~portalocker.exceptions.LockLostError` (carrying the channel,
+  the holder id and the causal error as ``__cause__``). Long critical
+  sections should call it periodically, since it is the only
+  deterministic way a loss interrupts a running body.
+- A ``with`` block whose body finishes cleanly raises
+  :class:`~portalocker.exceptions.LockLostError` on exit, after
+  releasing. A body exception is never masked by it.
+- An ``on_lost`` callback passed to the constructor fires exactly once
+  per loss, on the keep-alive thread. Keep it short, do not take
+  application locks inside it, and expect anything it raises to be
+  logged rather than propagated.
+
+By default a loss additionally interrupts the main thread with a
+`KeyboardInterrupt`, which is the historical behaviour and every bit as
+best-effort as it sounds: a custom ``SIGINT`` disposition, a main
+thread blocked in a C call, or a broad ``except`` all swallow it.
+portalocker 5.0.0 flips the ``interrupt_on_lost`` default to `False`,
+and until then a loss under the implicit default emits a
+`DeprecationWarning` at the moment it interrupts; pass
+``interrupt_on_lost`` explicitly to choose your side early.
+
+Injecting a read failure into the keep-alive thread stands in for a
+killed connection well enough to show the whole surface without a real
+server:
+
+>>> import redis.exceptions
+>>> lost_locks = []
+>>> lock = portalocker.RedisLock(
+...     'doomed_channel',
+...     connection=connection,
+...     on_lost=lost_locks.append,
+...     interrupt_on_lost=False,
+... )
+>>> _ = lock.acquire()
+>>> lock.ensure_held()  # held and healthy: returns quietly
+>>> def broken_read(*args, **kwargs):
+...     raise redis.exceptions.ConnectionError('connection killed')
+>>> lock.pubsub.get_message = broken_read
+>>> import time
+>>> while not lock.lost:  # the worker notices within its sleep interval
+...     time.sleep(0.01)
+>>> lost_locks == [lock]
+True
+>>> try:
+...     lock.ensure_held()
+... except portalocker.LockLostError as error:
+...     print(error.channel, type(error.__cause__).__name__)
+doomed_channel ConnectionError
+>>> lock.release()  # never raises on account of the loss
+>>> lock.lost  # still observable after release
+True
+>>> _ = lock.acquire()  # a fresh acquire resets the instance
+>>> lock.lost
+False
+>>> lock.release()
+
+Three caveats, stated plainly rather than hidden:
+
+- Under redis-py's default ``socket_timeout`` of five seconds, a read
+  stalled that long counts as a loss. A holder that cannot complete a
+  read cannot confirm ownership either, so this is deliberate, but a
+  pathologically slow link can produce a false loss.
+- The dedicated subscription connection speaks RESP2, because RESP3
+  maintenance notifications drive a reconnect path in redis-py that
+  bypasses the retry policy. If you need RESP3 on the subscription,
+  supply ``subscription_connection_factory`` and disable maintenance
+  notifications yourself; the factory must yield a client whose
+  connections do not retry or reconnect.
+- A holder running portalocker 4.1 or older still resubscribes
+  silently after a kill, so the loss guarantee covers a channel only
+  once every participant on it runs 4.2 or later.
+
+From the revocation until the holder observes it, both the new and the
+old holder run: detection is bounded (about one worker sleep interval
+after the TCP layer notices), reaction is not. Only resource-side
+fencing closes that window, and that is outside the lock's reach.
+
 Crashed holders
 -----------------
 
@@ -188,33 +293,33 @@ them, and reports the probe as inconclusive so the caller retries against
 the now-cleaned-up channel. Because ownership lives in the connection,
 killing it is what releases that holder's lock.
 
-`RedisLock.check_or_kill_lock` is a separate, public method for a
-standalone liveness check. It predates per-holder ids, and
-`RedisLock.acquire` no longer calls it internally; it answers only the
-coarser question "is anybody answering on this channel at all?". It
-waits up to ``timeout`` for its own subscription to confirm, then
-publishes one ping and waits up to ``timeout`` again for a reply - a
-fully silent channel can therefore take up to twice ``timeout`` to
-resolve. If a reply arrives it returns `True`, and if nothing replies in
-time it treats the channel as dead, kills whichever ``CLIENT LIST``
-entry is named after *this instance's own* connection name, and returns
-`None` - it never returns `False`:
+For a standalone look at a channel, `RedisLock.probe` publishes the
+same liveness ping a real acquisition would and returns one
+`RedisLockHolder` per subscriber, without killing anything, without
+leaving a subscription behind, and without touching the lock's own
+state. An unanswered probe raises rather than reporting the channel as
+free, because "nobody answered" and "nobody is there" are different
+statements and confusing them is how double locks happen:
 
 >>> holder = portalocker.RedisLock('liveness_channel', connection=connection)
 >>> _ = holder.acquire()
->>> prober = portalocker.RedisLock('liveness_channel')
->>> prober.check_or_kill_lock(connection, timeout=0.5)
-True
+>>> prober = portalocker.RedisLock('liveness_channel', connection=connection)
+>>> [h.mode.value for h in prober.probe()]
+['exclusive']
 >>> holder.release()
+>>> prober.probe()
+[]
 
-Because that reap step only matches this instance's own connection name,
-calling `RedisLock.check_or_kill_lock` does not sweep up other processes'
-crashed holders the way the automatic reaping inside `RedisLock.acquire`
-does; it is a narrower, single-instance check, not the mechanism behind
-everyday crash recovery. `fakeredis` does not implement ``CLIENT KILL``,
-so the reaping half of both code paths - the reply-timeout branch of
-`RedisLock.check_or_kill_lock` above, and the internal cleanup during
-`RedisLock.acquire` - is only exercised against a live server in
+`RedisLock.check_or_kill_lock`, the liveness check from before 4.0.0,
+is deprecated since 4.2.0 and will be removed in 5.0.0: its reap arm
+kills connections based on a caller-chosen timeout with none of the
+protocol discipline that protects live-but-slow holders inside
+`RedisLock.acquire`, and since 4.0.0 it can only match this instance's
+own connection name anyway. Use `RedisLock.probe` for the read-only
+question and leave the reaping to `RedisLock.acquire`.
+
+`fakeredis` does not implement ``CLIENT KILL``, so the reaping inside
+`RedisLock.acquire` is only exercised against a live server in
 `portalocker_tests/test_redis.py`; against `fakeredis`, the internal
 cleanup helper is monkeypatched to a no-op so the rest of the contention
 logic can still be tested without it.

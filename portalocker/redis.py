@@ -165,6 +165,20 @@ _CONNECTION_LOSS_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+#: Signature of the exception handler a `PubSubWorkerThread` escalates
+#: through. redis-py annotates the error parameter as ``Exception`` but
+#: passes ``BaseException`` at runtime; this alias states the runtime
+#: truth.
+_WorkerExceptionHandler = typing.Callable[
+    [
+        BaseException,
+        'redis.client.PubSub',
+        'redis.client.PubSubWorkerThread',
+    ],
+    None,
+]
+
+
 class _LockState(enum.Enum):
     """Lifecycle of one `RedisLock` instance.
 
@@ -289,26 +303,19 @@ class PubSubWorkerThread(redis.client.PubSubWorkerThread):
         except BaseException as error:
             # redis-py's ``run`` passes BaseException to the handler but
             # annotates the handler parameter as Exception; mirror the
-            # runtime behaviour, not the annotation.
-            handler: (
-                typing.Callable[
-                    [
-                        BaseException,
-                        redis.client.PubSub,
-                        redis.client.PubSubWorkerThread,
-                    ],
-                    None,
-                ]
-                | None
-            ) = typing.cast(
-                'typing.Callable['
-                '[BaseException, redis.client.PubSub,'
-                ' redis.client.PubSubWorkerThread], None] | None',
+            # runtime behaviour, not the annotation. The pubsub
+            # attribute is unannotated in redis-py, hence the casts.
+            handler: _WorkerExceptionHandler | None = typing.cast(
+                '_WorkerExceptionHandler | None',
                 self.exception_handler,
             )
             if handler is None:
                 raise
-            handler(error, self.pubsub, self)
+            pubsub: redis.client.PubSub = typing.cast(
+                'redis.client.PubSub',
+                self.pubsub,
+            )
+            handler(error, pubsub, self)
 
 
 class RedisLock(utils.LockBase['RedisLock']):
@@ -459,16 +466,20 @@ class RedisLock(utils.LockBase['RedisLock']):
     #: owned by the lock, also when it came out of
     #: `subscription_connection_factory`.
     _subscription_client: redis.client.Redis | None
-    #: Guards `_lock_state` and `_lost_error`. The worker thread records
-    #: failures under it while `acquire` confirms ownership under it,
-    #: which is what makes the loss-versus-confirm race safe (see
-    #: `_confirm_held`). Deliberately separate from `_mode_lock`: that
-    #: lock serializes the ``(mode, elected)`` snapshot taken for every
-    #: ping answer, a hot path that must not contend with lifecycle
-    #: transitions, and no code path ever holds both locks at once, so
-    #: no lock ordering needs to exist between them.
-    _state_lock: threading.Lock
     #: Where this instance is in its lifecycle. See `_LockState`.
+    #: Together with `_lost_error` it is guarded by the ``_state_lock``
+    #: every `utils.LockBase` instance owns (documented there as the
+    #: guard for acquire/release state transitions, which is exactly
+    #: what this is, and reinitialized in forked children so a fork
+    #: taken while the worker thread holds it cannot deadlock the
+    #: child). The worker thread records failures under it while
+    #: `acquire` confirms ownership under it, which is what makes the
+    #: loss-versus-confirm race safe (see `_confirm_held`).
+    #: Deliberately separate from `_mode_lock`: that lock serializes
+    #: the ``(mode, elected)`` snapshot taken for every ping answer, a
+    #: hot path that must not contend with lifecycle transitions, and
+    #: no code path ever holds both locks at once, so no lock ordering
+    #: needs to exist between them.
     _lock_state: _LockState
     #: The error that killed the keep-alive worker, kept until the next
     #: `acquire` so `~portalocker.exceptions.LockLostError` can carry it
@@ -558,10 +569,9 @@ class RedisLock(utils.LockBase['RedisLock']):
         self._interrupt_on_lost_set = interrupt_on_lost is not None
         self.subscription_connection_factory = subscription_connection_factory
         self._subscription_client = None
-        # Guards `_lock_state` and `_lost_error` from here on; like
-        # `_mode_lock` below, only the constructor may assign without
-        # holding it.
-        self._state_lock = threading.Lock()
+        # Guarded by the base class's `_state_lock` (created in
+        # `super().__init__` below) from the moment a worker thread can
+        # exist; only the constructor may assign without holding it.
         self._lock_state = _LockState.IDLE
         self._lost_error = None
         # Guards every `mode` and `writer_elected` transition made once
@@ -879,9 +889,15 @@ class RedisLock(utils.LockBase['RedisLock']):
             return self.subscription_connection_factory()
 
         pool: redis.connection.ConnectionPool = connection.connection_pool
+        # `get_connection_kwargs` is annotated as a bare Dict in
+        # redis-py; the cast restores the real shape.
+        connection_kwargs: dict[str, typing.Any] = typing.cast(
+            'dict[str, typing.Any]',
+            connection.get_connection_kwargs(),
+        )
         subscription_kwargs: dict[str, typing.Any] = {
             key: value
-            for key, value in connection.get_connection_kwargs().items()
+            for key, value in connection_kwargs.items()
             # The maintenance-notification machinery is RESP3-only and
             # rejects (or bypasses) the RESP2 zero-retry setup below.
             if 'maint' not in key and key != 'connection_class'

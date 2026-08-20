@@ -3496,6 +3496,18 @@ def _wait_for(
     return predicate()
 
 
+def _lost(lock: redis.RedisLock) -> bool:
+    """Read ``lock.lost`` opaquely.
+
+    mypy narrows a property member expression like ``lock.lost`` on
+    ``assert`` and does not invalidate the narrowing across method
+    calls, so a test asserting both directions on one instance would be
+    flagged as unreachable. Reading through a function keeps the
+    narrowing out of the caller's scope.
+    """
+    return lock.lost
+
+
 def _break_subscription_read(
     monkeypatch: pytest.MonkeyPatch,
     lock: redis.RedisLock,
@@ -3669,11 +3681,16 @@ def test_redis_held_worker_failure_marks_lost(
     )
 
     lock.acquire()
-    assert not lock.lost
+    assert not _lost(lock)
     lock.ensure_held()  # Held and healthy: returns quietly.
+    worker: redis.PubSubWorkerThread | None = lock.thread
+    assert worker is not None
     _break_subscription_read(monkeypatch, lock, failure)
 
-    assert _wait_for(lambda: lock.lost)
+    # The worker thread runs the whole escalation before it ends, so
+    # its death means every loss side effect has landed.
+    assert _wait_for(lambda: not worker.is_alive())
+    assert _lost(lock)
     assert lost_calls == [lock]
     assert interrupts == ([True] if interrupt_on_lost else [])
     error: pytest.ExceptionInfo[portalocker.LockLostError]
@@ -3686,12 +3703,12 @@ def test_redis_held_worker_failure_marks_lost(
     # release() never raises on account of the loss, and the loss stays
     # observable afterwards for bare acquire()/release() callers.
     lock.release()
-    assert lock.lost
+    assert _lost(lock)
 
     # The instance stays reusable: the next acquire consumes the loss.
     lock.acquire()
     try:
-        assert not lock.lost
+        assert not _lost(lock)
         assert lost_calls == [lock]
     finally:
         lock.release()
@@ -3827,14 +3844,16 @@ def test_redis_exit_raises_lock_lost_after_clean_body(
     )
 
     error: pytest.ExceptionInfo[portalocker.LockLostError]
-    with pytest.raises(portalocker.LockLostError) as error:  # noqa: PT012
-        with lock:
-            _break_subscription_read(
-                monkeypatch,
-                lock,
-                exceptions.ConnectionError('connection killed'),
-            )
-            assert _wait_for(lambda: lock.lost)
+    with (  # noqa: PT012
+        pytest.raises(portalocker.LockLostError) as error,
+        lock,
+    ):
+        _break_subscription_read(
+            monkeypatch,
+            lock,
+            exceptions.ConnectionError('connection killed'),
+        )
+        assert _wait_for(lambda: lock.lost)
 
     assert error.value.channel == channel
     assert error.value.holder_id == lock.holder_id
@@ -3854,15 +3873,17 @@ def test_redis_exit_does_not_mask_body_exception(
         interrupt_on_lost=False,
     )
 
-    with pytest.raises(ValueError, match='body failed'):  # noqa: PT012
-        with lock:
-            _break_subscription_read(
-                monkeypatch,
-                lock,
-                exceptions.ConnectionError('connection killed'),
-            )
-            assert _wait_for(lambda: lock.lost)
-            raise ValueError('body failed')
+    with (  # noqa: PT012
+        pytest.raises(ValueError, match='body failed'),
+        lock,
+    ):
+        _break_subscription_read(
+            monkeypatch,
+            lock,
+            exceptions.ConnectionError('connection killed'),
+        )
+        assert _wait_for(lambda: lock.lost)
+        raise ValueError('body failed')
 
     # The loss stays observable even though the exit did not raise it.
     assert lock.lost
@@ -4242,6 +4263,73 @@ def test_redis_implicit_interrupt_on_lost_warns_at_loss(
         lock.release()
 
 
+class _BrokenPool:
+    """Pool stand-in whose disconnect raises."""
+
+    def __init__(self, events: list[str], error: Exception) -> None:
+        self._events: list[str] = events
+        self._error: Exception = error
+
+    def disconnect(self) -> None:
+        self._events.append('disconnect')
+        raise self._error
+
+
+class _BrokenSubscriptionClient:
+    """Subscription-client stand-in whose whole teardown raises."""
+
+    def __init__(
+        self,
+        events: list[str],
+        close_error: Exception,
+        disconnect_error: Exception,
+    ) -> None:
+        self.events: list[str] = events
+        self._close_error: Exception = close_error
+        self.connection_pool: _BrokenPool = _BrokenPool(
+            events,
+            disconnect_error,
+        )
+
+    def close(self) -> None:
+        self.events.append('close')
+        raise self._close_error
+
+
+def test_redis_unsubscribe_survives_subscription_client_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A dead subscription client's teardown keeps the first error.
+
+    Both teardown steps run even when the first raises, the reference
+    is cleared regardless, the first failure propagates and the second
+    is logged as suppressed, matching the discipline of the rest of the
+    teardown.
+    """
+    events: list[str] = []
+    close_error: _TeardownError = _TeardownError('client close failed')
+    disconnect_error: _TeardownError = _TeardownError('pool detach failed')
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock._subscription_client = typing.cast(
+        'client.Redis | None',
+        _BrokenSubscriptionClient(events, close_error, disconnect_error),
+    )
+
+    exc_info: pytest.ExceptionInfo[_TeardownError]
+    with (
+        caplog.at_level(logging.WARNING, logger='portalocker.redis'),
+        pytest.raises(_TeardownError) as exc_info,
+    ):
+        lock._unsubscribe()
+
+    assert exc_info.value is close_error
+    assert events == ['close', 'disconnect']
+    assert lock._subscription_client is None
+    assert any(
+        'Suppressed secondary' in record.message for record in caplog.records
+    )
+
+
 def test_redis_abandon_failed_attempt_survives_teardown_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -4469,6 +4557,8 @@ def test_live_redis_client_kill_revokes_lock_loudly(
 
     holder.acquire()
     try:
+        worker: redis.PubSubWorkerThread | None = holder.thread
+        assert worker is not None
         named_clients: list[dict[str, str]] = _clients_named(
             admin,
             holder.client_name,
@@ -4476,7 +4566,10 @@ def test_live_redis_client_kill_revokes_lock_loudly(
         assert len(named_clients) == 1
         admin.client_kill_filter(named_clients[0].get('id'))
 
-        assert _wait_for(lambda: holder.lost)
+        # The worker thread runs the whole escalation before it ends,
+        # so its death means every loss side effect has landed.
+        assert _wait_for(lambda: not worker.is_alive())
+        assert holder.lost
         assert lost_calls == [holder]
         with pytest.raises(portalocker.LockLostError):
             holder.ensure_held()
