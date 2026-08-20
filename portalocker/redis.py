@@ -346,16 +346,73 @@ class PubSubWorkerThread(redis.client.PubSubWorkerThread):
     still holds a lock that every other process now considers released,
     which is exactly the split-brain this lock exists to avoid.
 
-    redis-py already catches `BaseException` inside its read loop and
-    hands it to the ``exception_handler`` passed at construction, which
-    is `RedisLock._on_worker_exception` here. That handler decides
-    whether the failure is a loss (the lock was held) or a failed
-    attempt (the lock was still being acquired). This subclass only adds
-    a last-ditch layer: an exception escaping ``run`` itself - a failure
-    inside the handler, or inside the ``pubsub.close()`` redis-py runs
-    after the loop - is routed into the same handler instead of dying
-    with the thread.
+    redis-py's read loop already catches `BaseException` and hands it to
+    the ``exception_handler`` passed at construction, which is
+    `RedisLock._on_worker_exception` here. That handler decides whether
+    the failure is a loss (the lock was held) or a failed attempt (the
+    lock was still being acquired). This subclass adds two things.
+
+    It owns the read loop instead of inheriting it, because redis-py's
+    loop sets its running flag from *inside* the thread and ``stop()``
+    clears that same flag: a ``stop()`` issued after ``start()`` but
+    before the new thread reached ``run()`` was overwritten by the
+    thread's own set, the loop then ran forever, and the ``join()`` in
+    `RedisLock._unsubscribe` hung with it. `RedisLock.acquire` tears a
+    fresh subscription down microseconds after starting it whenever a
+    confirm is refused, an election is lost or ``fail_when_locked``
+    gives up, so a CPU-starved worker thread made that ordering real.
+    Here `stop` records the request in an event that `run` consults
+    before every read, so a stop can never be lost, however early it
+    lands. redis-py's own ``_running`` flag is left unused.
+
+    It also adds a last-ditch layer: an exception escaping ``run``
+    itself - a failure inside the handler, or inside the
+    ``pubsub.close()`` that runs after the loop - is routed into the
+    same handler instead of dying with the thread.
     """
+
+    #: Set by `stop`, read by `run` before every read. An event rather
+    #: than redis-py's cleared-on-stop flag so a stop that precedes the
+    #: thread's first instruction still takes effect.
+    _stop_requested: threading.Event
+
+    def __init__(
+        self,
+        pubsub: redis.client.PubSub,
+        sleep_time: float,
+        daemon: bool = False,
+        exception_handler: _WorkerExceptionHandler | None = None,
+    ) -> None:
+        """Create the reader thread without starting it.
+
+        Args:
+            pubsub: The subscribed pubsub to read from.
+            sleep_time: Seconds each ``get_message`` waits for a frame,
+                which is also how long a `stop` takes to be noticed.
+            daemon: Whether the thread may be abandoned at interpreter
+                exit. `RedisLock` always passes `True`.
+            exception_handler: Receives everything the read loop raises.
+                Without one, errors propagate and end the thread.
+        """
+        # redis-py annotates the handler parameter as taking `Exception`
+        # while passing `BaseException` at runtime; the cast states the
+        # runtime truth instead of narrowing this class's signature.
+        super().__init__(
+            pubsub,
+            sleep_time,
+            daemon=daemon,
+            exception_handler=typing.cast('typing.Any', exception_handler),
+        )
+        self._stop_requested = threading.Event()
+
+    def stop(self) -> None:
+        """Ask the read loop to end after its current read.
+
+        Safe to call at any point in the thread's life, including before
+        `run` started and after it ended. The loop closes the pubsub on
+        its way out, which disconnects the subscription socket.
+        """
+        self._stop_requested.set()
 
     def run(self) -> None:
         """Read from the subscription, routing every failure to the lock.
@@ -366,24 +423,53 @@ class PubSubWorkerThread(redis.client.PubSubWorkerThread):
                 handler registered nothing propagates: the handler is
                 the escalation path and this thread simply ends.
         """
+        # The pubsub attribute is unannotated in redis-py, and the
+        # handler is stored as redis-py's narrower annotation; both
+        # casts restore the real types.
+        pubsub: redis.client.PubSub = typing.cast(
+            'redis.client.PubSub',
+            self.pubsub,
+        )
+        handler: _WorkerExceptionHandler | None = typing.cast(
+            '_WorkerExceptionHandler | None',
+            self.exception_handler,
+        )
         try:
-            super().run()
+            self._read_until_stopped(pubsub, handler)
         except BaseException as error:
-            # redis-py's ``run`` passes BaseException to the handler but
-            # annotates the handler parameter as Exception; mirror the
-            # runtime behaviour, not the annotation. The pubsub
-            # attribute is unannotated in redis-py, hence the casts.
-            handler: _WorkerExceptionHandler | None = typing.cast(
-                '_WorkerExceptionHandler | None',
-                self.exception_handler,
-            )
             if handler is None:
                 raise
-            pubsub: redis.client.PubSub = typing.cast(
-                'redis.client.PubSub',
-                self.pubsub,
-            )
             handler(error, pubsub, self)
+
+    def _read_until_stopped(
+        self,
+        pubsub: redis.client.PubSub,
+        handler: _WorkerExceptionHandler | None,
+    ) -> None:
+        """Poll the subscription until `stop` was called, then close it.
+
+        The loop body is redis-py's: one ``get_message`` per iteration,
+        bounded by ``sleep_time``, with every failure handed to the
+        handler (the handler stops the thread, so a dead socket ends the
+        loop through it). Only the loop condition differs, see the class
+        docstring.
+
+        Args:
+            pubsub: The subscribed pubsub to read from.
+            handler: The failure handler, or `None` to let failures
+                propagate to `run`.
+        """
+        while not self._stop_requested.is_set():
+            try:
+                pubsub.get_message(
+                    ignore_subscribe_messages=True,
+                    timeout=self.sleep_time,
+                )
+            except BaseException as error:  # noqa: PERF203
+                if handler is None:
+                    raise
+                handler(error, pubsub, self)
+        pubsub.close()
 
 
 class RedisLock(utils.LockBase['RedisLock']):

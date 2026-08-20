@@ -89,6 +89,18 @@
    spuriously, at the cost of non-blocking latency of up to ``timeout``
    on a noisy channel. Pass ``timeout=0`` to keep the strict
    single-attempt behaviour (#143)
+ * Fixed ``RedisLock`` hanging forever in ``acquire`` or ``release``
+   when the keep-alive worker was told to stop before its thread had
+   started running: redis-py's ``PubSubWorkerThread.run`` sets its
+   running flag from inside the thread and ``stop()`` clears that same
+   flag, so a stop issued in the window between ``start()`` and the
+   thread's first instruction was overwritten and the read loop then
+   ran forever while the teardown sat in ``join()``. The lock reaches
+   that window whenever it tears a fresh subscription down immediately
+   (a refused confirm, a lost election, ``fail_when_locked``) and the
+   new worker thread has not been scheduled yet. The worker now records
+   stop requests in its own event, which the read loop consults before
+   every read, so a stop can never be lost
 
 4.1.1:
 

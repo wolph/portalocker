@@ -3399,22 +3399,29 @@ def test_redis_release_raises_connection_close_error(
 def test_pubsub_worker_run_routes_escaped_error_to_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An error escaping the redis-py read loop still reaches the handler.
+    """An error escaping the read loop still reaches the handler.
 
-    redis-py's own loop hands read errors to the exception handler, but
-    an error inside the handler itself, or inside the ``pubsub.close()``
-    after the loop, escapes ``run``. The subclass routes those into the
-    same handler as a last-ditch layer, ``BaseException`` included, so
-    a worker death can never bypass the loss classifier (#141). The
-    thread body runs directly (no thread is started) with the redis-py
-    loop patched to raise.
+    The loop itself hands read errors to the exception handler, but an
+    error inside the handler, or inside the ``pubsub.close()`` after
+    the loop, escapes it. ``run`` routes those into the same handler as
+    a last-ditch layer, ``BaseException`` included, so a worker death
+    can never bypass the loss classifier (#141). The thread body runs
+    directly (no thread is started) with the loop patched to raise.
     """
     failure: SystemExit = SystemExit('worker killed')
 
-    def broken_reader(self: client.PubSubWorkerThread) -> None:
+    def broken_reader(
+        self: redis.PubSubWorkerThread,
+        pubsub: client.PubSub,
+        handler: typing.Any,
+    ) -> None:
         raise failure
 
-    monkeypatch.setattr(client.PubSubWorkerThread, 'run', broken_reader)
+    monkeypatch.setattr(
+        redis.PubSubWorkerThread,
+        '_read_until_stopped',
+        broken_reader,
+    )
 
     handled: list[BaseException] = []
     pubsub: client.PubSub = fakeredis.FakeStrictRedis(
@@ -3440,10 +3447,18 @@ def test_pubsub_worker_run_reraises_without_handler(
     """Without a registered handler the escaped error propagates."""
     failure: RuntimeError = RuntimeError('connection dropped')
 
-    def broken_reader(self: client.PubSubWorkerThread) -> None:
+    def broken_reader(
+        self: redis.PubSubWorkerThread,
+        pubsub: client.PubSub,
+        handler: typing.Any,
+    ) -> None:
         raise failure
 
-    monkeypatch.setattr(client.PubSubWorkerThread, 'run', broken_reader)
+    monkeypatch.setattr(
+        redis.PubSubWorkerThread,
+        '_read_until_stopped',
+        broken_reader,
+    )
 
     pubsub: client.PubSub = fakeredis.FakeStrictRedis(
         decode_responses=True
@@ -5110,3 +5125,86 @@ def test_live_redis_no_unreapable_ghost(
         waiter.release()
         holder.release()
         admin.close()
+
+
+@pytest.mark.timeout(60)
+def test_redis_worker_stop_before_run_is_not_lost(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``stop()`` that lands before the worker ran must still stop it.
+
+    redis-py's ``PubSubWorkerThread.run`` sets its running flag from
+    inside the thread and ``stop()`` clears it, so a stop issued after
+    ``start()`` but before the new thread reached ``run()`` was
+    overwritten by the thread's own set, and the read loop then ran
+    forever while ``_unsubscribe`` sat in ``join()``. Production
+    reaches that ordering whenever a CPU-starved worker thread has not
+    been scheduled yet by the time a refused confirm, a lost election
+    or ``fail_when_locked`` tears the fresh subscription down, and the
+    confirm-race test hit it on a loaded CI runner. The ordering is
+    staged exactly: the worker's ``run`` waits on a gate that only
+    opens once ``_unsubscribe`` has issued its stop and is about to
+    join.
+    """
+    interrupts: list[bool] = []
+    monkeypatch.setattr(
+        _thread, 'interrupt_main', lambda: interrupts.append(True)
+    )
+    gate = threading.Event()
+    original_run: typing.Callable[[redis.PubSubWorkerThread], None] = (
+        redis.PubSubWorkerThread.run
+    )
+
+    def gated_run(self: redis.PubSubWorkerThread) -> None:
+        assert gate.wait(timeout=30), 'the worker gate never opened'
+        original_run(self)
+
+    monkeypatch.setattr(redis.PubSubWorkerThread, 'run', gated_run)
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        timeout=30,
+        check_interval=0.02,
+    )
+    original_confirm: typing.Callable[[], bool] = lock._confirm_held
+    injected: list[bool] = []
+
+    def racing_confirm() -> bool:
+        if not injected:
+            injected.append(True)
+            worker: redis.PubSubWorkerThread | None = lock.thread
+            assert lock.pubsub is not None
+            assert worker is not None
+            # The worker has been started but is parked before `run`.
+            assert worker.is_alive()
+            lock._on_worker_exception(
+                exceptions.ConnectionError('raced the confirm'),
+                lock.pubsub,
+                worker,
+            )
+            original_join: typing.Callable[..., None] = worker.join
+
+            def join_after_opening_gate(
+                *args: typing.Any,
+                **kwargs: typing.Any,
+            ) -> None:
+                # `_unsubscribe` has issued its stop by now: let the
+                # worker enter `run` only afterwards.
+                gate.set()
+                original_join(*args, **kwargs)
+
+            monkeypatch.setattr(worker, 'join', join_after_opening_gate)
+        else:
+            gate.set()
+        return original_confirm()
+
+    monkeypatch.setattr(lock, '_confirm_held', racing_confirm)
+
+    assert lock.acquire() is lock
+    try:
+        assert injected == [True]
+        assert not lock.lost
+        assert interrupts == []
+    finally:
+        lock.release()
