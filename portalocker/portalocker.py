@@ -977,6 +977,14 @@ else:  # pragma: not-posix
                 ~portalocker.exceptions.LockException: Any other ``OSError``,
                     or the ``EOFError`` seen on some network filesystems.
 
+            Note:
+                The full flag validation (rejecting UNBLOCK-bearing
+                combinations, ``SHARED | EXCLUSIVE`` and flag sets naming
+                no lock type) lives in the module-level `portalocker.lock`
+                by design. Calling this method directly skips that guard,
+                so ``lock(fh, LockFlags.UNBLOCK)`` on a bare locker still
+                reaches ``fcntl`` and silently releases the lock.
+
             Example:
                 >>> from portalocker import LockFlags
                 >>> from portalocker.portalocker import PosixLocker

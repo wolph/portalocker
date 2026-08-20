@@ -141,6 +141,35 @@ def test_combine_failure_preserves_existing_output(
     assert 'Snippet' in caplog.text
 
 
+def test_combine_missing_input_exits_with_clear_error(
+    tmp_path, monkeypatch, caplog
+):
+    """A missing README/LICENSE must name the file and exit nonzero.
+
+    It used to escape as a raw ``FileNotFoundError`` traceback. The
+    pre-existing output file must survive, as with decode failures.
+    """
+    # No README.rst in the doctored tree at all.
+    (tmp_path / 'LICENSE').write_text('license text\n', encoding='ascii')
+
+    output_file = tmp_path / 'combined.py'
+    sentinel = '# the previous, perfectly good build\n'
+    output_file.write_text(sentinel, encoding='ascii')
+
+    monkeypatch.setattr(__main__, 'base_path', tmp_path)
+
+    with (
+        caplog.at_level(logging.ERROR, logger='portalocker.__main__'),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        __main__.main(['combine', '--output-file', str(output_file)])
+
+    assert exc_info.value.code == 1
+    assert 'README.rst' in caplog.text
+    assert 'not found' in caplog.text
+    assert output_file.read_text(encoding='ascii') == sentinel
+
+
 def test_combine_emits_type_checking_block_verbatim(tmp_path):
     """The bundler must emit ``if TYPE_CHECKING:`` blocks verbatim rather
     than inlining their relative imports (which would duplicate a module or

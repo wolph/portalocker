@@ -95,6 +95,8 @@ class LockFlags(enum.IntFlag):
     #: becomes available.
     NON_BLOCKING = LOCK_NB
     #: Release a lock previously acquired on the same file. Used
-    #: internally by `portalocker.unlock`; most callers use a context
-    #: manager (`Lock`/`RLock`) instead of applying this flag directly.
+    #: internally by `portalocker.unlock` and never passed to
+    #: `portalocker.lock`, which rejects UNBLOCK-bearing flags with
+    #: ``RuntimeError`` since 4.1.1. Call `portalocker.unlock` (or use a
+    #: context manager such as `Lock`/`RLock`) to release a lock.
     UNBLOCK = LOCK_UN

@@ -115,7 +115,8 @@ LOCK_SH: constants.LockFlags = constants.LockFlags.SHARED
 #: Acquire the lock in a non-blocking fashion.
 LOCK_NB: constants.LockFlags = constants.LockFlags.NON_BLOCKING
 
-#: Remove an existing lock held by this process.
+#: Flag used internally by `unlock` to release a held lock. Passing it
+#: to `lock` raises ``RuntimeError`` since 4.1.1 - call `unlock` instead.
 LOCK_UN: constants.LockFlags = constants.LockFlags.UNBLOCK
 
 #: Locking flags enum

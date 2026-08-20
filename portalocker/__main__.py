@@ -75,7 +75,7 @@ def _log_decode_error(
 
 
 def _read_text_ascii(path: pathlib.Path) -> str:
-    """Read `path` as ASCII, logging a helpful snippet on decode failure.
+    """Read `path` as ASCII, logging a clear error on failure.
 
     Args:
         path: The file to read.
@@ -87,12 +87,18 @@ def _read_text_ascii(path: pathlib.Path) -> str:
         UnicodeDecodeError: `path` contains a byte that is not valid
             ASCII. The offending snippet is logged through
             `_log_decode_error` before this is re-raised.
+        SystemExit: `path` does not exist. The missing file is named in
+            a logged error and the exit status is 1, instead of the raw
+            ``FileNotFoundError`` traceback the CLI used to die with.
     """
     try:
         return path.read_text(encoding='ascii')
     except UnicodeDecodeError as exception:
         _log_decode_error(path, exception)
         raise
+    except FileNotFoundError as exception:
+        logger.error(f'Input file not found: {path}')  # noqa: TRY400
+        raise SystemExit(1) from exception
 
 
 def main(argv: typing.Sequence[str] | None = None) -> None:

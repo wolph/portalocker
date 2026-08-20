@@ -200,8 +200,8 @@ raise ``RuntimeError``:
 
 * anything carrying `LockFlags.UNBLOCK` - releasing is ``unlock()``'s
   job, and on POSIX this combination used to silently *release* a held
-  lock instead of acquiring one;
-* ``SHARED | EXCLUSIVE`` - the two lock types contradict each other;
+  lock instead of acquiring one.
+* ``SHARED | EXCLUSIVE`` - the two lock types contradict each other.
 * a flag set naming no lock type at all, such as ``LockFlags(0)`` or
   `LockFlags.NON_BLOCKING` on its own - that flag only says *how* to
   wait, so combine it with `LockFlags.SHARED` or `LockFlags.EXCLUSIVE`.
