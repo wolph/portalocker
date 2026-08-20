@@ -180,6 +180,14 @@
    leaking it. The slot sweep itself deliberately runs outside the
    instance state lock, so an ``os.fork`` in another thread cannot
    capture the state lock held across the sweep's OS calls
+ * Fixed a ``KeyboardInterrupt`` or ``SystemExit`` landing between a
+   ``BoundedSemaphore`` slot lock succeeding and its publication
+   stranding the OS lock on a traceback-pinned local, where refcount
+   collection never frees it and the slot stays blocked for every
+   contender. The sweep now rolls the slot back (un-publishing it
+   first when the interrupt landed after publication, guarded by
+   identity so another thread's slot stays untouched) and re-raises,
+   the same treatment ``PidFileLock`` got for its sidecar
  * Fixed a child forked while any thread held an instance state lock
    deadlocking forever on its first ``release()``, ``acquire()`` or
    interpreter-exit cleanup: the child inherited the lock in its locked

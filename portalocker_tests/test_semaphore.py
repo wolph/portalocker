@@ -343,6 +343,110 @@ def test_bounded_semaphore_concurrent_release_releases_once(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize('interrupt', [KeyboardInterrupt, SystemExit])
+def test_bounded_semaphore_interrupt_after_slot_lock_releases_slot(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt: type[BaseException],
+) -> None:
+    """An interrupt between locking a slot and publishing it must roll
+    the slot back.
+
+    Without the rollback the OS lock is stranded on a local that only
+    refcount garbage collection releases, and a pinned traceback (this
+    test keeps the ExceptionInfo alive) blocks the slot indefinitely -
+    the same window ``PidFileLock`` closed for its sidecar in 4.1.1.
+    The interrupt is staged at the acquire return, the first bytecode
+    of the window.
+    """
+    semaphore = portalocker.NamedBoundedSemaphore(
+        1,
+        name='interrupt-slot',
+        directory=str(tmp_path),
+        timeout=0,
+    )
+    real_acquire = utils.Lock.acquire
+
+    def interrupted_acquire(
+        self: utils.Lock,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> typing.Any:
+        real_acquire(self, *args, **kwargs)
+        raise interrupt('signal right after the slot lock')
+
+    monkeypatch.setattr(utils.Lock, 'acquire', interrupted_acquire)
+    with pytest.raises(interrupt) as excinfo:
+        semaphore.try_lock(semaphore.get_filenames())
+    monkeypatch.undo()
+
+    # The pinned exception keeps the try_lock frame, and with it the
+    # local slot Lock, alive: refcount collection cannot help here.
+    assert excinfo.traceback is not None
+    assert semaphore.lock is None
+
+    contender = portalocker.NamedBoundedSemaphore(
+        1,
+        name='interrupt-slot',
+        directory=str(tmp_path),
+        timeout=0,
+    )
+    assert contender.acquire() is not None
+    contender.release()
+
+
+def test_bounded_semaphore_interrupt_after_publication_unpublishes(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupt right after the publication un-publishes and rolls
+    back.
+
+    The publication window closes on the state-lock exit, so an
+    interrupt landing there leaves ``self.lock`` already set. The
+    rollback must recognise its own publication (identity, exactly as
+    ``PidFileLock`` guards its sidecar rollback), clear it and release
+    the slot, so the instance neither believes it holds a released
+    slot nor strands the OS lock.
+    """
+    semaphore = portalocker.NamedBoundedSemaphore(
+        1,
+        name='interrupt-published-slot',
+        directory=str(tmp_path),
+        timeout=0,
+    )
+    real_state_lock = semaphore._state_lock
+    fired: list[bool] = []
+
+    class InterruptingStateLock:
+        def __enter__(self) -> None:
+            real_state_lock.acquire()
+
+        def __exit__(self, *exc_info: typing.Any) -> None:
+            real_state_lock.release()
+            if not fired:
+                fired.append(True)
+                raise KeyboardInterrupt('signal at the publication exit')
+
+    monkeypatch.setattr(semaphore, '_state_lock', InterruptingStateLock())
+    with pytest.raises(KeyboardInterrupt) as excinfo:
+        semaphore.try_lock(semaphore.get_filenames())
+    monkeypatch.undo()
+
+    assert excinfo.traceback is not None
+    assert fired == [True]
+    assert semaphore.lock is None
+
+    contender = portalocker.NamedBoundedSemaphore(
+        1,
+        name='interrupt-published-slot',
+        directory=str(tmp_path),
+        timeout=0,
+    )
+    assert contender.acquire() is not None
+    contender.release()
+
+
 def test_bounded_semaphore_try_lock_guards_direct_calls(
     tmp_path: pathlib.Path,
 ) -> None:

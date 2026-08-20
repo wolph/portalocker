@@ -3103,6 +3103,14 @@ class BoundedSemaphore(LockBase['Lock | None']):
                 `Lock.acquire`, such as `FileNotFoundError` for a missing
                 `directory`. The `lock` attribute is untouched, so the
                 failure cannot brick the instance for later calls.
+            BaseException: An interrupt (`KeyboardInterrupt`,
+                `SystemExit`) landing between the successful slot lock
+                and the end of its publication, re-raised after the
+                slot has been rolled back. Without the rollback the OS
+                lock would be stranded on a local that only refcount
+                garbage collection releases, and a pinned traceback
+                blocks the slot indefinitely - the same window
+                `PidFileLock.acquire` closes for its sidecar.
         """
         if self.lock is not None:
             raise exceptions.LockException('Already locked')
@@ -3110,21 +3118,37 @@ class BoundedSemaphore(LockBase['Lock | None']):
         for filename in filenames:
             logger.debug('trying lock for %r', filename)
             lock = Lock(filename, fail_when_locked=True)
-            try:
-                lock.acquire()
-            except exceptions.AlreadyLocked:
-                # Taken by someone else; try the next candidate file.
-                continue
             # Only record the lock once it is actually held, and only
             # when no other thread published a slot meanwhile. Any
             # non-contention failure (e.g. a missing directory raising
             # `FileNotFoundError` from the underlying `open`) propagates
             # with `lock` still unset, so the instance stays usable.
             published: bool = False
-            with self._state_lock:
-                if self.lock is None:
-                    self.lock = lock
-                    published = True
+            try:
+                try:
+                    lock.acquire()
+                except exceptions.AlreadyLocked:
+                    # Taken by someone else; try the next candidate file.
+                    continue
+                with self._state_lock:
+                    if self.lock is None:
+                        self.lock = lock
+                        published = True
+            except BaseException:
+                # An interrupt after the slot lock succeeded must not
+                # strand the OS lock on a traceback-pinned local, where
+                # refcounting would never free it. When it landed after
+                # the publication, un-publish first - guarded by
+                # identity, so a slot another thread published stays
+                # untouched - and give the slot back either way.
+                # `Lock.acquire` rolls its own failures back before
+                # raising, which makes the release below a no-op for
+                # interrupts landing inside the acquire itself.
+                with self._state_lock:
+                    if self.lock is lock:
+                        self.lock = None
+                lock.release()
+                raise
             if published:
                 logger.debug('locked %r', filename)
                 return True
