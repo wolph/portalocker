@@ -111,6 +111,18 @@ class BaseLocker:
     def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
         """Lock `file_obj` according to `flags`.
 
+        Implementations must keep contention and real failure apart,
+        because the retry machinery in `portalocker.utils.Lock.acquire`
+        acts on the distinction: raise
+        `~portalocker.exceptions.AlreadyLocked` when somebody else holds
+        a conflicting lock, and a plain
+        `~portalocker.exceptions.LockException` for any other failure.
+        Only `AlreadyLocked` is retried until the timeout expires. Any
+        other exception is treated as permanent and aborts the acquire
+        immediately, so a custom locker that reports contention as a
+        plain `LockException` loses all retrying. The bundled lockers
+        follow the contract; mirror them.
+
         Args:
             file_obj: An open file object, an object exposing `fileno()`,
                 or a raw file descriptor.

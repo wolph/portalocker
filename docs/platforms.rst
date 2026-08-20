@@ -206,6 +206,17 @@ raise ``RuntimeError``:
   `LockFlags.NON_BLOCKING` on its own - that flag only says *how* to
   wait, so combine it with `LockFlags.SHARED` or `LockFlags.EXCLUSIVE`.
 
+A custom locker has one contract to honour in its exceptions, because
+`Lock.acquire` builds its retry policy on the distinction: raise
+`AlreadyLocked` when somebody else holds a conflicting lock, and a plain
+`LockException` for every other failure. Only `AlreadyLocked` is retried
+until the timeout expires. Anything else is treated as a permanent
+error and aborts the acquire immediately, so a locker that reports
+contention as a plain `LockException` silently loses all retrying. The
+bundled lockers already follow this split (`PosixLocker` raises
+`AlreadyLocked` for ``EACCES``/``EAGAIN``, the Windows lockers for
+their lock violation errors), so mirroring them is enough.
+
 Windows: ``msvcrt`` versus ``pywin32``
 ---------------------------------------
 
@@ -292,7 +303,12 @@ before trusting a mount. After a server or client restart there is a
 recovery grace period during which locks may be lost. Some NFS setups
 also make ``fcntl`` raise ``EOFError``; portalocker translates that into
 ``LockException`` so it is at least catchable alongside every other lock
-failure.
+failure. Since 4.1.1 that translated ``EOFError``, like ``ENOLCK`` and
+every other non-contention failure, is terminal: `Lock.acquire` raises
+it on the first attempt instead of retrying it for the whole timeout,
+because retrying cannot make a filesystem grow locking support, and a
+prompt error names the real problem where a timeout only claimed
+contention.
 
 **SMB/CIFS.** Byte-range locks are supported by the Linux ``cifs``
 client and enforced by the server, but the ``nobrl`` mount option — used

@@ -198,6 +198,56 @@
    switch to real ``lockf`` changes same-process contention, makes
    closing any descriptor for the file drop the locks, and leaves a 3.x
    holder and a 4.x holder unable to exclude each other on Linux
+ * Fixed ``Lock.acquire`` leaking an open, still locked filehandle when
+   preparing the file failed after the lock was taken, for example mode
+   ``w`` on a macOS append-only (``chflags uappnd``) file, where the
+   deferred truncate raises ``EPERM``. ``self.fh`` was never assigned, so
+   ``release`` was a no-op while the escaping traceback pinned the handle
+   alive and the file stayed locked indefinitely. The handle is now
+   unlocked and closed before the original error escapes
+ * Behaviour change: ``Lock.acquire`` now retries only contention, which
+   the locking backend reports as ``AlreadyLocked``. A plain
+   ``LockException``, such as ``flock`` refusing a FIFO or an NFS/SMB
+   mount without locking support, ``ENOLCK``, or the ``EOFError`` some
+   NFS setups raise from ``fcntl``, is permanent: it is now raised
+   immediately instead of being retried for the whole timeout, because
+   retrying cannot make a filesystem grow locking support. With
+   ``fail_when_locked=True`` it is no longer wrapped in
+   ``AlreadyLocked``, which claimed somebody held a lock on a filesystem
+   that cannot lock at all. The same classification reaches
+   ``BoundedSemaphore``: a plain ``LockException`` while probing a slot
+   used to be mistaken for a taken slot and skipped, it now propagates
+   and aborts the acquire. Custom lockers must raise ``AlreadyLocked``
+   for contention to keep being retried, as the bundled lockers already
+   do
+ * Fixed ``LockBase._timeout_generator`` sleeping past its deadline by up
+   to one full ``check_interval``: a contended ``Lock(timeout=0.5,
+   check_interval=3)`` gave up after roughly 3 seconds instead of 0.5.
+   Every sleep is now capped at the time remaining until the deadline.
+   ``RedisLock`` is unaffected, it overrides the generator with its own
+ * Fixed the "timeout has no effect in blocking mode" warning firing
+   twice for a ``Lock`` built with an explicit timeout (at construction
+   and again on every ``acquire``), pointing at portalocker's own source
+   instead of the caller, and firing for ``RLock``,
+   ``TemporaryFileLock`` and ``PidFileLock`` instances constructed
+   without any timeout argument, which failed user suites running with
+   ``filterwarnings = error``. The subclasses now forward ``None`` so the
+   default timeout no longer counts as caller-provided, and the warning
+   fires at most once per lock instance, with a stacklevel computed by
+   walking past portalocker's internal frames so it names the caller's
+   file from every entry point, subclass constructors included
+ * Behaviour change: ``RLock.acquire`` on an instance whose acquire count
+   claims the lock is held while no filehandle exists now raises
+   ``portalocker.LockException`` instead of relying on a bare ``assert``,
+   which ``python -O`` strips, silently handing the caller ``None`` as
+   the filehandle
+ * Fixed positioned writes for ``Lock`` modes containing ``w`` on POSIX.
+   The deferred-truncation ``a`` substitution left ``O_APPEND`` set, so
+   the kernel ignored seek positions and ``fh.write('x'); fh.seek(0);
+   fh.write('y')`` produced ``'xy'`` where the builtin ``open(mode='w')``
+   produces ``'y'``. The append flag is now cleared once the truncation
+   is done. Windows offers no way to drop the flag from an open handle,
+   so there the append semantics remain and are documented
 
 4.1.0:
 

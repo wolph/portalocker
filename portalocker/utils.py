@@ -45,6 +45,7 @@ import atexit
 import collections.abc
 import contextlib
 import errno
+import inspect
 import logging
 import os
 import pathlib
@@ -54,6 +55,7 @@ import time
 import typing
 import warnings
 import weakref
+from types import FrameType
 
 from . import constants, exceptions, portalocker, types
 from .types import Filename, Mode
@@ -211,13 +213,16 @@ class LockBase(  # pragma: no cover
         fail_when_locked: Whether to give up as soon as the *first* attempt
             finds the lock taken, instead of retrying until `timeout`
             expires. Defaults to `DEFAULT_FAIL_WHEN_LOCKED` (`False`,
-            i.e. retry). Note that it changes the exception as well as the
-            timing: a failure with `fail_when_locked` raises
-            `AlreadyLocked`, whereas exhausting the timeout re-raises the
-            last `LockException` from the underlying locking call. The
-            distinction matters when several processes race to create the
-            same file and you would rather hear about the contention
-            immediately than a handful of seconds later.
+            i.e. retry). Either way a lock that stays contended surfaces
+            as `AlreadyLocked`: with `fail_when_locked` after the first
+            attempt, without it once the timeout runs out. Contention is
+            also the only condition that is retried at all. Any other
+            failure, such as a `LockException` from a backend that
+            cannot lock the file, is permanent and propagates
+            immediately instead of burning the timeout. The timing
+            matters when several processes race to create the same file
+            and you would rather hear about the contention immediately
+            than a handful of seconds later.
 
     Note:
         Every one of the three is also a per-call argument of `acquire`.
@@ -313,8 +318,11 @@ class LockBase(  # pragma: no cover
         fixed schedule instead of a fixed pause: attempt ``i`` sleeps until
         ``i * check_interval`` seconds have passed since the clock started,
         so a slow attempt eats into its own interval rather than adding to
-        it. The sleep never drops below a millisecond, which keeps a
-        ``check_interval`` of ``0`` from spinning the CPU flat out.
+        it. A sleep is also capped at the time left until the deadline, so
+        a ``check_interval`` larger than the remaining `timeout` cannot
+        stretch the total wait past the timeout itself. The sleep never
+        drops below a millisecond, which keeps a ``check_interval`` of
+        ``0`` from spinning the CPU flat out.
 
         One consequence worth knowing: because the sleep trails the yield,
         attempts ``0`` and ``1`` both happen right away, and only from
@@ -337,14 +345,20 @@ class LockBase(  # pragma: no cover
         yield 0
         i = 0
 
-        start_time = time.perf_counter()
-        while start_time + f_timeout > time.perf_counter():
+        start_time: float = time.perf_counter()
+        deadline: float = start_time + f_timeout
+        while deadline > time.perf_counter():
             i += 1
             yield i
 
-            # Take low lock checks into account to stay within the interval
-            since_start_time = time.perf_counter() - start_time
-            time.sleep(max(0.001, (i * f_check_interval) - since_start_time))
+            # Take slow lock checks into account to stay within the
+            # interval, and never sleep past the deadline itself: a
+            # check_interval larger than the remaining timeout would
+            # otherwise overshoot the timeout by up to a full interval.
+            now: float = time.perf_counter()
+            scheduled: float = (i * f_check_interval) - (now - start_time)
+            remaining: float = deadline - now
+            time.sleep(max(0.001, min(scheduled, remaining)))
 
     @abc.abstractmethod
     def release(self) -> None:
@@ -406,6 +420,64 @@ class LockBase(  # pragma: no cover
         self.release()
 
 
+def _stacklevel_beyond_module() -> int:
+    """Return the `warnings.warn` stacklevel of the first foreign frame.
+
+    Computed for the caller: starting from the function that called this
+    helper, every consecutive stack frame that still lives in this
+    module is skipped, and the returned stacklevel makes
+    `warnings.warn`, invoked from that caller, attribute the warning to
+    the first frame outside the module. That keeps warnings pointing at
+    the user's own code no matter how many subclass constructors or
+    ``acquire`` wrappers sit in between: `Lock` warns through one
+    internal frame, `RLock` and `TemporaryFileLock` through two,
+    `PidFileLock` through three.
+
+    Python 3.12 grew ``warnings.warn(skip_file_prefixes=...)`` for
+    exactly this job. This helper is the 3.10 compatible spelling.
+
+    Returns:
+        The stacklevel to pass to `warnings.warn` from the caller's
+        frame, at least ``1``. Falls back to ``1``, which names the
+        caller itself, when the interpreter offers no frame
+        introspection (CPython always does).
+    """
+    frame: FrameType | None = inspect.currentframe()
+    if frame is None:  # pragma: no cover - non-CPython fallback
+        return 1
+    # Start at the caller of this helper: stacklevel 1 is its own frame.
+    frame = frame.f_back
+    stacklevel: int = 1
+    while frame is not None and frame.f_code.co_filename == __file__:
+        stacklevel += 1
+        frame = frame.f_back
+    return stacklevel
+
+
+def _restore_positional_writes(fh: types.IO) -> None:  # pragma: not-posix
+    """Clear the kernel append flag so ``fh`` honours seek positions.
+
+    `Lock` opens a mode containing ``w`` as ``a`` to defer the truncation
+    until the lock is held, but ``O_APPEND`` makes the kernel ignore the
+    seek position on every ``write``: ``fh.write('x'); fh.seek(0);
+    fh.write('y')`` yields ``'xy'`` where plain ``open(mode='w')`` yields
+    ``'y'``. Clearing the flag after the truncation restores the write
+    semantics the caller asked for.
+
+    POSIX only: Windows has no ``fcntl`` and offers no way to drop the
+    append flag from an open handle, so there the substitution keeps
+    append semantics and is documented instead.
+
+    Args:
+        fh: The open, locked, already truncated filehandle.
+    """
+    import fcntl
+
+    fd: int = fh.fileno()
+    flags: int = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_APPEND)
+
+
 class Lock(LockBase[typing.IO[typing.Any]]):
     """Lock manager with built-in timeout.
 
@@ -426,6 +498,18 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         the lock is free. That is why a mode containing ``w`` is silently
         turned into ``a`` and the truncation is deferred to
         `Lock._prepare_fh`, which runs only after the lock has been taken.
+
+    Warning:
+        The ``a`` substitution has a side effect on Windows: the handle
+        keeps the kernel's append semantics, so every ``write`` lands at
+        the end of the file no matter where you ``seek``. A positioned
+        rewrite such as ``fh.write('x'); fh.seek(0); fh.write('y')``
+        produces ``'xy'`` there, where plain ``open(mode='w')`` produces
+        ``'y'``. On POSIX portalocker clears the append flag once the
+        truncation is done, so ``w`` and ``w+`` behave exactly like the
+        builtin ``open``. If you need positioned writes on Windows,
+        reopen the file after acquiring, or lock with mode ``r+`` and
+        truncate explicitly.
 
     Note:
         Locking is per open filehandle, not per process. Two `Lock`
@@ -450,6 +534,12 @@ class Lock(LockBase[typing.IO[typing.Any]]):
     flags: constants.LockFlags
     raise_on_release_error: bool
     file_open_kwargs: dict[str, typing.Any]
+    #: whether the "timeout has no effect in blocking mode" warning has
+    #: already been emitted for this instance. It fires at most once per
+    #: lock, at construction or on the first `acquire` with a timeout.
+    #: A real class-level default, so a subclass that skips
+    #: `Lock.__init__` can still `acquire` without an `AttributeError`
+    _timeout_warned: bool = False
 
     def __init__(
         self,
@@ -495,20 +585,14 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                 `flags`, i.e. flags without ``LockFlags.NON_BLOCKING``.
                 The operating system blocks inside the first attempt in
                 that case, so there is nothing left for the timeout to do.
+                The warning is emitted at most once per instance: here,
+                or on the first `acquire` that passes a timeout.
         """
         if 'w' in mode:
             truncate = True
             mode = typing.cast(Mode, mode.replace('w', 'a'))
         else:
             truncate = False
-
-        if timeout is None:
-            timeout = DEFAULT_TIMEOUT
-        elif not (flags & constants.LockFlags.NON_BLOCKING):
-            warnings.warn(
-                'timeout has no effect in blocking mode',
-                stacklevel=1,
-            )  # pragma: nt-no-pywin32
 
         self.fh = None
         self.filename = str(filename)
@@ -517,7 +601,42 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         self.flags = flags
         self.raise_on_release_error = raise_on_release_error
         self.file_open_kwargs = file_open_kwargs
+
+        self._timeout_warned = False
+        if timeout is None:
+            timeout = DEFAULT_TIMEOUT
+        else:
+            self._warn_blocking_timeout(timeout)
         super().__init__(timeout, check_interval, fail_when_locked)
+
+    def _warn_blocking_timeout(self, timeout: float | None) -> None:
+        """Warn that `timeout` cannot work with blocking flags, only once.
+
+        With flags lacking ``LockFlags.NON_BLOCKING`` the operating
+        system waits inside the locking call itself, so a timeout has
+        nothing left to do. The warning fires at most once per instance,
+        whether that happens at construction or on the first `acquire`
+        that passes a timeout. Its stacklevel is computed by
+        `_stacklevel_beyond_module`, so it names the caller's own file
+        for every entry point: a `Lock` built directly, the `RLock`,
+        `TemporaryFileLock` and `PidFileLock` constructors, and the
+        ``acquire`` chains of all four.
+
+        Args:
+            timeout: The caller-provided timeout, or `None` when the
+                caller did not pass one, which never warns.
+        """
+        if (
+            timeout is None
+            or self._timeout_warned
+            or bool(self.flags & constants.LockFlags.NON_BLOCKING)
+        ):
+            return
+        self._timeout_warned = True  # pragma: nt-no-pywin32
+        warnings.warn(
+            'timeout has no effect in blocking mode',
+            stacklevel=_stacklevel_beyond_module(),
+        )  # pragma: nt-no-pywin32
 
     def acquire(
         self,
@@ -542,20 +661,28 @@ class Lock(LockBase[typing.IO[typing.Any]]):
 
         Raises:
             ~portalocker.exceptions.AlreadyLocked: The first attempt found the
-                file locked and `fail_when_locked` was set.
-            ~portalocker.exceptions.LockException: Retrying did not help and
-                `timeout` expired; the exception is the last one the locking
-                call produced. Also raised, wrapping the original, when
-                something other than contention goes wrong, such as the locking
-                backend refusing the flags.
-            OSError: Opening the file failed, for instance because the
-                directory does not exist or the mode is not permitted.
-                Only locking failures are translated; failures from `open`
-                propagate untouched.
+                file locked and `fail_when_locked` was set, or `timeout`
+                expired while the file stayed locked by somebody else.
+                Only contention is retried: the locking backend signals it
+                by raising `AlreadyLocked` itself.
+            ~portalocker.exceptions.LockException: The backend failed for
+                a reason other than contention, such as a filesystem
+                without locking support or refused flags. This is
+                permanent, so it is raised immediately without burning
+                the timeout, and without being dressed up as
+                `AlreadyLocked`. A non-portalocker error from the locking
+                call is wrapped in this type as well.
+            OSError: Opening or preparing the file failed, for instance
+                because the directory does not exist or the mode is not
+                permitted. Only locking failures are translated. Failures
+                from `open` and from the deferred truncation propagate
+                untouched. When the failure happens after the lock was
+                taken, the file is unlocked and closed again first.
 
         Warns:
             UserWarning: A `timeout` was passed while the lock uses
-                blocking flags, where it has no effect.
+                blocking flags, where it has no effect. Emitted at most
+                once per instance, counting the constructor's warning.
 
         Example:
             >>> import portalocker
@@ -566,15 +693,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             >>> lock.release()
         """
         fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
-
-        if (
-            not (self.flags & constants.LockFlags.NON_BLOCKING)
-            and timeout is not None
-        ):
-            warnings.warn(
-                'timeout has no effect in blocking mode',
-                stacklevel=1,
-            )  # pragma: nt-no-pywin32
+        self._warn_blocking_timeout(timeout)
 
         # If we already have a filehandle, return it
         fh = self.fh
@@ -606,12 +725,14 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                 # Try to lock
                 fh = self._get_lock(fh)
                 break
-            except exceptions.LockException as exc:
-                # Python will automatically remove the variable from memory
-                # unless you save it in a different location
+            except exceptions.AlreadyLocked as exc:
+                # Somebody else holds the lock. Retrying can help here,
+                # so keep trying until the timeout expires. Python would
+                # remove the exception from memory once the handler ends
+                # unless it is saved in a different location.
                 exception = exc
 
-                # We already tried to the get the lock
+                # We already tried to get the lock
                 # If fail_when_locked is True, stop trying
                 if fail_when_locked:
                     try_close()
@@ -628,6 +749,15 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                         fh=exc.fh,
                         holder_pid=getattr(exc, 'holder_pid', None),
                     ) from exc
+            except exceptions.LockException:
+                # The backend failed for a reason other than contention:
+                # a filesystem without locking support, no more locks
+                # available, refused flags. Retrying cannot change that,
+                # so fail fast with the backend's own exception instead
+                # of burning the timeout or claiming somebody holds the
+                # lock.
+                try_close()
+                raise
             except Exception as exc:
                 # Something went wrong with the locking mechanism.
                 # Wrap in a LockException and re-raise:
@@ -642,10 +772,39 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             raise exception
 
         # Prepare the filehandle (truncate if needed)
-        fh = self._prepare_fh(fh)
+        fh = self._prepare_locked_fh(fh)
 
         self.fh = fh
         return fh
+
+    def _prepare_locked_fh(self, fh: types.IO) -> types.IO:
+        """Run `Lock._prepare_fh`, rolling the lock back when it fails.
+
+        Preparation runs after the lock was taken, so a failure there,
+        for example a truncate refused by an append-only file, must give
+        the lock back: the caller's traceback may keep `fh` alive
+        indefinitely, and a close alone would leave the file locked for
+        as long as the exception is referenced. The handle is therefore
+        unlocked explicitly and closed before the original error
+        escapes, both best effort so they cannot mask that error.
+
+        Args:
+            fh: The freshly locked filehandle.
+
+        Returns:
+            The prepared filehandle, on success.
+
+        Raises:
+            Exception: Whatever `Lock._prepare_fh` raised, unchanged.
+        """
+        try:
+            return self._prepare_fh(fh)
+        except Exception:
+            with contextlib.suppress(Exception):
+                portalocker.unlock(fh)
+            with contextlib.suppress(Exception):
+                fh.close()
+            raise
 
     def __enter__(self) -> typing.IO[typing.Any]:
         """Acquire the lock and return the filehandle to bind with ``as``.
@@ -799,7 +958,10 @@ class Lock(LockBase[typing.IO[typing.Any]]):
 
         Truncation happens here rather than in `open`, so that a lock
         opened with mode ``w`` cannot discard the contents of a file
-        somebody else is holding.
+        somebody else is holding. On POSIX the kernel append flag the
+        ``a`` substitution introduced is cleared again afterwards, so the
+        handle honours seek positions exactly like the ``w`` mode the
+        caller asked for, see `_restore_positional_writes`.
 
         Args:
             fh: The locked filehandle.
@@ -811,6 +973,8 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         if self.truncate:
             fh.seek(0)
             fh.truncate(0)
+            if os.name == 'posix':  # pragma: no branch - platform constant
+                _restore_positional_writes(fh)  # pragma: not-posix
 
         return fh
 
@@ -847,7 +1011,7 @@ class RLock(Lock):
         self,
         filename: Filename,
         mode: Mode = 'a',
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float | None = None,
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = False,
         flags: constants.LockFlags = LOCK_METHOD,
@@ -857,7 +1021,9 @@ class RLock(Lock):
         Args:
             filename: Path of the file to lock.
             mode: Open mode for the file, see `Lock`.
-            timeout: See `LockBase`.
+            timeout: See `LockBase`. `None` selects `DEFAULT_TIMEOUT`.
+                Only an explicit value counts as "a timeout was given"
+                for the blocking mode warning documented on `Lock`.
             check_interval: See `LockBase`.
             fail_when_locked: See `LockBase`.
             flags: Locking flags, see `Lock`.
@@ -903,12 +1069,22 @@ class RLock(Lock):
             ~portalocker.exceptions.AlreadyLocked: As `Lock.acquire`, on the
                 first call only.
             ~portalocker.exceptions.LockException: As `Lock.acquire`, on the
-                first call only.
+                first call only. Also raised when the instance claims to
+                be acquired but holds no filehandle, which means the
+                bookkeeping was corrupted, for example by tampering with
+                the private state or a partially failed release. An
+                ``assert`` would vanish under ``python -O`` and hand the
+                caller `None` instead of a filehandle, so this is a real
+                exception.
             OSError: As `Lock.acquire`, on the first call only.
         """
         fh: typing.IO[typing.Any]
         if self._acquire_count >= 1:
-            assert self.fh is not None
+            if self.fh is None:
+                raise exceptions.LockException(
+                    'RLock claims to be acquired but holds no filehandle, '
+                    'its state was corrupted. Refusing to hand out None',
+                )
             fh = self.fh
         else:
             fh = super().acquire(timeout, check_interval, fail_when_locked)
@@ -995,7 +1171,7 @@ class TemporaryFileLock(Lock):
     def __init__(
         self,
         filename: str = '.lock',
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float | None = None,
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = True,
         flags: constants.LockFlags = LOCK_METHOD,
@@ -1005,7 +1181,9 @@ class TemporaryFileLock(Lock):
         Args:
             filename: Path of the lock file, ``'.lock'`` by default. It is
                 created on acquire and removed on release.
-            timeout: See `LockBase`.
+            timeout: See `LockBase`. `None` selects `DEFAULT_TIMEOUT`.
+                Only an explicit value counts as "a timeout was given"
+                for the blocking mode warning documented on `Lock`.
             check_interval: See `LockBase`.
             fail_when_locked: See `LockBase`. Defaults to `True` here,
                 unlike `Lock`: a lock file that exists usually means a live
@@ -1235,7 +1413,7 @@ class PidFileLock(TemporaryFileLock):
     def __init__(
         self,
         filename: str = '.pid',
-        timeout: float = DEFAULT_TIMEOUT,
+        timeout: float | None = None,
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = True,
         flags: constants.LockFlags = LOCK_METHOD,
@@ -1245,7 +1423,8 @@ class PidFileLock(TemporaryFileLock):
         Args:
             filename: Path of the PID file, ``'.pid'`` by default. The
                 sidecar lock file is this path with ``.lock`` appended.
-            timeout: See `LockBase`. Only has an effect together with
+            timeout: See `LockBase`. `None` selects `DEFAULT_TIMEOUT`.
+                Only has an effect together with
                 ``fail_when_locked=False``.
             check_interval: See `LockBase`.
             fail_when_locked: See `LockBase`. Defaults to `True`, as for

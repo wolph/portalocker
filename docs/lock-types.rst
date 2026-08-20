@@ -52,7 +52,19 @@ Guarantees:
   on the same path in the same process still contend with each other.
 - A mode containing ``w`` is silently rewritten to ``a`` and the
   truncation is deferred until after the lock is taken, so an existing
-  holder's data is never discarded before contention is checked.
+  holder's data is never discarded before contention is checked. On
+  POSIX the kernel append flag is cleared again once the truncation is
+  done, so the handle honours seek positions exactly like a plain
+  ``open(mode='w')``.
+
+On Windows that ``a`` substitution is visible: the handle keeps append
+semantics, so every ``write`` lands at the end of the file no matter
+where you ``seek``. ``fh.write('x'); fh.seek(0); fh.write('y')``
+produces ``'xy'`` there, where the builtin ``open(mode='w')`` produces
+``'y'``. Sequential writers never notice, but a positioned rewrite
+silently corrupts its own output. If you need positioned writes on
+Windows, reopen the file after acquiring, or lock with mode ``r+`` and
+truncate explicitly once you hold the lock.
 
 Costs:
 
