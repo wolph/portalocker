@@ -388,9 +388,7 @@ def test_open_atomic_retries_a_colliding_temporary_name(
         return tokens.pop(0)
 
     first_token_hex: str = tokens[0].hex()
-    colliding: pathlib.Path = (
-        tmp_path / f'.destination.bin.{first_token_hex}.tmp'
-    )
+    colliding: pathlib.Path = tmp_path / f'.portalocker.{first_token_hex}.tmp'
     colliding.write_bytes(b'occupied')
     monkeypatch.setattr(os, 'urandom', fake_urandom)
 
@@ -402,6 +400,78 @@ def test_open_atomic_retries_a_colliding_temporary_name(
     assert tokens == [], 'expected exactly one retry'
     assert target.read_bytes() == b'payload'
     assert colliding.read_bytes() == b'occupied'
+
+
+def test_open_atomic_bounds_the_temporary_name_retries(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken entropy source must surface as OSError, not a hang.
+
+    With every random name colliding, the bounded retry gives up after
+    ``_TEMP_NAME_ATTEMPTS`` attempts. The error is a plain ``OSError``
+    rather than ``FileExistsError``, so it cannot be mistaken for the
+    destination already existing.
+    """
+    target: pathlib.Path = tmp_path / 'destination.bin'
+    urandom_calls: list[int] = []
+
+    def constant_urandom(count: int) -> bytes:
+        urandom_calls.append(count)
+        return b'\x00' * count
+
+    colliding: pathlib.Path = tmp_path / f'.portalocker.{"00" * 8}.tmp'
+    colliding.write_bytes(b'occupied')
+    monkeypatch.setattr(os, 'urandom', constant_urandom)
+    monkeypatch.setattr(portalocker.utils, '_TEMP_NAME_ATTEMPTS', 3)
+
+    with (
+        pytest.raises(OSError, match='no usable temporary file name') as (
+            exc_info
+        ),
+        portalocker.open_atomic(target),
+    ):
+        pass
+
+    assert type(exc_info.value) is OSError
+    assert len(urandom_calls) == 3
+    assert not target.exists()
+    assert colliding.read_bytes() == b'occupied'
+
+
+@pytest.mark.skipif(
+    os.name == 'nt',
+    reason='Windows MAX_PATH limits are unrelated to the temp name pattern',
+)
+@pytest.mark.parametrize('use_fallback', [False, True])
+def test_open_atomic_supports_maximum_length_basenames(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_fallback: bool,
+) -> None:
+    """A 255 byte destination basename must publish successfully.
+
+    The temporary name is a fixed 33 bytes and must not embed the
+    destination's basename: a pattern that prepends the destination name
+    pushes any basename of 234+ bytes over the filesystem's 255 byte
+    limit and fails with ``ENAMETOOLONG``, where 3.2.0 published fine.
+    Covers both the hard link path and the rename fallback.
+    """
+    target: pathlib.Path = tmp_path / ('a' * 255)
+    if use_fallback:
+
+        def fail_link(source: str, destination: pathlib.Path) -> None:
+            raise OSError(errno.ENOTSUP, 'hard links unsupported')
+
+        monkeypatch.setattr(os, 'link', fail_link)
+
+    with portalocker.open_atomic(target) as file_handle:
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'long name payload')
+        assert written == len(b'long name payload')
+
+    assert target.read_bytes() == b'long name payload'
+    assert set(tmp_path.iterdir()) == {target}
 
 
 def test_open_atomic_never_touches_the_process_umask(

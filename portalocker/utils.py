@@ -137,6 +137,13 @@ def _annotate_preserved_payload(error: BaseException, temp_name: str) -> None:
         error.args = (*error.args, note)
 
 
+#: Upper bound on the random temporary names `_open_exclusive_temp`
+#: tries before giving up, mirroring `tempfile.TMP_MAX`. With 64 bits of
+#: entropy per name it only trips when the entropy source is broken, and
+#: then an `OSError` beats an endless loop.
+_TEMP_NAME_ATTEMPTS: int = 10000
+
+
 def _open_exclusive_temp(
     path: pathlib.Path,
     binary: bool,
@@ -152,8 +159,13 @@ def _open_exclusive_temp(
     process-global mutation that briefly leaks mode ``0o777`` file
     creation to every other thread). No global state is touched here.
 
-    ``O_EXCL`` guards the randomly generated name against collisions and
-    symlinks: an occupied name is rolled again instead of reused.
+    The temporary basename is a fixed 33 bytes
+    (``.portalocker.<16 hex>.tmp``) and deliberately does not embed the
+    destination's name: a destination basename near the usual 255 byte
+    filesystem limit must not push the temporary name over it. ``O_EXCL``
+    guards the randomly generated name against collisions and symlinks:
+    an occupied name is rolled again, at most `_TEMP_NAME_ATTEMPTS`
+    times.
 
     Args:
         path: The destination the temporary file will be published to.
@@ -164,15 +176,22 @@ def _open_exclusive_temp(
 
     Returns:
         The open filehandle and the temporary file's path.
+
+    Raises:
+        OSError: No free temporary name was found within
+            `_TEMP_NAME_ATTEMPTS` attempts, which practically means the
+            randomness source is broken. Raised as plain `OSError`, never
+            `FileExistsError`, so it cannot be mistaken for the
+            destination existing.
     """
 
     def _exclusive_opener(opener_path: str, flags: int) -> int:
         """Open ``opener_path`` exclusively with kernel-applied mode."""
         return os.open(opener_path, flags | os.O_EXCL, 0o666)
 
-    while True:
+    for _ in range(_TEMP_NAME_ATTEMPTS):
         temp_name: str = str(
-            path.parent / f'.{path.name}.{os.urandom(8).hex()}.tmp',
+            path.parent / f'.portalocker.{os.urandom(8).hex()}.tmp',
         )
         try:
             # Not a `with`: the handle is handed back to `open_atomic`,
@@ -186,6 +205,10 @@ def _open_exclusive_temp(
             # Another actor owns this random name, so roll a new one.
             continue
         return temp_fh, temp_name
+
+    raise OSError(
+        f'no usable temporary file name found in {str(path.parent)!r}',
+    )
 
 
 def _publish_exclusive(temp_name: str, path: pathlib.Path) -> None:
@@ -1157,8 +1180,12 @@ class TemporaryFileLock(Lock):
 
     That hook tracks instances through a weak mapping, so it neither
     keeps a lock alive nor grows with the number of locks a process has
-    ever constructed. A lock that is collected earlier simply drops out of
-    the mapping and leaves the hook with nothing to do. The hook also only
+    ever constructed. The exit cleanup therefore needs the wrapper to
+    still be referenced: a lock collected earlier drops out of the
+    mapping and leaves the hook with nothing to do, so a still-locked,
+    discarded wrapper leaves its file behind at exit. The OS lock itself
+    is released once the filehandle is closed or collected, so the
+    leftover is litter rather than a held lock. The hook also only
     releases locks constructed by the exiting process itself: a forked
     child inherits the parent's live locks, and releasing them on the
     child's exit would unlink the files of a lock the parent still holds.
