@@ -507,10 +507,16 @@ def test_pidfilelock_unlinks_sidecar_before_unlock(tmp_path, monkeypatch):
     os.name == 'nt',
     reason='POSIX-only release ordering',
 )
-def test_pidfilelock_unlocks_even_when_unlink_fails(tmp_path, monkeypatch):
-    """Fix round 1: a non-FileNotFoundError unlink failure must still
-    propagate, but the sidecar lock must be freed regardless — otherwise the
-    error would leave the sidecar held forever.
+def test_pidfilelock_unlocks_even_when_unlink_fails(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """A non-FileNotFoundError unlink failure must free the sidecar lock
+    regardless, and with ``raise_on_release_error`` unset it is
+    suppressed and logged rather than raised, matching
+    `TemporaryFileLock.release`. The raising strict-mode side is covered
+    by `test_pidfilelock_constructor_accepts_raise_on_release_error`.
     """
     lock_file = tmp_path / 'pidfilelock_unlink_fail.pid'
     lock = utils.PidFileLock(str(lock_file))
@@ -520,13 +526,13 @@ def test_pidfilelock_unlocks_even_when_unlink_fails(tmp_path, monkeypatch):
         raise PermissionError(f'unlink denied for {path!r}')
 
     monkeypatch.setattr(os, 'unlink', failing_unlink)
-    # Keep ``excinfo`` (and with it the traceback) alive: in real usage the
-    # propagating exception pins the frame that references the sidecar lock,
-    # preventing a garbage-collection release from masking the leak.
-    with pytest.raises(PermissionError) as excinfo:
+    with caplog.at_level(logging.WARNING, logger=utils.logger.name):
         lock.release()
     monkeypatch.undo()
-    assert excinfo.value is not None
+    assert any(
+        'suppressed error while removing' in record.message
+        for record in caplog.records
+    )
 
     # The unlock ran and the reference is gone.
     assert lock._inner_lock is None
@@ -1533,3 +1539,379 @@ def test_pidfilelock_atexit_releases_lock_acquired_in_forked_child(
     assert completed.stdout == ''
     assert completed.stderr == ''
     assert not pid_path.exists()
+
+
+def _fail_pid_unlink(
+    monkeypatch: pytest.MonkeyPatch,
+    pid_file: str,
+    lockfile_too: bool = False,
+) -> None:
+    """Make ``os.unlink`` raise `PermissionError` for the PID file, and
+    optionally for the sidecar as well.
+    """
+    real_unlink = os.unlink
+
+    def failing_unlink(
+        target: typing.Any,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> None:
+        if str(target) == pid_file or (
+            lockfile_too and str(target) == f'{pid_file}.lock'
+        ):
+            raise PermissionError(f'unlink denied for {target!r}')
+        real_unlink(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'unlink', failing_unlink)
+
+
+def test_pidfilelock_exit_preserves_body_exception_by_default(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A release failure in ``__exit__`` must not replace the body's own
+    exception. With ``raise_on_release_error`` unset the unlink failure
+    is suppressed entirely, exactly like `Lock.__exit__`; the historical
+    ``__exit__`` called ``release()`` bare and the `PermissionError`
+    replaced the ``ValueError``.
+    """
+    pid_file = str(tmp_path / 'mask_default.pid')
+    lock = utils.PidFileLock(pid_file)
+    with pytest.raises(ValueError, match='body failed'):
+        with lock as holder_pid:
+            assert holder_pid is None
+            _fail_pid_unlink(monkeypatch, pid_file)
+            raise ValueError('body failed')
+    monkeypatch.undo()
+    assert lock._inner_lock is None
+
+
+def test_pidfilelock_exit_strict_chains_release_error_onto_body_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """With ``raise_on_release_error`` set the body exception still wins
+    and the release failure is attached as its ``__context__``, matching
+    the `Lock.__exit__` masking guarantee.
+    """
+    pid_file = str(tmp_path / 'mask_strict.pid')
+    lock = utils.PidFileLock(pid_file)
+    lock.raise_on_release_error = True
+    with pytest.raises(ValueError, match='body failed') as exc_info:
+        with lock as holder_pid:
+            assert holder_pid is None
+            _fail_pid_unlink(monkeypatch, pid_file)
+            raise ValueError('body failed')
+    monkeypatch.undo()
+    assert isinstance(exc_info.value.__context__, PermissionError)
+    notes: list[str] = getattr(exc_info.value, '__notes__', [])
+    assert any('release failed' in note for note in notes)
+
+
+def test_pidfilelock_exit_strict_raises_release_error_with_clean_body(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """With a clean body and ``raise_on_release_error`` set the unlink
+    failure surfaces from ``__exit__``, as `Lock.__exit__` promises.
+    """
+    pid_file = str(tmp_path / 'strict_clean.pid')
+    lock = utils.PidFileLock(pid_file)
+    lock.raise_on_release_error = True
+    with pytest.raises(PermissionError, match='unlink denied'):
+        with lock as holder_pid:
+            assert holder_pid is None
+            _fail_pid_unlink(monkeypatch, pid_file)
+    monkeypatch.undo()
+    assert lock._inner_lock is None
+    os.unlink(pid_file)
+
+
+def test_pidfilelock_exit_default_suppresses_release_error(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    """With ``raise_on_release_error`` unset a clean body exits cleanly
+    even when the unlink fails; the failure is logged instead.
+    """
+    pid_file = str(tmp_path / 'default_clean.pid')
+    lock = utils.PidFileLock(pid_file)
+    with caplog.at_level(logging.WARNING, logger=utils.logger.name):
+        with lock as holder_pid:
+            assert holder_pid is None
+            _fail_pid_unlink(monkeypatch, pid_file)
+    monkeypatch.undo()
+    assert lock._inner_lock is None
+    assert any(
+        'suppressed error while removing' in record.message
+        for record in caplog.records
+    )
+    os.unlink(pid_file)
+
+
+def test_pidfilelock_fail_closed_preserves_body_exception(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The fail-closed adapter routes through the same ``__exit__``, so
+    the masking guarantee holds there as well.
+    """
+    pid_file = str(tmp_path / 'mask_fail_closed.pid')
+    lock = utils.PidFileLock(pid_file)
+    lock.raise_on_release_error = True
+    with pytest.raises(ValueError, match='body failed') as exc_info:
+        with lock.fail_closed():
+            _fail_pid_unlink(monkeypatch, pid_file)
+            raise ValueError('body failed')
+    monkeypatch.undo()
+    assert isinstance(exc_info.value.__context__, PermissionError)
+
+
+def test_pidfilelock_constructor_accepts_raise_on_release_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The constructor must accept and forward ``raise_on_release_error``
+    instead of raising `TypeError`; the docs have described strict mode
+    for this class all along.
+    """
+    pid_file = str(tmp_path / 'ctor_strict.pid')
+    lock = utils.PidFileLock(pid_file, raise_on_release_error=True)
+    assert lock.raise_on_release_error is True
+    lock.acquire()
+    _fail_pid_unlink(monkeypatch, pid_file)
+    with pytest.raises(PermissionError, match='unlink denied'):
+        lock.release()
+    monkeypatch.undo()
+    assert lock._inner_lock is None
+    os.unlink(pid_file)
+
+
+def test_pidfilelock_posix_strict_reports_both_failing_unlinks(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    """When both the PID file and the sidecar refuse to unlink, strict
+    mode raises the first failure and the second is logged, so neither
+    error disappears and the second removal was still attempted.
+    """
+    pid_file = str(tmp_path / 'both_fail.pid')
+    lock = utils.PidFileLock(pid_file, raise_on_release_error=True)
+    lock.acquire()
+    _fail_pid_unlink(monkeypatch, pid_file, lockfile_too=True)
+    with (
+        caplog.at_level(logging.WARNING, logger=utils.logger.name),
+        pytest.raises(PermissionError, match='both_fail.pid'),
+    ):
+        lock.release()
+    monkeypatch.undo()
+    assert any(
+        'suppressed additional error' in record.message
+        for record in caplog.records
+    )
+    assert lock._inner_lock is None
+    os.unlink(pid_file)
+    os.unlink(f'{pid_file}.lock')
+
+
+def test_pidfilelock_posix_strict_unlock_error_propagates_alone(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A strict release whose unlinks succeed but whose sidecar unlock
+    fails must raise the unlock error on its own.
+    """
+    pid_file = str(tmp_path / 'unlock_fail.pid')
+    lock = utils.PidFileLock(pid_file, raise_on_release_error=True)
+    lock.acquire()
+
+    def failing_unlock(fh, *args, **kwargs):
+        raise portalocker.LockException('unlock refused')
+
+    monkeypatch.setattr(utils.portalocker, 'unlock', failing_unlock)
+    with pytest.raises(portalocker.LockException, match='unlock refused'):
+        lock.release()
+    monkeypatch.undo()
+    assert lock._inner_lock is None
+
+
+def test_pidfilelock_posix_strict_unlock_error_chains_unlink_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A strict release where the unlink and the sidecar unlock both fail
+    must raise the unlock error chained from the unlink error, so neither
+    failure disappears.
+    """
+    pid_file = str(tmp_path / 'chain_fail.pid')
+    lock = utils.PidFileLock(pid_file, raise_on_release_error=True)
+    lock.acquire()
+    _fail_pid_unlink(monkeypatch, pid_file)
+
+    def failing_unlock(fh, *args, **kwargs):
+        raise portalocker.LockException('unlock refused')
+
+    monkeypatch.setattr(utils.portalocker, 'unlock', failing_unlock)
+    with pytest.raises(
+        portalocker.LockException,
+        match='unlock refused',
+    ) as exc_info:
+        lock.release()
+    monkeypatch.undo()
+    assert isinstance(exc_info.value.__cause__, PermissionError)
+    assert lock._inner_lock is None
+    os.unlink(pid_file)
+
+
+def test_pidfilelock_nt_release_tolerates_missing_pid_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The Windows release path must treat an already-removed PID file as
+    fine and still finish the rest of the teardown.
+    """
+    pid_file = str(tmp_path / 'nt_missing_pid.pid')
+    lock = utils.PidFileLock(pid_file)
+    lock.acquire()
+    os.unlink(pid_file)  # a cleaner already removed the PID file
+    monkeypatch.setattr(os, 'name', 'nt')
+    try:
+        lock.release()
+    finally:
+        monkeypatch.undo()
+    assert not os.path.isfile(f'{pid_file}.lock')
+    assert lock._inner_lock is None
+
+
+def test_pidfilelock_nt_strict_release_raises_pid_unlink_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """The Windows release path must report a failing PID file unlink
+    through the ``raise_on_release_error`` contract instead of silently
+    swallowing it as it did before 4.1.1.
+    """
+    pid_file = str(tmp_path / 'nt_strict.pid')
+    lock = utils.PidFileLock(pid_file, raise_on_release_error=True)
+    lock.acquire()
+    _fail_pid_unlink(monkeypatch, pid_file)
+    monkeypatch.setattr(os, 'name', 'nt')
+    with pytest.raises(PermissionError, match='nt_strict.pid'):
+        lock.release()
+    monkeypatch.undo()
+    assert lock._inner_lock is None
+    os.unlink(pid_file)
+
+
+def test_pidfilelock_nt_default_release_logs_sidecar_unlink_error(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    """The Windows release path must capture a failing sidecar unlink
+    like the POSIX path does, logging it under the default flag.
+    """
+    pid_file = str(tmp_path / 'nt_sidecar_fail.pid')
+    lock = utils.PidFileLock(pid_file)
+    lock.acquire()
+    real_unlink = os.unlink
+
+    def failing_sidecar_unlink(target, *args, **kwargs):
+        if str(target) == f'{pid_file}.lock':
+            raise PermissionError(f'unlink denied for {target!r}')
+        real_unlink(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'unlink', failing_sidecar_unlink)
+    monkeypatch.setattr(os, 'name', 'nt')
+    with caplog.at_level(logging.WARNING, logger=utils.logger.name):
+        lock.release()
+    monkeypatch.undo()
+    assert any(
+        'suppressed error while removing' in record.message
+        for record in caplog.records
+    )
+    assert lock._inner_lock is None
+    os.unlink(f'{pid_file}.lock')
+
+
+def test_pidfilelock_nt_release_logs_second_unlink_error(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    """When the PID file and the sidecar both refuse to unlink on the
+    Windows path, the first failure is reported and the second is logged.
+    """
+    pid_file = str(tmp_path / 'nt_both_fail.pid')
+    lock = utils.PidFileLock(pid_file, raise_on_release_error=True)
+    lock.acquire()
+    _fail_pid_unlink(monkeypatch, pid_file, lockfile_too=True)
+    monkeypatch.setattr(os, 'name', 'nt')
+    with (
+        caplog.at_level(logging.WARNING, logger=utils.logger.name),
+        pytest.raises(PermissionError, match='nt_both_fail.pid'),
+    ):
+        lock.release()
+    monkeypatch.undo()
+    assert any(
+        'suppressed additional error' in record.message
+        for record in caplog.records
+    )
+    assert lock._inner_lock is None
+    os.unlink(pid_file)
+    os.unlink(f'{pid_file}.lock')
+
+
+def test_pidfilelock_nt_strict_unlock_error_propagates_alone(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A strict Windows release whose PID unlink succeeds but whose
+    sidecar unlock fails must raise the unlock error on its own.
+    """
+    pid_file = str(tmp_path / 'nt_unlock_fail.pid')
+    lock = utils.PidFileLock(pid_file, raise_on_release_error=True)
+    lock.acquire()
+
+    def failing_unlock(fh, *args, **kwargs):
+        raise portalocker.LockException('unlock refused')
+
+    monkeypatch.setattr(utils.portalocker, 'unlock', failing_unlock)
+    monkeypatch.setattr(os, 'name', 'nt')
+    with pytest.raises(portalocker.LockException, match='unlock refused'):
+        lock.release()
+    monkeypatch.undo()
+    assert lock._inner_lock is None
+    os.unlink(f'{pid_file}.lock')
+
+
+def test_pidfilelock_nt_strict_unlock_error_chains_unlink_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A strict Windows release where the PID unlink and the sidecar
+    unlock both fail must raise the unlock error chained from the unlink
+    error.
+    """
+    pid_file = str(tmp_path / 'nt_chain_fail.pid')
+    lock = utils.PidFileLock(pid_file, raise_on_release_error=True)
+    lock.acquire()
+    _fail_pid_unlink(monkeypatch, pid_file)
+
+    def failing_unlock(fh, *args, **kwargs):
+        raise portalocker.LockException('unlock refused')
+
+    monkeypatch.setattr(utils.portalocker, 'unlock', failing_unlock)
+    monkeypatch.setattr(os, 'name', 'nt')
+    with pytest.raises(
+        portalocker.LockException,
+        match='unlock refused',
+    ) as exc_info:
+        lock.release()
+    monkeypatch.undo()
+    assert isinstance(exc_info.value.__cause__, PermissionError)
+    assert lock._inner_lock is None
+    os.unlink(pid_file)
+    os.unlink(f'{pid_file}.lock')

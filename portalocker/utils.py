@@ -1073,10 +1073,10 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         in the traceback while the original is what propagates. `release`
         only raises when ``raise_on_release_error`` is set, but the
         protection holds either way, so even a subclass whose `release`
-        fails unexpectedly cannot mask the block's own exception. The one
-        subclass that sidesteps it is `PidFileLock`, which overrides
-        ``__exit__`` with its own ownership check and does not yet route
-        through this protection.
+        fails unexpectedly cannot mask the block's own exception.
+        `PidFileLock` overrides ``__exit__`` with an ownership check but
+        routes the actual release through this method, so the guarantee
+        covers it as well.
 
         Args:
             exc_type: Type of the exception leaving the block, if any.
@@ -1529,6 +1529,8 @@ class TemporaryFileLock(Lock):
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = True,
         flags: constants.LockFlags = LOCK_METHOD,
+        *,
+        raise_on_release_error: bool = False,
     ) -> None:
         """Configure the lock and arm the interpreter exit cleanup.
 
@@ -1544,6 +1546,11 @@ class TemporaryFileLock(Lock):
                 unlike `Lock`: a lock file that exists usually means a live
                 owner, so failing straight away is the more useful answer.
             flags: Locking flags, see `Lock`.
+            raise_on_release_error: Report errors from `release`, the
+                unlink included, instead of suppressing and logging
+                them. See `Lock`. Accepted here since 4.1.1; strict mode
+                used to require setting the attribute after
+                construction.
 
         Note:
             The mode is fixed to ``'w'``, so the file is emptied once the
@@ -1556,6 +1563,7 @@ class TemporaryFileLock(Lock):
             check_interval=check_interval,
             fail_when_locked=fail_when_locked,
             flags=flags,
+            raise_on_release_error=raise_on_release_error,
         )
         # Track the instance for the module level atexit hook. The weak
         # mapping keeps no strong reference, so garbage collection stays
@@ -1877,6 +1885,8 @@ class PidFileLock(TemporaryFileLock):
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = True,
         flags: constants.LockFlags = LOCK_METHOD,
+        *,
+        raise_on_release_error: bool = False,
     ) -> None:
         """Configure the lock and derive the sidecar lock file name.
 
@@ -1891,6 +1901,11 @@ class PidFileLock(TemporaryFileLock):
             fail_when_locked: See `LockBase`. Defaults to `True`, as for
                 `TemporaryFileLock`.
             flags: Locking flags applied to the sidecar file, see `Lock`.
+            raise_on_release_error: Report errors from `release`, the
+                PID file and sidecar unlinks included, instead of
+                suppressing and logging them. See `Lock`. Accepted here
+                since 4.1.1; strict mode used to require setting the
+                attribute after construction.
 
         Note:
             Neither file is created here; that happens on acquire.
@@ -1901,6 +1916,7 @@ class PidFileLock(TemporaryFileLock):
             check_interval=check_interval,
             fail_when_locked=fail_when_locked,
             flags=flags,
+            raise_on_release_error=raise_on_release_error,
         )
         self._acquired_lock = False
         # Use a sidecar file for the actual OS-level lock so the PID file
@@ -2310,7 +2326,12 @@ class PidFileLock(TemporaryFileLock):
         `PidFileLock.__enter__` also enters the block when somebody else
         holds the lock, and in that case there is nothing to release; the
         PID and sidecar files belong to the other holder and must be left
-        alone.
+        alone. When this instance did take the lock, the release is routed
+        through `Lock.__exit__`, so its guarantees apply here unchanged: a
+        release failure never replaces the exception leaving the block (it
+        is chained as its ``__context__`` with a note attached), and with
+        a clean block a release failure only surfaces when
+        ``raise_on_release_error`` is set.
 
         Args:
             exc_type: Type of the exception leaving the block, if any.
@@ -2319,11 +2340,16 @@ class PidFileLock(TemporaryFileLock):
 
         Returns:
             `None`; exceptions from the block keep propagating.
+
+        Raises:
+            Exception: Whatever `release` raises, but only when the block
+                itself ended without an exception, exactly as documented
+                on `Lock.__exit__`. With the default
+                ``raise_on_release_error=False`` that is nothing at all.
         """
-        if self._acquired_lock:  # pragma: no branch - trivial guard
-            self.release()
-            self._acquired_lock = False
-        return None
+        if not self._acquired_lock:
+            return None
+        return super().__exit__(exc_type, exc_value, traceback)
 
     def release(self) -> None:
         """Release the sidecar lock and remove the PID + sidecar files.
@@ -2356,6 +2382,16 @@ class PidFileLock(TemporaryFileLock):
         replaced the files a competitor may own them already, so a
         compromised holder frees its OS lock but leaves both paths alone,
         with a warning in the log instead of a deleted competitor lock.
+
+        Raises:
+            Exception: An unlink failure other than a file already being
+                gone, but only when ``raise_on_release_error`` is set,
+                and the sidecar lock itself is always released first. By
+                default such failures are suppressed and logged at
+                warning level, matching `TemporaryFileLock.release`.
+                Before 4.1.1 the flag was ignored here: the POSIX branch
+                leaked unlink errors regardless of it and the Windows
+                branch swallowed them regardless of it.
         """
         inner_lock: Lock | None
         with self._state_lock:
@@ -2372,40 +2408,156 @@ class PidFileLock(TemporaryFileLock):
             # OS lock is already gone and unlinking the paths would
             # destroy the current holder's lock.
             return
+        # Mirror the strictness flag onto the sidecar, so unlock and
+        # close failures follow the same policy as this lock's own
+        # errors instead of the sidecar's construction-time default.
+        inner_lock.raise_on_release_error = self.raise_on_release_error
+        unlink_error: Exception | None
         if os.name == 'nt':
-            with contextlib.suppress(Exception):
-                os.unlink(self.filename)
-            with contextlib.suppress(Exception):
-                inner_lock._release_claimed_fh(sidecar_fh)
-            with contextlib.suppress(Exception):
-                if os.path.isfile(self._lockfile):
-                    os.unlink(self._lockfile)
+            unlink_error = self._release_files_nt(inner_lock, sidecar_fh)
         else:  # pragma: not-posix
-            # Unlink both paths while the sidecar lock is still held, and
-            # only when the held sidecar handle still names the sidecar
-            # path: after an external unlink or replace both files belong
-            # to whoever recreated them, and removing them would destroy
-            # that holder's lock. The sidecar unlock must run even when an
-            # unlink fails (e.g. a PermissionError from a read-only
-            # directory), otherwise the error would leave the sidecar held
-            # forever.
+            unlink_error = self._release_files_posix(inner_lock, sidecar_fh)
+        if unlink_error is None:
+            return
+        if self.raise_on_release_error:
+            raise unlink_error
+        logger.warning(
+            'suppressed error while removing lock files %r and %r: %r',
+            self.filename,
+            self._lockfile,
+            unlink_error,
+        )
+
+    def _release_files_nt(
+        self,
+        inner_lock: Lock,
+        sidecar_fh: types.IO,
+    ) -> Exception | None:
+        """Tear down the Windows way: PID file, sidecar unlock, sidecar.
+
+        The PID file is unlinked first, while the sidecar lock is still
+        held: removing it after the release could delete the PID a fast
+        successor has already published. The locked sidecar file itself
+        cannot be unlinked on Windows, so its removal has to follow its
+        release.
+
+        Args:
+            inner_lock: The claimed sidecar `Lock`.
+            sidecar_fh: Its claimed filehandle, still carrying the OS
+                lock.
+
+        Returns:
+            The first unlink failure for `release` to report, or `None`.
+
+        Raises:
+            Exception: Whatever `Lock._release_claimed_fh` raises, which
+                it only does with ``raise_on_release_error`` set. A failed
+                PID file unlink is kept visible by chaining it onto that
+                error.
+        """
+        unlink_error: Exception | None = None
+        try:
+            os.unlink(self.filename)
+        except FileNotFoundError:
+            pass
+        except Exception as error:
+            unlink_error = error
+        try:
+            inner_lock._release_claimed_fh(sidecar_fh)
+        except Exception as release_error:
+            if unlink_error is not None:
+                raise release_error from unlink_error
+            raise
+        try:
+            os.unlink(self._lockfile)
+        except FileNotFoundError:
+            pass
+        except Exception as error:
+            if unlink_error is None:
+                unlink_error = error
+            else:
+                logger.warning(
+                    'suppressed additional error while removing %r: %r',
+                    self._lockfile,
+                    error,
+                )
+        return unlink_error
+
+    def _release_files_posix(
+        self,
+        inner_lock: Lock,
+        sidecar_fh: types.IO,
+    ) -> Exception | None:  # pragma: not-posix
+        """Unlink both files while the sidecar lock is still held.
+
+        The ordering closes the split-brain window, exactly like
+        `TemporaryFileLock._release_posix`, and the unlinks only run when
+        the held sidecar handle still names the sidecar path. The sidecar
+        unlock must run even when an unlink fails (e.g. a
+        `PermissionError` from a read-only directory), otherwise the
+        error would leave the sidecar held forever.
+
+        Args:
+            inner_lock: The claimed sidecar `Lock`.
+            sidecar_fh: Its claimed filehandle, still carrying the OS
+                lock while the unlinks run.
+
+        Returns:
+            The first unlink failure for `release` to report, or `None`.
+
+        Raises:
+            Exception: Whatever `Lock._release_claimed_fh` raises, which
+                it only does with ``raise_on_release_error`` set. A failed
+                unlink is kept visible by chaining it onto that error.
+        """
+        unlink_error: Exception | None = None
+        try:
+            if _fh_matches_path(sidecar_fh, self._lockfile):
+                unlink_error = self._unlink_owned_files()
+            else:
+                logger.warning(
+                    'not unlinking %r and %r: the sidecar lock file '
+                    'no longer belongs to this lock (unlinked or '
+                    'replaced externally)',
+                    self.filename,
+                    self._lockfile,
+                )
+        finally:
             try:
-                if _fh_matches_path(sidecar_fh, self._lockfile):
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(self.filename)
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(self._lockfile)
+                inner_lock._release_claimed_fh(sidecar_fh)
+            except Exception as release_error:
+                if unlink_error is not None:
+                    raise release_error from unlink_error
+                raise
+        return unlink_error
+
+    def _unlink_owned_files(self) -> Exception | None:  # pragma: not-posix
+        """Unlink the PID file and the sidecar, reporting the first error.
+
+        A file that is already gone is fine; any other failure on the
+        first file must not stop the second removal, so the first error
+        is captured and later ones are logged.
+
+        Returns:
+            The first unlink failure, or `None` when both files were
+            removed or already gone.
+        """
+        unlink_error: Exception | None = None
+        for path in (self.filename, self._lockfile):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            except Exception as error:
+                if unlink_error is None:
+                    unlink_error = error
                 else:
                     logger.warning(
-                        'not unlinking %r and %r: the sidecar lock file '
-                        'no longer belongs to this lock (unlinked or '
-                        'replaced externally)',
-                        self.filename,
-                        self._lockfile,
+                        'suppressed additional error while removing %r: %r',
+                        path,
+                        error,
                     )
-            finally:
-                with contextlib.suppress(Exception):
-                    inner_lock._release_claimed_fh(sidecar_fh)
+        return unlink_error
 
 
 class _PidFileLockFailClosedContext(

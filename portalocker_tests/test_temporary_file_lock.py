@@ -776,3 +776,25 @@ def test_atexit_hook_releases_lock_acquired_in_forked_child(
     assert completed.stdout == ''
     assert completed.stderr == ''
     assert not lock_path.exists()
+
+
+def test_temporaryfilelock_constructor_accepts_raise_on_release_error(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The constructor must accept and forward ``raise_on_release_error``
+    instead of raising `TypeError`; strict mode used to require poking
+    the attribute after construction.
+    """
+    lock = portalocker.TemporaryFileLock(
+        tmpfile,
+        raise_on_release_error=True,
+    )
+    assert lock.raise_on_release_error is True
+    lock.acquire()
+    _fail_unlink(monkeypatch)
+    with pytest.raises(PermissionError):
+        lock.release()
+    monkeypatch.undo()
+    assert lock.fh is None
+    os.unlink(tmpfile)
