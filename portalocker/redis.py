@@ -233,6 +233,32 @@ _NON_TRANSIENT_SUBSCRIBE_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+def _is_transient_connection_error(error: BaseException) -> bool:
+    """Report whether ``error`` is a retry-worthy connection blip.
+
+    The one classification both halves of an acquire attempt share: a
+    subscribe failure in `RedisLock._try_subscribe` and a probe failure
+    in `RedisLock._acquire_attempt` cost one attempt when the error is
+    connection weather, and are terminal otherwise. Weather means a
+    ``redis_exceptions.ConnectionError`` or ``TimeoutError`` that is not
+    one of the `_NON_TRANSIENT_SUBSCRIBE_ERRORS`, which repeat
+    identically on every retry.
+
+    Args:
+        error: Whatever the attempt raised.
+
+    Returns:
+        True when the caller should burn one attempt and retry, False
+        when the error must propagate after a full release.
+    """
+    if not isinstance(
+        error,
+        (redis_exceptions.ConnectionError, redis_exceptions.TimeoutError),
+    ):
+        return False
+    return not isinstance(error, _NON_TRANSIENT_SUBSCRIBE_ERRORS)
+
+
 #: Signature of the exception handler a `PubSubWorkerThread` escalates
 #: through. redis-py annotates the error parameter as ``Exception`` but
 #: passes ``BaseException`` at runtime; this alias states the runtime
@@ -2460,13 +2486,16 @@ class RedisLock(utils.LockBase['RedisLock']):
         non-blocking acquisition to exactly one attempt.
 
         Transient connection trouble while merely *waiting* is scoped
-        to the attempt (#141): a subscribe that fails with a
+        to the attempt (#141): a subscribe or probe that fails with a
         ``redis_exceptions.ConnectionError`` or ``TimeoutError``, and a
-        keep-alive worker that dies before the lock is held, both count
+        keep-alive worker that dies before the lock is held, all count
         as one failed attempt and are retried within the timeout
-        budget. Any other subscribe failure rolls back through
-        `_start_subscription` and propagates, with the lock left
-        inactive and the same object usable again.
+        budget. Any other subscribe or probe failure releases
+        everything first and then propagates, with the lock left
+        inactive, off the channel and usable again - an error may
+        never strand a live subscription behind a failed ``acquire``,
+        because such a zombie record would block every other writer
+        until someone released this instance by hand.
 
         Calling this on an instance whose previous hold ended in a loss
         resets it: the recorded error is consumed, the dead
@@ -2561,10 +2590,19 @@ class RedisLock(utils.LockBase['RedisLock']):
         """Run one iteration of `acquire`'s retry loop.
 
         Ensures a live subscription exists (abandoning one whose worker
-        died while waiting, see `_waiting_attempt_failed`), then takes
-        the uncontended fast path or hands a probe to
-        `_resolve_lock_holders`, and finally confirms the win through
-        `_confirm_or_abandon`.
+        died while waiting, see `_waiting_attempt_failed`), then runs
+        the probe half through `_probe_and_decide`.
+
+        Once the subscription is live, this instance is a counted,
+        ping-answering participant on the channel, so an error leaving
+        this method must never strand that subscription: a stranded one
+        is a zombie pending record that blocks every other writer while
+        this instance refuses its next ``acquire`` as already active.
+        A probe error that is mere connection weather therefore burns
+        this attempt (`_abandon_failed_attempt`, same as a transient
+        subscribe failure), and everything else - `AlreadyLocked` from
+        `_resolve_lock_holders` excepted, which already released - runs
+        a full `release` before propagating, interrupts included.
 
         Args:
             connection: The command connection of this acquisition.
@@ -2578,9 +2616,9 @@ class RedisLock(utils.LockBase['RedisLock']):
         Raises:
             AlreadyLocked: Propagated from `_resolve_lock_holders` when
                 `fail_when_locked` is set and the channel is
-                conclusively held.
-            Exception: A non-transient subscription failure, propagated
-                from `_start_subscription` after its rollback.
+                conclusively held, after its own release.
+            BaseException: A non-transient subscription or probe
+                failure, re-raised after the terminal rollback.
         """
         if self.pubsub is not None and self._waiting_attempt_failed():
             # The worker backing the previous attempt died while we
@@ -2589,6 +2627,52 @@ class RedisLock(utils.LockBase['RedisLock']):
             self._abandon_failed_attempt()
         if self.pubsub is None and not self._try_subscribe(connection):
             return False
+        try:
+            return self._probe_and_decide(connection, fail_when_locked)
+        except exceptions.AlreadyLocked:
+            # `_resolve_lock_holders` ran the terminal release before
+            # raising; there is nothing left to roll back.
+            raise
+        except BaseException as error:
+            if _is_transient_connection_error(error):
+                logger.warning(
+                    'Redis lock %s lost its command connection while '
+                    'probing channel %r, the attempt is retried within '
+                    'the timeout',
+                    self.holder_id,
+                    self.channel,
+                    exc_info=True,
+                )
+                self._abandon_failed_attempt()
+                return False
+            self._roll_back_terminal_acquire_failure()
+            raise
+
+    def _probe_and_decide(
+        self,
+        connection: redis.client.Redis,
+        fail_when_locked: bool,
+    ) -> bool:
+        """Probe the channel and turn the result into an attempt outcome.
+
+        The decision half of `_acquire_attempt`, run under its rollback
+        protection: takes the uncontended fast path or hands a probe to
+        `_resolve_lock_holders`, and finally confirms the win through
+        `_confirm_or_abandon`.
+
+        Args:
+            connection: The command connection of this acquisition.
+            fail_when_locked: Forwarded to `_resolve_lock_holders`.
+
+        Returns:
+            True when the lock is now held and confirmed, False when
+            the attempt failed.
+
+        Raises:
+            AlreadyLocked: Propagated from `_resolve_lock_holders` when
+                `fail_when_locked` is set and the channel is
+                conclusively held.
+        """
         subscribers: int = self._get_subscriber_count(connection)
         logger.debug(
             'Redis lock %s mode=%s observed %d subscribers',
@@ -2633,7 +2717,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         Not every ``ConnectionError`` is a blip: redis-py derives its
         credential and pool-exhaustion failures from it, and those
         repeat identically on every retry, so
-        `_NON_TRANSIENT_SUBSCRIBE_ERRORS` routes them onto the same
+        `_is_transient_connection_error` routes them onto the same
         terminal path. A wrong password therefore raises
         ``AuthenticationError`` promptly instead of burning the whole
         timeout and ending in a misleading ``AlreadyLocked``.
@@ -2653,12 +2737,9 @@ class RedisLock(utils.LockBase['RedisLock']):
         """
         try:
             self._start_subscription(connection)
-        except (
-            redis_exceptions.ConnectionError,
-            redis_exceptions.TimeoutError,
-        ) as error:
-            if isinstance(error, _NON_TRANSIENT_SUBSCRIBE_ERRORS):
-                self._roll_back_terminal_subscribe_failure()
+        except Exception as error:
+            if not _is_transient_connection_error(error):
+                self._roll_back_terminal_acquire_failure()
                 raise
             logger.warning(
                 'Redis lock %s could not subscribe, retrying within the '
@@ -2667,19 +2748,18 @@ class RedisLock(utils.LockBase['RedisLock']):
                 exc_info=True,
             )
             return False
-        except Exception:
-            self._roll_back_terminal_subscribe_failure()
-            raise
         return True
 
-    def _roll_back_terminal_subscribe_failure(self) -> None:
+    def _roll_back_terminal_acquire_failure(self) -> None:
         """Restore the fully inactive state before an error propagates.
 
-        The terminal half of `_try_subscribe`: when a subscription
-        failure is about to leave `acquire`, a full `release` runs so a
-        lock-created command connection is closed exactly when nobody
-        is going to retry on it. A cleanup failure is logged so it
-        cannot replace the original error, which the caller re-raises.
+        The terminal arm shared by `_try_subscribe` and
+        `_acquire_attempt`: when a subscription or probe failure is
+        about to leave `acquire`, a full `release` runs so the
+        subscription stops being counted and a lock-created command
+        connection is closed exactly when nobody is going to retry on
+        it. A cleanup failure is logged so it cannot replace the
+        original error, which the caller re-raises.
         """
         try:
             self.release()

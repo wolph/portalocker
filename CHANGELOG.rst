@@ -94,6 +94,18 @@
    spuriously, at the cost of non-blocking latency of up to ``timeout``
    on a noisy channel. Pass ``timeout=0`` to keep the strict
    single-attempt behaviour (#143)
+ * Fixed a failed ``RedisLock.acquire`` stranding a live subscription
+   when the command connection failed *after* the subscribe but before
+   the decision (a ``PUBSUB NUMSUB`` timeout, for example): the error
+   propagated while the instance stayed subscribed with its worker
+   alive, so its pending record blocked every other writer on the
+   channel and the instance itself refused the next ``acquire`` as
+   already active, until someone called ``release`` on it by hand. A
+   probe failure now gets the same treatment as a subscribe failure:
+   connection blips burn one attempt and are retried within the
+   timeout budget, everything else - interrupts included - releases
+   everything first and then propagates, leaving the channel free and
+   the instance reusable
  * Fixed ``RedisLock`` hanging forever in ``acquire`` or ``release``
    when the keep-alive worker was told to stop before its thread had
    started running: redis-py's ``PubSubWorkerThread.run`` sets its

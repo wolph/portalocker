@@ -4557,6 +4557,218 @@ def test_redis_check_or_kill_lock_is_deprecated(
     'error_class',
     [exceptions.ConnectionError, exceptions.TimeoutError],
 )
+def test_redis_transient_probe_error_fails_attempt_cleanly(
+    redis_connection: ConnectionFactory,
+    error_class: type[Exception],
+) -> None:
+    """A command-connection blip after the subscribe burns one attempt.
+
+    The probe half of an attempt (the subscriber count and the holder
+    collection) runs on the command connection *after* the subscription
+    went live. An error there used to propagate with the subscription
+    still standing: worker alive, state ACQUIRING, a zombie pending
+    record blocking every other writer, and the instance itself
+    refusing its next ``acquire`` with "already active" until an
+    explicit release. The same abandon discipline as a transient
+    subscribe failure applies now: with ``timeout=0`` the single
+    attempt is consumed, ``AlreadyLocked`` reports the burnt budget,
+    and nothing stays behind on the channel or the instance.
+    """
+    channel: str = str(random.random())
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        interrupt_on_lost=False,
+    )
+
+    def broken_count(connection: client.Redis) -> int:
+        raise error_class('command connection failed mid-probe')
+
+    lock._get_subscriber_count = broken_count  # type: ignore[method-assign]
+
+    with pytest.raises(portalocker.AlreadyLocked):
+        lock.acquire(timeout=0)
+
+    assert lock.pubsub is None
+    assert lock.thread is None
+    assert not lock.lost
+
+    # The channel carries no zombie record: a fresh writer acquires it
+    # without waiting anybody out.
+    other: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        timeout=5,
+        check_interval=0.05,
+        unavailable_timeout=0.5,
+        interrupt_on_lost=False,
+    )
+    other.acquire()
+    other.release()
+
+    # The failed instance itself recovered too.
+    del lock._get_subscriber_count
+    assert lock.acquire(timeout=5) is lock
+    lock.release()
+
+
+def test_redis_transient_probe_error_retries_within_timeout(
+    redis_connection: ConnectionFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One probe blip costs one attempt, exactly like a subscribe blip.
+
+    The #141 scoping promise covers the whole waiter side: a command
+    connection that times out under the subscriber count is retried
+    within the acquire budget on a fresh subscription, and the failed
+    attempt's own subscription is gone, so the eventual hold is the
+    only record on the channel.
+    """
+    admin: client.Redis = redis_connection()
+    channel: str = str(random.random())
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        timeout=30,
+        check_interval=0.02,
+        interrupt_on_lost=False,
+    )
+    original_count: typing.Callable[[client.Redis], int] = (
+        lock._get_subscriber_count
+    )
+    failures: list[bool] = []
+
+    def flaky_count(connection: client.Redis) -> int:
+        if not failures:
+            failures.append(True)
+            raise exceptions.TimeoutError('NUMSUB timed out')
+        return original_count(connection)
+
+    lock._get_subscriber_count = flaky_count  # type: ignore[method-assign]
+
+    with caplog.at_level(logging.WARNING, logger='portalocker.redis'):
+        assert lock.acquire() is lock
+    try:
+        assert failures == [True]
+        assert any(
+            'retried within the timeout' in record.message
+            for record in caplog.records
+        )
+        assert admin.pubsub_numsub(channel)[0][1] == 1
+        assert not lock.lost
+    finally:
+        lock.release()
+
+
+@pytest.mark.parametrize(
+    'error_class',
+    [exceptions.AuthenticationError, _TeardownError, KeyboardInterrupt],
+)
+def test_redis_terminal_probe_error_releases_before_propagating(
+    redis_connection: ConnectionFactory,
+    error_class: type[BaseException],
+) -> None:
+    """A terminal probe failure releases everything, then propagates.
+
+    Anything that is not a connection blip - bad credentials, a library
+    bug, an interrupt landing mid-probe - must leave ``acquire`` the
+    way a terminal subscribe failure does: subscription gone, owned
+    command connection closed, the instance immediately reusable, and
+    the channel free for the next writer. Before the rollback the error
+    propagated over a live subscription that blocked the channel until
+    someone remembered to call ``release`` on the failed instance.
+    """
+    seed_pool: typing.Any = redis_connection().connection_pool
+    channel: str = str(random.random())
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        redis_kwargs={'connection_pool': seed_pool},
+        timeout=5,
+        check_interval=0.02,
+        interrupt_on_lost=False,
+    )
+
+    def broken_count(connection: client.Redis) -> int:
+        raise error_class('terminal probe failure')
+
+    lock._get_subscriber_count = broken_count  # type: ignore[method-assign]
+
+    with pytest.raises(error_class):
+        lock.acquire()
+
+    assert lock.pubsub is None
+    assert lock.thread is None
+    assert lock.connection is None
+
+    other: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        timeout=5,
+        check_interval=0.05,
+        unavailable_timeout=0.5,
+        interrupt_on_lost=False,
+    )
+    other.acquire()
+    other.release()
+
+    del lock._get_subscriber_count
+    assert lock.acquire(timeout=5) is lock
+    lock.release()
+
+
+@pytest.mark.parametrize(
+    'error_class',
+    [exceptions.AuthenticationError, exceptions.AuthorizationError],
+)
+def test_redis_non_transient_subscribe_error_takes_terminal_path(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    error_class: type[Exception],
+) -> None:
+    """Credential errors from the subscribe are terminal on any backend.
+
+    The fakeredis counterpart of the live wrong-password test: the
+    classification itself needs no server, so a subscribe raising a
+    non-transient ``ConnectionError`` subclass must take the terminal
+    path - one attempt, full release, owned connection closed, error
+    propagated - on every CI cell, not only the ones with a live Redis
+    to reject a password.
+    """
+    seed_pool: typing.Any = redis_connection().connection_pool
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        redis_kwargs={'connection_pool': seed_pool},
+        timeout=30,
+        check_interval=0.02,
+    )
+    attempts: list[bool] = []
+
+    def rejecting_subscribe(connection: client.Redis) -> None:
+        attempts.append(True)
+        raise error_class('credentials rejected')
+
+    monkeypatch.setattr(lock, '_start_subscription', rejecting_subscribe)
+
+    with pytest.raises(error_class):
+        lock.acquire()
+
+    assert attempts == [True]
+    assert lock.pubsub is None
+    assert lock.thread is None
+    assert lock.connection is None
+
+    # Reusable: the next acquire fails the same clean way instead of
+    # tripping the already-active guard.
+    with pytest.raises(error_class):
+        lock.acquire()
+    assert attempts == [True, True]
+    assert lock.connection is None
+
+
+@pytest.mark.parametrize(
+    'error_class',
+    [exceptions.ConnectionError, exceptions.TimeoutError],
+)
 def test_redis_acquire_retries_transient_subscribe_failure(
     redis_connection: ConnectionFactory,
     monkeypatch: pytest.MonkeyPatch,
