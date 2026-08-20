@@ -1421,9 +1421,10 @@ def _fh_matches_path(fh: types.IO, filename: str) -> bool:  # pragma: not-posix
 
 #: Live `TemporaryFileLock` instances (and `PidFileLock`, which inherits
 #: the registration) that `_release_locks_at_exit` releases when the
-#: interpreter shuts down, each mapped to the pid of the process that
-#: constructed it. A `weakref.WeakKeyDictionary`, so membership never
-#: keeps a lock alive and collected locks drop out on their own.
+#: interpreter shuts down, each mapped to the pid of the owning process:
+#: the one that constructed the lock, until a fresh acquire re-records
+#: the acquiring process. A `weakref.WeakKeyDictionary`, so membership
+#: never keeps a lock alive and collected locks drop out on their own.
 _exit_releases: weakref.WeakKeyDictionary[TemporaryFileLock, int] = (
     weakref.WeakKeyDictionary()
 )
@@ -1440,12 +1441,14 @@ def _release_locks_at_exit() -> None:  # pragma: no cover - interpreter exit
     suppressed, since the interpreter is on its way out and nobody is left
     to handle them.
 
-    Locks constructed by another process are skipped. A forked child
-    inherits the parent's live locks (and this hook), and releasing them
-    on the child's normal exit would unlink the parent's lock files while
-    the parent still believes it holds them: the classic daemonize
-    sequence of acquire-then-fork lost its lock the moment either side
-    exited. Only the process that constructed a lock releases it here.
+    Locks owned by another process are skipped. A forked child inherits
+    the parent's live locks (and this hook), and releasing them on the
+    child's normal exit would unlink the parent's lock files while the
+    parent still believes it holds them: the classic daemonize sequence
+    of acquire-then-fork lost its lock the moment either side exited.
+    Ownership is recorded at construction and re-recorded on every fresh
+    acquire, so the process that actually took a lock is the one that
+    releases it here.
     """
     current_pid: int = os.getpid()
     for lock, owner_pid in list(_exit_releases.items()):
@@ -1477,12 +1480,25 @@ class TemporaryFileLock(Lock):
     discarded wrapper leaves its file behind at exit. The OS lock itself
     is released once the filehandle is closed or collected, so the
     leftover is litter rather than a held lock. The hook also only
-    releases locks constructed by the exiting process itself: a forked
-    child inherits the parent's live locks, and releasing them on the
-    child's exit would unlink the files of a lock the parent still holds.
-    The owning pid is recorded at construction time, so one case is not
-    covered yet: a lock constructed in the parent but acquired inside a
-    forked child is not cleaned up at that child's exit.
+    releases locks owned by the exiting process itself: a forked child
+    inherits the parent's live locks, and releasing them on the child's
+    exit would unlink the files of a lock the parent still holds. The
+    owning pid is recorded at construction and re-recorded on every
+    fresh acquire, so a lock constructed in the parent but acquired
+    inside a forked child is cleaned up at that child's exit, while the
+    daemonize shape (acquire, fork, child exits) keeps the parent's lock
+    intact.
+
+    Warning:
+        The exit hook is pid-aware, but a ``with`` block is not: a child
+        forked inside ``with lock:`` inherits the block and runs
+        ``__exit__`` when it falls out of it, releasing the lock and
+        unlinking the file while the parent still believes it holds
+        them. The classic daemonize sequence (fork inside the guarded
+        block, parent exits or child does the work) must therefore
+        either fork outside the ``with`` block or make sure only one of
+        the two processes leaves it, for instance by ending the child
+        with ``os._exit`` instead of falling through.
 
     Releasing an instance that does not hold the lock is a no-op. Without
     that rule a stale object, released twice or finalized after a failed
@@ -1545,9 +1561,9 @@ class TemporaryFileLock(Lock):
         # mapping keeps no strong reference, so garbage collection stays
         # in charge of locks that die before the interpreter does, and
         # construction registers nothing with atexit itself. The pid pins
-        # the exit time cleanup to this process: a forked child inherits
-        # the instance but must not release the parent's lock on its own
-        # exit.
+        # the exit time cleanup to the owning process; `acquire`
+        # re-records it, so whichever process actually takes the lock
+        # (possibly a forked child) is the one whose exit cleans it up.
         _exit_releases[self] = os.getpid()
 
     def acquire(
@@ -1565,14 +1581,28 @@ class TemporaryFileLock(Lock):
         `~portalocker.exceptions.LockException` instead and leaves the held
         filehandle untouched. See `TemporaryFileLock._acquire_verified` for
         the full contract.
+
+        A fresh acquire also records the calling process as the owner for
+        the interpreter-exit cleanup. Construction records it too, but a
+        lock constructed before a fork and acquired inside the child
+        belongs to the child, and its exit must clean the file up. The
+        idempotent re-acquire deliberately leaves the recorded owner
+        alone: a forked child re-acquiring an inherited held lock gets
+        the shared filehandle back, and reassigning ownership to the
+        child would let its exit unlink the file the parent still
+        depends on.
         """
-        return self._acquire_verified(
+        freshly_acquired: bool = self.fh is None
+        fh: typing.IO[typing.Any] = self._acquire_verified(
             self,
             self.filename,
             timeout,
             check_interval,
             fail_when_locked,
         )
+        if freshly_acquired:
+            _exit_releases[self] = os.getpid()
+        return fh
 
     @staticmethod
     def _acquire_verified(
@@ -1817,6 +1847,16 @@ class PidFileLock(TemporaryFileLock):
     ``<filename>.lock`` next to it carries the actual operating system
     lock. The split exists because Windows locking is mandatory, so a lock
     taken on the PID file itself would stop anyone from reading it.
+
+    Warning:
+        A ``with lock:`` block does not survive a fork inside it: the
+        child inherits the block and runs ``__exit__`` when it falls out
+        of it, releasing the lock and unlinking the PID and sidecar
+        files while the parent still believes it holds them. The classic
+        daemonize sequence must fork outside the ``with`` block, or end
+        the child with ``os._exit`` so the inherited block is never
+        left. The interpreter-exit cleanup itself is pid-aware and only
+        runs in the process that acquired the lock.
 
     Example:
         >>> import os
@@ -2084,8 +2124,13 @@ class PidFileLock(TemporaryFileLock):
 
         try:
             self._write_pid()
-            self._inner_lock = inner_lock
-            self._acquired_lock = True
+            with self._state_lock:
+                self._inner_lock = inner_lock
+                self._acquired_lock = True
+            # Successful publication makes this process the owner for the
+            # interpreter-exit cleanup: a lock constructed before a fork
+            # but acquired inside the child belongs to the child.
+            _exit_releases[self] = os.getpid()
         except Exception as error:
             cleanup_error: Exception | None = self._rollback_failed_acquire(
                 inner_lock,

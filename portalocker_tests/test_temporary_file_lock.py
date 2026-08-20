@@ -718,3 +718,61 @@ def test_atexit_hook_skips_collected_locks(tmpfile: str) -> None:
     del lock
     gc.collect()
     assert all(item.filename != tmpfile for item in utils._exit_releases)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='os.fork is POSIX-only')
+def test_atexit_hook_releases_lock_acquired_in_forked_child(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A child that acquires a parent-constructed lock owns it at exit.
+
+    The worker-pool idiom constructs the lock before forking and acquires
+    it inside the child. The exit hook used to record the owning pid at
+    construction time, so the child's normal exit skipped the lock it
+    legitimately held and left the lock file behind. Ownership is now
+    recorded at acquire time.
+    """
+    lock_path: pathlib.Path = tmp_path / 'worker.lock'
+    script: str = textwrap.dedent(
+        f"""\
+        import gc
+        import os
+        import sys
+
+        import portalocker
+        from portalocker import utils
+
+        # Constructed in the parent, before the fork.
+        lock = portalocker.TemporaryFileLock({str(lock_path)!r})
+
+        pid = os.fork()
+        if pid == 0:
+            # Neutralize everything except the atexit path.
+            utils.LockBase.__del__ = lambda self: None
+            gc.disable()
+            lock.acquire()
+            sys.exit(0)
+
+        os.waitpid(pid, 0)
+        if os.path.exists({str(lock_path)!r}):
+            raise RuntimeError(
+                "the child's exit left its own lock file behind"
+            )
+
+        contender = portalocker.TemporaryFileLock(
+            {str(lock_path)!r}, timeout=0
+        )
+        contender.acquire()
+        contender.release()
+        """,
+    )
+    completed: subprocess.CompletedProcess[str] = subprocess.run(
+        [sys.executable, '-c', script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout == ''
+    assert completed.stderr == ''
+    assert not lock_path.exists()

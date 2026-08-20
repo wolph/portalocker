@@ -10,8 +10,11 @@ import itertools
 import logging
 import multiprocessing
 import os
+import subprocess
+import sys
 import tempfile
 import time
+import textwrap
 import typing
 import weakref
 from pathlib import Path
@@ -1474,3 +1477,59 @@ def test_pidfilelock_interrupt_during_publication_releases_sidecar(
     contender = utils.PidFileLock(pid_file)
     contender.acquire(timeout=0)
     contender.release()
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='os.fork is POSIX-only')
+def test_pidfilelock_atexit_releases_lock_acquired_in_forked_child(
+    tmp_path,
+) -> None:
+    """The `PidFileLock` twin of the acquired-in-child exit test: the
+    child's normal exit must remove the PID file it published and the
+    sidecar, instead of leaving its stale PID behind for `read_pid` to
+    hand to ``os.kill`` after the pid gets recycled.
+    """
+    pid_path = tmp_path / 'worker.pid'
+    script = textwrap.dedent(
+        f"""\
+        import gc
+        import os
+        import sys
+
+        import portalocker
+        from portalocker import utils
+
+        # Constructed in the parent, before the fork.
+        lock = portalocker.PidFileLock({str(pid_path)!r})
+
+        pid = os.fork()
+        if pid == 0:
+            # Neutralize everything except the atexit path.
+            utils.LockBase.__del__ = lambda self: None
+            gc.disable()
+            lock.acquire()
+            sys.exit(0)
+
+        os.waitpid(pid, 0)
+        for leftover in ({str(pid_path)!r}, {str(pid_path) + '.lock'!r}):
+            if os.path.exists(leftover):
+                raise RuntimeError(
+                    "the child's exit left %r behind" % leftover
+                )
+
+        with portalocker.PidFileLock({str(pid_path)!r}) as holder_pid:
+            if holder_pid is not None:
+                raise RuntimeError(
+                    'a stale holder %r survived the child' % holder_pid
+                )
+        """,
+    )
+    completed = subprocess.run(
+        [sys.executable, '-c', script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout == ''
+    assert completed.stderr == ''
+    assert not pid_path.exists()

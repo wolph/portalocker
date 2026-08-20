@@ -257,16 +257,16 @@ keeping, and leaving it behind afterwards would just be litter.
 
 Guarantees:
 
-- `TemporaryFileLock.release` unlinks the lock file. One fallback catches
-  a caller that forgets to release: an `atexit` handler registered by the
-  constructor for a lock still held when the interpreter shuts down.
-  Garbage collection of the lock object deliberately leaves a held lock
-  and its file alone, since the caller may still be using the filehandle.
 - `TemporaryFileLock.release` unlinks the lock file. For a caller that
   forgets to release, a single module level `atexit` hook releases any
-  lock still held when the interpreter shuts down. The hook only acts in
-  the process that constructed the lock, so a forked child exiting does
-  not unlink the file of a lock its parent still holds.
+  lock still held when the interpreter shuts down. Garbage collection of
+  the lock object deliberately leaves a held lock and its file alone,
+  since the caller may still be using the filehandle. The hook only acts
+  in the process that owns the lock: ownership is recorded at
+  construction and re-recorded on every fresh acquire, so a lock
+  constructed before a fork and acquired inside the child is cleaned up
+  by the child's exit, while a forked child exiting does not unlink the
+  file of a lock its parent acquired and still holds.
 - Releasing an instance that does not hold the lock is a no-op, so a
   stale or double-released instance cannot unlink the file out from
   under whoever holds it at that moment.
@@ -278,6 +278,18 @@ Costs:
   for the full ``timeout``.
 - The mode is fixed to ``'w'``: the file is always emptied once the lock
   is taken, so it is not meant to carry data between processes.
+
+.. warning::
+
+   A ``with lock:`` block does not survive a fork inside it. The child
+   inherits the block and runs ``__exit__`` when it falls out of it,
+   releasing the lock and unlinking the file while the parent still
+   believes it holds them. The classic daemonize pattern (fork inside
+   the guarded block, one side exits) must fork outside the ``with``
+   block, or end the child with ``os._exit`` so the inherited block is
+   never left. This applies to `TemporaryFileLock` and `PidFileLock`
+   alike; the interpreter-exit cleanup itself is pid-aware and stays
+   safe across forks.
 
 >>> import os
 >>> import portalocker
