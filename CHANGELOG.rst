@@ -1,5 +1,19 @@
 4.1.1:
 
+ * Fixed ``RedisLock`` sleeping out a jittered ``check_interval`` before its
+   first acquisition attempt, which cost an uncontended acquire roughly
+   250ms for nothing. The retry generator now yields immediately and only
+   sleeps between attempts. The probe poll loops stay paced because their
+   ``get_message(timeout=...)`` calls block on their own (#144)
+ * Behaviour change: acquiring a ``RedisLock`` instance that is already
+   holding a lock now raises ``portalocker.LockException`` instead of
+   ``AssertionError``. The assert was the only re-acquire guard and
+   ``python -O`` strips asserts, which silently orphaned the worker thread
+   and left a phantom holder on the channel (#144)
+ * Documented a known mixed-version limitation of ``RedisLock``: holders on
+   portalocker 3.2.0 and older share one connection name, so one live plus
+   one crashed legacy holder on a channel cannot be told apart and block
+   waiters until the crashed holder's TCP connection dies on its own (#144)
  * Fixed a contended ``RedisLock`` with a self-created connection (no
    ``connection=`` argument) killing its own worker thread and delivering a
    ``KeyboardInterrupt`` to the main thread. The release between retries

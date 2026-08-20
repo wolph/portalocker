@@ -569,7 +569,7 @@ def test_redis_relock(redis_connection: ConnectionFactory) -> None:
     )
     with lock_a:
         time.sleep(0.01)
-        with pytest.raises(AssertionError):
+        with pytest.raises(portalocker.LockException, match='already active'):
             lock_a.acquire()
     time.sleep(0.01)
 
@@ -1459,9 +1459,9 @@ def test_redis_acquire_rolls_back_pubsub_on_subscribe_error(
 ) -> None:
     """A failing subscribe must not leave the lock half-initialised.
 
-    If ``self.pubsub`` were left set, the ``assert not self.pubsub`` guard at
-    the top of ``acquire`` would turn every retry into an ``AssertionError``
-    instead of surfacing the real error.
+    If ``self.pubsub`` were left set, the already-active guard at the top
+    of ``acquire`` would turn every retry into a ``LockException`` instead
+    of surfacing the real error.
     """
     connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
         server=fakeredis.FakeServer(),
@@ -1480,7 +1480,7 @@ def test_redis_acquire_rolls_back_pubsub_on_subscribe_error(
     assert lock.pubsub is None
     assert lock.thread is None
 
-    # Retry on the *same* instance must surface the real error again, not an
-    # AssertionError from a stale ``self.pubsub``.
+    # Retry on the *same* instance must surface the real error again, not a
+    # LockException from a stale ``self.pubsub``.
     with pytest.raises(_SubscribeError):
         lock.acquire()

@@ -181,6 +181,12 @@ class RedisLock(utils.LockBase['RedisLock']):
     recommended to set the `health_check_interval` when creating the redis
     connection.
 
+    Mixing versions on one channel has a known limitation: portalocker
+    3.2.0 and older holders all share one connection name, so one live
+    plus one crashed legacy holder cannot be told apart and the channel
+    stays blocked until the crashed holder's TCP connection dies on its
+    own (see `legacy_client_name`).
+
     Args:
         channel: the redis channel to use as locking key.
         connection: an optional redis connection if you already have one
@@ -462,6 +468,12 @@ class RedisLock(utils.LockBase['RedisLock']):
         readers and writers alike, and an old connection that stops
         answering is still reaped by name.
 
+        One legacy mix stays unresolvable, because legacy holders are
+        indistinguishable by name: with one live and one crashed 3.2.0
+        holder on the same channel, the live reply spares every legacy
+        connection from reaping, so waiters stay blocked until the
+        crashed holder's TCP connection dies on its own.
+
         Returns:
             The unsuffixed ``<channel>-lock`` name.
 
@@ -480,15 +492,16 @@ class RedisLock(utils.LockBase['RedisLock']):
         Overrides `utils.LockBase._timeout_generator` because a Redis
         retry loop has different needs from a filesystem one:
 
-        - Every interval is scaled by a random factor in ``[0.5, 1.5)``.
-          Contenders that started together would otherwise retry in
-          lockstep and keep colliding round after round; the jitter
-          spreads them out so one of them gets a clean probe.
-        - The sleep happens *before* the yield, so a caller waits out an
-          interval before its first attempt as well as between attempts.
-          The loops driven by this generator poll a subscription, and
-          polling one that was created microseconds ago only wastes a
-          round trip.
+        - The first yield is immediate, so an uncontended acquire makes
+          its first attempt without waiting out an interval. The poll
+          loops driven by this generator do not busy-spin as a result:
+          their ``get_message(timeout=...)`` calls already block for
+          the check interval when no message is waiting.
+        - Every interval between attempts is scaled by a random factor
+          in ``[0.5, 1.5)``. Contenders that started together would
+          otherwise retry in lockstep and keep colliding round after
+          round; the jitter spreads them out so one of them gets a
+          clean probe.
         - The deadline is taken from `time.monotonic`, so adjusting the
           system clock mid-wait cannot stretch or cut short a timeout.
 
@@ -499,7 +512,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         Args:
             timeout: Seconds to keep yielding for. `None` means zero,
                 which still yields exactly once.
-            check_interval: Base seconds to sleep before each attempt.
+            check_interval: Base seconds to sleep between attempts.
                 `None` or a non-positive value falls back to
                 `thread_sleep_time`.
 
@@ -511,17 +524,13 @@ class RedisLock(utils.LockBase['RedisLock']):
             timeout = 0.0
         if check_interval is None:
             check_interval = self.thread_sleep_time
-        deadline = time.monotonic() + timeout
-        first = True
-        while first or time.monotonic() < deadline:
-            first = False
-            effective_interval = (
-                check_interval
-                if check_interval > 0
-                else self.thread_sleep_time
-            )
-            sleep_time = effective_interval * (0.5 + random.random())
-            time.sleep(sleep_time)
+        effective_interval: float = (
+            check_interval if check_interval > 0 else self.thread_sleep_time
+        )
+        deadline: float = time.monotonic() + timeout
+        yield 0
+        while time.monotonic() < deadline:
+            time.sleep(effective_interval * (0.5 + random.random()))
             yield 0
 
     def _start_subscription(
@@ -553,8 +562,8 @@ class RedisLock(utils.LockBase['RedisLock']):
         Any failure rolls the whole thing back through `release` before
         re-raising, leaving `pubsub` as `None`. Without that rollback a
         failed `acquire` would leave half a subscription behind and the
-        ``assert not self.pubsub`` at the top of `acquire` would refuse
-        every later retry on the same object.
+        already-active guard at the top of `acquire` would refuse every
+        later retry on the same object.
 
         Args:
             connection: The connection to subscribe on.
@@ -1100,10 +1109,14 @@ class RedisLock(utils.LockBase['RedisLock']):
             ~portalocker.exceptions.AlreadyLocked: The timeout expired
                 without acquiring the lock, or `fail_when_locked` was set
                 and the first attempt did not succeed.
-            AssertionError: This instance is already holding a lock. A
-                `RedisLock` is not reentrant and holds at most one lock
-                at a time; use a second instance, which gets its own
-                `holder_id`.
+            ~portalocker.exceptions.LockException: This instance is
+                already holding a lock. A `RedisLock` is not reentrant
+                and holds at most one lock at a time; use a second
+                instance, which gets its own `holder_id`. A single
+                instance is not thread-safe either: two threads racing
+                `acquire` on one instance can both pass this guard.
+                Before 4.1.1 this misuse raised `AssertionError`, which
+                ``python -O`` strips.
 
         Example:
             >>> import fakeredis
@@ -1131,7 +1144,8 @@ class RedisLock(utils.LockBase['RedisLock']):
             utils.coalesce(fail_when_locked, self.fail_when_locked, False),
         )
 
-        assert not self.pubsub, 'This lock is already active'
+        if self.pubsub is not None:
+            raise exceptions.LockException('This lock is already active')
         if self.flags == constants.LockFlags.EXCLUSIVE:
             self.mode = RedisLockMode.PENDING
             self.writer_elected = False
