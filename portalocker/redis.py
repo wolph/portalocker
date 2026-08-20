@@ -66,6 +66,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 import typing
 import uuid
@@ -188,6 +189,13 @@ class RedisLock(utils.LockBase['RedisLock']):
     stays blocked until the crashed holder's TCP connection dies on its
     own (see `legacy_client_name`).
 
+    The lock requires a single standalone Redis endpoint. Every
+    acquisition decision starts from ``PUBSUB NUMSUB``, which is
+    node-local in Redis Cluster and replica setups while message delivery
+    is cluster-wide, so two writers subscribed through different nodes
+    would each count one subscriber and both take the uncontended fast
+    path. Point every participant at the same standalone server.
+
     Args:
         channel: the redis channel to use as locking key.
         connection: an optional redis connection if you already have one
@@ -250,6 +258,12 @@ class RedisLock(utils.LockBase['RedisLock']):
     holder_id: str
     mode: RedisLockMode
     writer_elected: bool
+    #: Serializes `mode` transitions with `channel_handler`'s snapshot of
+    #: ``(holder_id, mode)``. The handler runs on the worker thread while
+    #: `acquire` promotes on the main thread. Without this lock a probe
+    #: could read ``pending`` from a writer already committed to
+    #: promoting itself.
+    _mode_lock: threading.Lock
 
     DEFAULT_REDIS_KWARGS: typing.ClassVar[dict[str, typing.Any]] = dict(
         health_check_interval=10,
@@ -311,6 +325,11 @@ class RedisLock(utils.LockBase['RedisLock']):
         self.flags = flags
         self.holder_id = uuid.uuid4().hex
         self.writer_elected = False
+        # Guards every mode transition made while the subscription is
+        # live. The constructor and the pre-subscription reset in
+        # `acquire` run before any worker thread exists, so they assign
+        # `mode` directly.
+        self._mode_lock = threading.Lock()
         self.mode = (
             RedisLockMode.SHARED
             if flags == constants.LockFlags.SHARED
@@ -373,6 +392,16 @@ class RedisLock(utils.LockBase['RedisLock']):
         writer that is still `RedisLockMode.PENDING` says so, and a probe
         therefore learns the state as it was at the moment it asked.
 
+        The ``(holder_id, mode)`` pair is snapshotted under `_mode_lock`,
+        the lock every promotion takes, and published outside it so no
+        network I/O runs under the lock. That serializes each answer
+        against promotions: an answer either completes its snapshot
+        before a promotion starts or observes the promoted mode, and it
+        can never read `mode` halfway through a transition. An answer
+        snapshotted just before a promotion still truthfully reports the
+        older mode. The prober's own count checks are what invalidate a
+        decision built on such an answer.
+
         A probing lock is subscribed to its own channel, so it answers
         its own ping and appears in its own holder list.
 
@@ -417,12 +446,15 @@ class RedisLock(utils.LockBase['RedisLock']):
                 self.holder_id,
             )
             return
+        with self._mode_lock:
+            holder_id: str = self.holder_id
+            mode: RedisLockMode = self.mode
         connection.publish(
             response_channel,
             json.dumps(
                 {
-                    'holder_id': self.holder_id,
-                    'mode': self.mode.value,
+                    'holder_id': holder_id,
+                    'mode': mode.value,
                     'protocol': REDIS_LOCK_PROTOCOL_VERSION,
                 }
             ),
@@ -555,7 +587,15 @@ class RedisLock(utils.LockBase['RedisLock']):
            be mistaken for a pubsub message.
         2. The subscription is registered with `channel_handler` as its
            callback, so pings are answered from now on.
-        3. A `PubSubWorkerThread` starts reading. It is a daemon thread:
+        3. The server's subscribe confirmation is drained here, on the
+           calling thread, before the worker thread exists (see
+           `_wait_for_subscribe_confirmation`). Processing it proves the
+           server registered the subscription, so the ``PUBSUB NUMSUB``
+           that `acquire` runs next is guaranteed to count this holder.
+           Without that proof a delayed ``SUBSCRIBE`` would let `acquire`
+           read ``subscribers == 1`` while another holder exists and take
+           the uncontended fast path against a contended channel.
+        4. A `PubSubWorkerThread` starts reading. It is a daemon thread:
            an unreleased lock must never keep the interpreter alive, and
            since losing the connection *is* releasing the lock, dying at
            process exit is the correct behaviour rather than a leak.
@@ -570,6 +610,9 @@ class RedisLock(utils.LockBase['RedisLock']):
             connection: The connection to subscribe on.
 
         Raises:
+            ~portalocker.exceptions.LockException: The server did not
+                confirm the subscription within `unavailable_timeout`
+                seconds, raised after the rollback.
             Exception: Anything the Redis client raises while naming,
                 subscribing or starting the thread, re-raised unchanged
                 after the rollback.
@@ -584,6 +627,7 @@ class RedisLock(utils.LockBase['RedisLock']):
             )
             pubsub.parse_response()  # type: ignore[no-untyped-call]
             pubsub.subscribe(**{self.channel: self.channel_handler})
+            self._wait_for_subscribe_confirmation(pubsub)
             # A daemon thread so an unreleased lock can never block
             # interpreter exit; losing the connection releases the lock by
             # design, which is exactly what process exit should do.
@@ -593,10 +637,63 @@ class RedisLock(utils.LockBase['RedisLock']):
                 daemon=True,
             )
             self.thread.start()
-            time.sleep(0.01)
         except Exception:
             self.release()
             raise
+
+    def _wait_for_subscribe_confirmation(
+        self,
+        pubsub: redis.client.PubSub,
+    ) -> None:
+        """Block until the server confirms the channel subscription.
+
+        Redis sends a ``subscribe`` frame after it has registered the
+        subscription, so reading that frame here establishes a
+        happens-before edge: any command issued afterwards - in
+        particular the ``PUBSUB NUMSUB`` in `acquire` - runs against a
+        server that already counts this holder. This wait replaces the
+        ``time.sleep(0.01)`` that used to stand in for it, which bounded
+        nothing: a single TCP retransmit delays a ``SUBSCRIBE`` far
+        longer than 10ms.
+
+        Note that redis-py's ``PubSub.subscribed`` is no substitute: it
+        is set the moment the ``SUBSCRIBE`` command is *sent*, not when
+        the server confirms it.
+
+        A ping that arrives while draining is not lost: ``get_message``
+        dispatches it to `channel_handler` and returns `None`, so the
+        loop keeps waiting for the confirmation frame while the ping is
+        answered as usual.
+
+        Args:
+            pubsub: The freshly subscribed pubsub to read frames from,
+                before any worker thread consumes them invisibly.
+
+        Raises:
+            ~portalocker.exceptions.LockException: No confirmation
+                arrived within `unavailable_timeout` seconds. Proceeding
+                without it would reopen the miscount this wait exists to
+                prevent, so the subscription attempt fails instead.
+        """
+        check_interval: float = min(
+            self.thread_sleep_time,
+            self.unavailable_timeout / 10,
+        )
+        deadline: float = time.monotonic() + self.unavailable_timeout
+        first: bool = True
+        while first or time.monotonic() < deadline:
+            first = False
+            confirmation: dict[str, typing.Any] | None = typing.cast(
+                'dict[str, typing.Any] | None',
+                pubsub.get_message(timeout=check_interval),
+            )
+            if confirmation and confirmation.get('type') == 'subscribe':
+                return
+        raise exceptions.LockException(
+            exceptions.LockException.LOCK_FAILED,
+            'Redis did not confirm the lock channel subscription within '
+            f'{self.unavailable_timeout} seconds',
+        )
 
     def _parse_lock_response(
         self,
@@ -734,6 +831,53 @@ class RedisLock(utils.LockBase['RedisLock']):
                 )
                 connection.client_kill_filter(client_.get('id'))
 
+    def _drain_probe_replies(
+        self,
+        pubsub: redis.client.PubSub,
+        holders: dict[str, RedisLockHolder],
+        expected_subscribers: int,
+        check_interval: float,
+    ) -> None:
+        """Read every buffered reply within one polling interval.
+
+        Reading a single message per interval would cap the throughput
+        at one reply per interval, and a channel with more holders than
+        intervals could then never be probed conclusively, so every
+        probe would kill healthy holders (#138). The first read waits up
+        to `check_interval` for a reply, the follow-up reads only empty
+        the local buffer. Draining stops early once
+        `expected_subscribers` distinct holders have replied.
+
+        Args:
+            pubsub: The probe's own subscription to read replies from.
+            holders: The replies collected so far, keyed by holder id
+                and extended in place. The number of legacy entries in
+                it doubles as the index for the next synthetic
+                ``legacy-<n>`` id.
+            expected_subscribers: Reply count at which draining stops.
+            check_interval: Seconds the first read may wait for a reply.
+        """
+        message: dict[str, typing.Any] | None = typing.cast(
+            'dict[str, typing.Any] | None',
+            pubsub.get_message(timeout=check_interval),
+        )
+        while message is not None:
+            if message.get('type') == 'message':
+                legacy_index: int = sum(
+                    holder.legacy for holder in holders.values()
+                )
+                holder_record: RedisLockHolder = self._parse_lock_response(
+                    message.get('data'),
+                    legacy_index,
+                )
+                holders[holder_record.holder_id] = holder_record
+                if len(holders) >= expected_subscribers:
+                    return
+            message = typing.cast(
+                'dict[str, typing.Any] | None',
+                pubsub.get_message(timeout=0),
+            )
+
     def _collect_lock_holders(
         self,
         connection: redis.client.Redis,
@@ -779,20 +923,34 @@ class RedisLock(utils.LockBase['RedisLock']):
           `acquire` never asks in that situation: it short-circuits when
           it is the only subscriber.
 
-        A probe is inconclusive in two ways:
+        A probe is inconclusive in three ways:
 
-        1. The subscriber count changed while the probe was running
-           (``current != expected``). Someone joined or left, so the
+        1. The subscriber count no longer matched ``expected_subscribers``
+           immediately before the ping went out. The expectation was
+           already stale, so the probe is abandoned before it puts any
+           traffic on the channel.
+        2. The count changed while the replies were being collected
+           (re-checked after collection). Someone joined or left, so the
            replies describe a channel that no longer exists in that
            shape, and a decision made from them could be wrong for
            either party.
-        2. Fewer holders replied than there were subscribers. Somebody
-           counted by Redis is not answering, which normally means it
-           crashed, though a holder too slow to answer inside ``timeout``
-           is treated the same way;
+        3. Fewer distinct holder ids replied than there were subscribers.
+           Somebody counted by Redis is not answering, which normally
+           means it crashed, though a holder too slow to answer inside
+           ``timeout`` is treated the same way.
            `_kill_unavailable_locks` reaps those connections and the
            probe still reports inconclusive so that the caller retries
            against the cleaned-up channel.
+
+        The two count checks bracket the collection window, but ``PUBSUB
+        NUMSUB`` reports how many subscribers there are, not who they
+        are, so count-preserving churn between the two checks - one
+        holder leaving while another joins - remains undetectable and
+        such a probe passes as conclusive. Losing waiters produce exactly
+        that churn routinely, since they unsubscribe between attempts.
+        The election survives it only because losers retry: a writer that
+        promoted on a stale sample is visible as `RedisLockMode.EXCLUSIVE`
+        to every later probe, and the retrying losers back off.
 
         Args:
             connection: The connection to publish the ping on and to run
@@ -813,7 +971,6 @@ class RedisLock(utils.LockBase['RedisLock']):
         check_interval: float = min(self.thread_sleep_time, timeout / 10)
         pubsub: redis.client.PubSub = self._get_pubsub(connection)
         holders: dict[str, RedisLockHolder] = {}
-        legacy_index: int = 0
         try:
             pubsub.subscribe(response_channel)
             for _ in self._timeout_generator(timeout, check_interval):
@@ -823,6 +980,14 @@ class RedisLock(utils.LockBase['RedisLock']):
                 )
                 if confirmation and confirmation.get('type') == 'subscribe':
                     break
+
+            # First half of the count bracket: a probe whose expectation
+            # is already stale is abandoned before the ping goes out.
+            precheck_subscribers: int = self._get_subscriber_count(
+                connection,
+            )
+            if precheck_subscribers != expected_subscribers:
+                return None
 
             connection.publish(
                 self.channel,
@@ -835,31 +1000,12 @@ class RedisLock(utils.LockBase['RedisLock']):
             )
 
             for _ in self._timeout_generator(timeout, check_interval):
-                # Drain every buffered reply before sleeping again. Reading
-                # a single message per interval would cap the throughput at
-                # one reply per interval, and a channel with more holders
-                # than intervals could then never be probed conclusively,
-                # so every probe would kill healthy holders (#138). The
-                # first read waits up to `check_interval` for a reply, the
-                # follow-up reads only empty the local buffer.
-                message: dict[str, typing.Any] | None = typing.cast(
-                    'dict[str, typing.Any] | None',
-                    pubsub.get_message(timeout=check_interval),
+                self._drain_probe_replies(
+                    pubsub,
+                    holders,
+                    expected_subscribers,
+                    check_interval,
                 )
-                while message is not None:
-                    if message.get('type') == 'message':
-                        holder: RedisLockHolder = self._parse_lock_response(
-                            message.get('data'),
-                            legacy_index,
-                        )
-                        holders[holder.holder_id] = holder
-                        legacy_index += int(holder.legacy)
-                        if len(holders) >= expected_subscribers:
-                            break
-                    message = typing.cast(
-                        'dict[str, typing.Any] | None',
-                        pubsub.get_message(timeout=0),
-                    )
                 if len(holders) >= expected_subscribers:
                     break
 
@@ -1075,7 +1221,8 @@ class RedisLock(utils.LockBase['RedisLock']):
             if holders is not None and not any(
                 holder.mode is RedisLockMode.SHARED for holder in holders
             ):
-                self.mode = RedisLockMode.EXCLUSIVE
+                with self._mode_lock:
+                    self.mode = RedisLockMode.EXCLUSIVE
                 return True
             return False
 
@@ -1202,7 +1349,8 @@ class RedisLock(utils.LockBase['RedisLock']):
             )
             if subscribers == 1:
                 if self.flags == constants.LockFlags.EXCLUSIVE:
-                    self.mode = RedisLockMode.EXCLUSIVE
+                    with self._mode_lock:
+                        self.mode = RedisLockMode.EXCLUSIVE
                 return self
 
             holders: list[RedisLockHolder] | None = self._collect_lock_holders(
