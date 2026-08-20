@@ -31,6 +31,7 @@ Asking is a ping/pong on the channel itself::
       |  and its current mode (see `RedisLockHolder`)
       +- decide (see `RedisLock._resolve_lock_holders`):
            compatible holders     -> join them, the lock is held
+           foreign elected writer -> defer to it, back off and retry
            elected, no readers    -> take the lock exclusively
            anything else          -> unsubscribe and retry
 
@@ -155,6 +156,8 @@ class RedisLockHolder(typing.NamedTuple):
         >>> holder = redis.RedisLockHolder('a1b2', redis.RedisLockMode.SHARED)
         >>> holder.holder_id, holder.mode.value, holder.legacy
         ('a1b2', 'shared', False)
+        >>> holder.elected is None
+        True
     """
 
     #: The answering lock's `RedisLock.holder_id`, or a synthetic
@@ -168,6 +171,15 @@ class RedisLockHolder(typing.NamedTuple):
     #: release old enough not to speak the protocol has no notion of
     #: shared locks and must block everyone.
     legacy: bool = False
+    #: Whether the holder advertised a won election. True and False come
+    #: from the ``elected`` field portalocker 4.2.0 added to the record,
+    #: while `None` means the reply carried no readable field at all, so
+    #: the holder runs a pre-4.2 release. That distinction is what the
+    #: mixed-version fallback keys on: a pre-4.2 pending writer reruns
+    #: the id election and cannot be told to defer, so an incumbent
+    #: forfeits to it exactly as 4.1 did (see
+    #: `RedisLock._must_forfeit`).
+    elected: bool | None = None
 
 
 class PubSubWorkerThread(redis.client.PubSubWorkerThread):
@@ -291,11 +303,12 @@ class RedisLock(utils.LockBase['RedisLock']):
     holder_id: str
     mode: RedisLockMode
     writer_elected: bool
-    #: Serializes `mode` transitions with `channel_handler`'s snapshot of
-    #: ``(holder_id, mode)``. The handler runs on the worker thread while
-    #: `acquire` promotes on the main thread. Without this lock a probe
-    #: could read ``pending`` from a writer already committed to
-    #: promoting itself.
+    #: Serializes `mode` and `writer_elected` transitions with
+    #: `channel_handler`'s snapshot of ``(holder_id, mode, elected)``.
+    #: The handler runs on the worker thread while `acquire` promotes on
+    #: the main thread. Without this lock a probe could read ``pending``
+    #: from a writer already committed to promoting itself, or a torn
+    #: ``(mode, elected)`` pair from the middle of a transition.
     _mode_lock: threading.Lock
 
     DEFAULT_REDIS_KWARGS: typing.ClassVar[dict[str, typing.Any]] = dict(
@@ -358,10 +371,10 @@ class RedisLock(utils.LockBase['RedisLock']):
         self.flags = flags
         self.holder_id = uuid.uuid4().hex
         self.writer_elected = False
-        # Guards every mode transition made while the subscription is
-        # live. The constructor and the pre-subscription reset in
-        # `acquire` run before any worker thread exists, so they assign
-        # `mode` directly.
+        # Guards every `mode` and `writer_elected` transition made once
+        # a subscription can exist. Only the constructor runs strictly
+        # before any worker thread, so only these two assignments above
+        # and below skip the lock.
         self._mode_lock = threading.Lock()
         self.mode = (
             RedisLockMode.SHARED
@@ -419,21 +432,28 @@ class RedisLock(utils.LockBase['RedisLock']):
         unrelated traffic on the channel harmless.
 
         The reply is published on the private response channel the prober
-        asked for and carries `holder_id`, the *current* `mode` and
-        `REDIS_LOCK_PROTOCOL_VERSION`. Answering with the live mode
-        rather than a stored one is what makes the protocol truthful: a
-        writer that is still `RedisLockMode.PENDING` says so, and a probe
-        therefore learns the state as it was at the moment it asked.
+        asked for and carries `holder_id`, the *current* `mode`,
+        `REDIS_LOCK_PROTOCOL_VERSION` and an ``elected`` boolean
+        mirroring `writer_elected`. Answering with the live mode rather
+        than a stored one is what makes the protocol truthful: a writer
+        that is still `RedisLockMode.PENDING` says so, and a probe
+        therefore learns the state as it was at the moment it asked. The
+        ``elected`` field is how an incumbent stays visible while it
+        waits for readers to drain: later writers defer to an advertised
+        election instead of rerunning the id sort against it (see
+        `_writer_is_elected`). Records still carry protocol version 1,
+        so portalocker 4.0 and 4.1 parse them unchanged and simply
+        ignore the extra key.
 
-        The ``(holder_id, mode)`` pair is snapshotted under `_mode_lock`,
-        the lock every promotion takes, and published outside it so no
-        network I/O runs under the lock. That serializes each answer
-        against promotions: an answer either completes its snapshot
-        before a promotion starts or observes the promoted mode, and it
-        can never read `mode` halfway through a transition. An answer
-        snapshotted just before a promotion still truthfully reports the
-        older mode. The prober's own count checks are what invalidate a
-        decision built on such an answer.
+        The ``(holder_id, mode, elected)`` triple is snapshotted under
+        `_mode_lock`, the lock every promotion takes, and published
+        outside it so no network I/O runs under the lock. That
+        serializes each answer against promotions: an answer either
+        completes its snapshot before a promotion starts or observes the
+        promoted state, and it can never read `mode` halfway through a
+        transition. An answer snapshotted just before a promotion still
+        truthfully reports the older mode. The prober's own count checks
+        are what invalidate a decision built on such an answer.
 
         A probing lock is subscribed to its own channel, so it answers
         its own ping and appears in its own holder list.
@@ -482,6 +502,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         with self._mode_lock:
             holder_id: str = self.holder_id
             mode: RedisLockMode = self.mode
+            elected: bool = self.writer_elected
         connection.publish(
             response_channel,
             json.dumps(
@@ -489,6 +510,7 @@ class RedisLock(utils.LockBase['RedisLock']):
                     'holder_id': holder_id,
                     'mode': mode.value,
                     'protocol': REDIS_LOCK_PROTOCOL_VERSION,
+                    'elected': elected,
                 }
             ),
         )
@@ -769,6 +791,14 @@ class RedisLock(utils.LockBase['RedisLock']):
         count as two holders instead of collapsing into one and leaving
         the caller short of the subscriber count it expected.
 
+        The optional ``elected`` key is read as a strict boolean.
+        Anything else, including its absence, parses as `None`, which
+        `RedisLockHolder.elected` documents as "the holder predates the
+        field". Records from portalocker 4.0 and 4.1 lack the key, so
+        they land on `None` here without falling back to a legacy
+        holder: the record itself is still a perfectly valid protocol
+        version 1 record.
+
         Args:
             raw_data: The message payload exactly as received, normally a
                 JSON string but not required to be anything in
@@ -790,9 +820,14 @@ class RedisLock(utils.LockBase['RedisLock']):
                 and isinstance(holder_id, str)
                 and isinstance(mode, str)
             ):
+                elected_value: typing.Any = data.get('elected')
+                elected: bool | None = (
+                    elected_value if isinstance(elected_value, bool) else None
+                )
                 return RedisLockHolder(
                     holder_id=holder_id,
                     mode=RedisLockMode(mode),
+                    elected=elected,
                 )
         except (AttributeError, TypeError, ValueError):
             pass
@@ -1118,9 +1153,13 @@ class RedisLock(utils.LockBase['RedisLock']):
         """Report whether this lock is the writer elected to go next.
 
         Returns False at once if any holder is already
-        `RedisLockMode.EXCLUSIVE`: the lock is owned, so there is nothing
-        to elect. Otherwise the ids of every `RedisLockMode.PENDING`
-        holder are sorted and the lowest one wins.
+        `RedisLockMode.EXCLUSIVE`: the lock is owned, so there is
+        nothing to elect. It also returns False when any other holder
+        advertises ``elected``: that peer won a previous election and is
+        waiting for the readers to drain, so a fresh contender defers to
+        it instead of rerunning the sort against it (#143). Otherwise
+        the ids of every `RedisLockMode.PENDING` holder are sorted and
+        the lowest one wins.
 
         Sorting is the entire trick, and it is worth spelling out why it
         works. There is no coordinator here, and no lock to take before
@@ -1139,10 +1178,15 @@ class RedisLock(utils.LockBase['RedisLock']):
         moved. The losers simply retry, and a loser that keeps losing is
         bounded by the caller's timeout, not by the election.
 
-        Holder ids are uuid4 hex strings, so the resulting order is
-        arbitrary but stable. It is a tie-break, not a priority: this is
-        not a fair queue and a writer is not guaranteed to be served
-        before writers that arrive later.
+        The deference rule is what makes an election stick. Winning is
+        remembered in `writer_elected` and advertised on every ping
+        reply, so later writers see the incumbent and stand down no
+        matter how their ids compare. Without it a lower-id newcomer
+        would win the rerun sort and usurp a writer that had already
+        been waiting (#143). Among fresh contenders the sort stays what
+        it always was: holder ids are uuid4 hex strings, so the order is
+        arbitrary but stable, a tie-break rather than a priority, and a
+        contender that loses it simply retries.
 
         `RedisLockMode.SHARED` holders do not block the election, so a
         writer can be elected while readers are still draining. Being
@@ -1156,7 +1200,8 @@ class RedisLock(utils.LockBase['RedisLock']):
 
         Returns:
             True when this lock is the pending writer with the lowest
-            holder id and nobody holds the lock exclusively.
+            holder id, nobody holds the lock exclusively, and nobody
+            else advertises a won election.
 
         Example:
             >>> from portalocker import redis
@@ -1177,8 +1222,23 @@ class RedisLock(utils.LockBase['RedisLock']):
             ...     ]
             ... )
             True
+
+            Even the lowest id defers to an advertised incumbent:
+
+            >>> lock._writer_is_elected(
+            ...     [
+            ...         redis.RedisLockHolder('bbb', pending),
+            ...         redis.RedisLockHolder('zzz', pending, elected=True),
+            ...     ]
+            ... )
+            False
         """
         if any(holder.mode is RedisLockMode.EXCLUSIVE for holder in holders):
+            return False
+        if any(
+            holder.elected and holder.holder_id != self.holder_id
+            for holder in holders
+        ):
             return False
         pending_holder_ids: list[str] = sorted(
             holder.holder_id
@@ -1189,6 +1249,73 @@ class RedisLock(utils.LockBase['RedisLock']):
             pending_holder_ids and pending_holder_ids[0] == self.holder_id
         )
 
+    def _must_forfeit(
+        self,
+        holders: list[RedisLockHolder],
+    ) -> bool:
+        """Report whether an elected writer must give its election up.
+
+        An election is worthless the moment somebody else demonstrably
+        outranks it, and this is the complete list of who does. Every
+        holder in a conclusive probe, excluding this lock's own record,
+        is checked against three rules:
+
+        1. A `RedisLockMode.EXCLUSIVE` holder. Somebody owns the lock,
+           and legacy replies are recorded as exclusive too, so this
+           rule also covers every peer the incumbent cannot reason
+           about. The probe outranks our memory.
+        2. A holder advertising ``elected`` with a lower holder id. Two
+           incumbents can arise when a ping was answered just before the
+           winner's flag became visible, so both sides resolve the
+           conflict from the same records: the lower id keeps the
+           election, the higher id forfeits. That settles it once both
+           flags are visible on the wire. For the round in which a
+           stale reply still hides one of them, the hold-off in
+           `_resolve_exclusive_writer` keeps either side from
+           promoting past the other.
+        3. A `RedisLockMode.PENDING` holder whose record lacks the
+           ``elected`` field (`RedisLockHolder.elected` is `None`) and
+           whose id sorts below ours. That peer runs portalocker 4.0 or
+           4.1, will elect itself by the id sort, and cannot be told to
+           defer. Forfeiting reproduces the pre-4.2 semantics exactly,
+           so a mixed channel is never less safe than 4.1, merely as
+           unfair as it always was.
+
+        A 4.2 pending writer with a lower id and ``elected: false``
+        matches none of the rules, so the election is kept, but that
+        record alone does not make promotion safe: it cannot show
+        whether the peer probed before or after this election reached
+        the wire, so the peer may be electing itself from a stale view
+        right now. `_resolve_exclusive_writer` therefore keeps the
+        election without promoting while such a record is present, and
+        the next probe round tells a deferring peer (gone from the
+        channel) apart from a competing one (visible as elected or
+        exclusive, rules 1 and 2 above) (#143).
+
+        Args:
+            holders: The holders returned by a conclusive probe,
+                including this lock's own record.
+
+        Returns:
+            True when the election must be forfeited and this writer
+            should retry as a fresh contender.
+        """
+        for holder in holders:
+            if holder.holder_id == self.holder_id:
+                continue
+            if holder.mode is RedisLockMode.EXCLUSIVE:
+                return True
+            lower: bool = holder.holder_id < self.holder_id
+            if holder.elected and lower:
+                return True
+            if (
+                holder.mode is RedisLockMode.PENDING
+                and holder.elected is None
+                and lower
+            ):
+                return True
+        return False
+
     def _resolve_lock_holders(
         self,
         holders: list[RedisLockHolder] | None,
@@ -1198,7 +1325,9 @@ class RedisLock(utils.LockBase['RedisLock']):
 
         This is the only place where an observation becomes an action.
         Every branch is guarded on ``holders is not None``, because an
-        inconclusive probe must never be read as "the lock is free".
+        inconclusive probe must never be read as "the lock is free". The
+        election branches themselves live in `_resolve_exclusive_writer`
+        and its `None` result routes into the give-up branch here.
 
         The outcomes, in the order they are tested:
 
@@ -1206,81 +1335,201 @@ class RedisLock(utils.LockBase['RedisLock']):
           lock is now held. The subscription opened for the probe is
           exactly the subscription that holds it, so nothing more is
           needed.
-        - **Elected writer, no readers left** (see `_writer_is_elected`):
-          `mode` is promoted from `RedisLockMode.PENDING` to
-          `RedisLockMode.EXCLUSIVE`, which is what every later probe by
-          anybody else will see, and the lock is held.
-        - **Elected writer, readers still holding**: the election is
-          remembered in `writer_elected` and the subscription is kept, so
-          this lock's `RedisLockMode.PENDING` record keeps new readers
-          out while the existing ones drain. The caller retries.
+        - **Already-elected writer, conclusive probe**: the election is
+          not rerun against newcomers. Unless `_must_forfeit` says the
+          probe outranks it, the incumbent keeps waiting while
+          `RedisLockMode.SHARED` holders drain and while any undecided
+          lower-id peer is still visible, and promotes `mode` to
+          `RedisLockMode.EXCLUSIVE` once the probe is clear of both
+          (see `_resolve_exclusive_writer` for the hold-off). A forfeit
+          falls through to the give-up branch below.
+        - **Fresh election won, no readers left** (see
+          `_writer_is_elected`): `mode` is promoted to
+          `RedisLockMode.EXCLUSIVE` and the lock is held. This runs
+          before the `fail_when_locked` check, so the winner of two
+          non-blocking contenders takes a reader-free channel instead of
+          raising. The loser's probe shows the winner as pending with a
+          winning id or as already exclusive, and it raises, so exactly
+          one of the two succeeds (#143).
+        - **Fresh election won, readers still holding**: with
+          `fail_when_locked` the lock genuinely cannot be taken without
+          waiting for the readers, so everything is released and
+          `AlreadyLocked` is raised, without ever setting
+          `writer_elected`: this instance is about to leave the channel
+          and must not advertise an election it will not use. A blocking
+          caller instead remembers the win in `writer_elected` and keeps
+          the subscription, so its `RedisLockMode.PENDING` record keeps
+          new readers out while the existing ones drain, and its ping
+          replies advertise the election so later writers defer.
         - **Inconclusive probe while already elected**: the subscription
-          is kept and the caller retries. An elected writer must not drop
-          its pending record over a single noisy probe; doing so would
-          let new readers in and could forfeit an election it had already
-          won, since `release` clears `writer_elected`.
-        - **Anything else**: somebody incompatible is there, or the probe
-          was inconclusive and this lock is not elected. The
-          subscription is dropped before retrying (`_unsubscribe`, which
-          keeps the connection for the next attempt). That unsubscribe
-          is the point rather than a detail: a waiter that stayed
-          subscribed would keep inflating the subscriber count that
-          everybody else's probe has to match exactly.
+          is kept and the caller retries. An elected writer must not
+          drop its pending record over a single noisy probe. Doing so
+          would let new readers in and could forfeit an election it had
+          already won, since `release` clears `writer_elected`.
+        - **Anything else**: somebody incompatible is there, the
+          election was lost or forfeited, or the probe was inconclusive
+          for an unelected lock. The subscription is dropped before
+          retrying (`_unsubscribe`, which keeps the connection for the
+          next attempt). That unsubscribe is the point rather than a
+          detail: a waiter that stayed subscribed would keep inflating
+          the subscriber count that everybody else's probe has to match
+          exactly.
 
-        With `fail_when_locked` the caller does not want to wait, so the
-        first attempt that does not end in ownership raises instead of
-        returning. An elected writer always raises here, even when no
-        readers remain and the lock could have been taken outright,
-        because that check runs before the promotion to
-        `RedisLockMode.EXCLUSIVE`; reaching this method at all means the
-        channel is contended. The one exception is an already-elected
-        writer facing
-        an inconclusive probe, which keeps retrying because it is not
-        contention that stopped it.
+        With `fail_when_locked` the caller does not want to wait for a
+        held channel, so a conclusive probe that reaches the give-up
+        branch releases everything and raises. An inconclusive probe is
+        different: it is noise, not contention, because nobody
+        demonstrably holds the channel, so the attempt returns False and
+        retries within the caller's timeout. That also lets a
+        non-blocking acquire succeed right after reaping a crashed
+        holder instead of failing spuriously. Callers that want a hard
+        single attempt pass ``timeout=0``, which bounds the retry loop
+        in `acquire` to one iteration.
 
         Args:
             holders: A conclusive probe result, or `None` when the probe
                 could not determine the state of the channel.
-            fail_when_locked: Give up immediately instead of retrying.
+            fail_when_locked: Give up on conclusive contention instead
+                of waiting for the holders to leave.
 
         Returns:
             True when the lock is now held and `acquire` may return;
             False when the caller should retry.
 
         Raises:
-            AlreadyLocked: `fail_when_locked` was set and this attempt
-                did not end in ownership.
+            AlreadyLocked: `fail_when_locked` was set and a conclusive
+                probe showed the channel actually held.
         """
         if holders is not None and self._holders_are_compatible(holders):
             return True
 
-        writer_is_elected: bool = (
-            holders is not None
-            and self.flags == constants.LockFlags.EXCLUSIVE
-            and self._writer_is_elected(holders)
-        )
-        if writer_is_elected:
-            self.writer_elected = True
-            if fail_when_locked:
-                self.release()
-                raise exceptions.AlreadyLocked()
-            if holders is not None and not any(
-                holder.mode is RedisLockMode.SHARED for holder in holders
-            ):
-                with self._mode_lock:
-                    self.mode = RedisLockMode.EXCLUSIVE
-                return True
-            return False
+        if holders is not None and self.flags == constants.LockFlags.EXCLUSIVE:
+            resolution: bool | None = self._resolve_exclusive_writer(
+                holders,
+                fail_when_locked,
+            )
+            if resolution is not None:
+                return resolution
 
         if holders is None and self.writer_elected:
             return False
 
-        self.writer_elected = False
+        with self._mode_lock:
+            self.writer_elected = False
         self._unsubscribe()
         logger.debug('Redis lock %s unsubscribed to retry', self.holder_id)
         if fail_when_locked:
+            if holders is None:
+                return False
             self.release()
             raise exceptions.AlreadyLocked()
+        return False
+
+    def _resolve_exclusive_writer(
+        self,
+        holders: list[RedisLockHolder],
+        fail_when_locked: bool,
+    ) -> bool | None:
+        """Decide for an exclusive writer holding a conclusive probe.
+
+        The election half of `_resolve_lock_holders`, split out so each
+        method carries one decision. An incumbent (``writer_elected``
+        set) never reruns the election: it keeps its win unless
+        `_must_forfeit` says the probe outranks it. A fresh contender
+        runs `_writer_is_elected`, and a winner promotes before the
+        `fail_when_locked` check so a non-blocking writer can take a
+        reader-free channel (#143).
+
+        The incumbent promotes only once the probe is clear of both
+        shared holders and undecided lower-id peers. A pending record
+        carrying ``elected: false`` from a lower id is undecided
+        because a ping reply is a snapshot that can be a full drain
+        interval old: it cannot show whether that peer probed before or
+        after this election became visible, so the peer may be about to
+        promote on its own stale view. Holding the promotion for one
+        round separates the cases, since a deferring peer has left the
+        channel by the next probe and a promoting one shows up as
+        exclusive or elected. Rerunning the election instead would
+        reintroduce the usurpation this branch exists to prevent, and
+        promoting anyway is exactly the double-holder interleaving the
+        #143 review reproduced.
+
+        One reply-staleness window is disclosed rather than closed: on
+        a free channel a contender can promote on a stale reply
+        answered between another writer's subscriber count and its
+        fast-path promotion, which predates this release, has only been
+        reproduced with injected scheduling, and now also applies to
+        `fail_when_locked` winners since they promote too. Closing it
+        needs a confirm probe after promotion and stays a separate
+        issue.
+
+        Both promotion sites take `_mode_lock` and `writer_elected` is
+        assigned under it as well, so a ping answered by the worker
+        thread can never observe the ``(mode, elected)`` pair halfway
+        through a transition (see `channel_handler`).
+
+        Args:
+            holders: The holders returned by a conclusive probe,
+                including this lock's own record.
+            fail_when_locked: Give up on conclusive contention instead
+                of waiting for the holders to leave.
+
+        Returns:
+            True when the lock is now held, False when the caller
+            should keep the subscription and retry as an elected
+            writer, or `None` when the election is lost or forfeited
+            and `_resolve_lock_holders` should run its give-up branch.
+
+        Raises:
+            AlreadyLocked: `fail_when_locked` was set, the election was
+                won, and shared holders still hold the lock, raised
+                after a full `release` and without ever setting
+                `writer_elected`.
+        """
+        shared_present: bool = any(
+            holder.mode is RedisLockMode.SHARED for holder in holders
+        )
+        if self.writer_elected:
+            if self._must_forfeit(holders):
+                return None
+            if shared_present:
+                return False
+            # A lower-id pending peer answering ``elected: false`` is
+            # undecided: its reply cannot show whether it probed before
+            # or after this election reached the wire, and a reply is
+            # stale by up to a full drain interval. Promoting past it
+            # could overlap with a promotion it made on its own stale
+            # view, so hold the promotion for a round instead. A peer
+            # that deferred unsubscribes right after its probe and is
+            # gone from the next one, while a peer that elected or
+            # promoted shows up as elected or exclusive and
+            # `_must_forfeit` fires. Higher ids never win the sort, so
+            # only lower ids need the wait.
+            undecided_lower_id: bool = any(
+                holder.holder_id != self.holder_id
+                and holder.mode is RedisLockMode.PENDING
+                and holder.elected is False
+                and holder.holder_id < self.holder_id
+                for holder in holders
+            )
+            if undecided_lower_id:
+                return False
+            with self._mode_lock:
+                self.mode = RedisLockMode.EXCLUSIVE
+            return True
+
+        if not self._writer_is_elected(holders):
+            return None
+        if not shared_present:
+            with self._mode_lock:
+                self.writer_elected = True
+                self.mode = RedisLockMode.EXCLUSIVE
+            return True
+        if fail_when_locked:
+            self.release()
+            raise exceptions.AlreadyLocked()
+        with self._mode_lock:
+            self.writer_elected = True
         return False
 
     def acquire(
@@ -1307,13 +1556,16 @@ class RedisLock(utils.LockBase['RedisLock']):
         iteration subscribes from scratch; an elected writer is the
         exception and holds on to its subscription between attempts.
 
-        `fail_when_locked` turns the retry loop into a single attempt
-        against a contended channel: rather than polling until the
-        timeout expires against a holder that has demonstrably answered a
-        ping, the first attempt that does not end in ownership raises
-        `AlreadyLocked`. An elected writer always raises here too, even
-        when no readers remain and the lock could have been taken
-        outright.
+        `fail_when_locked` means the caller will not wait for a held
+        channel: the first conclusive probe showing the lock actually
+        held raises `AlreadyLocked` instead of polling the holder until
+        the timeout expires. A writer that wins the election on a
+        channel with no readers left is not blocked by anybody, so it
+        takes the lock rather than raising, and exactly one of two
+        non-blocking contenders succeeds on a free channel (#143).
+        Inconclusive probes are noise rather than contention and are
+        retried within the timeout. Pass ``timeout=0`` to bound a
+        non-blocking acquisition to exactly one attempt.
 
         If subscribing itself fails, `_start_subscription` rolls back
         before re-raising, so the original error propagates with the lock
@@ -1327,7 +1579,8 @@ class RedisLock(utils.LockBase['RedisLock']):
                 jittered by `_timeout_generator`. Defaults to the
                 instance's `check_interval`.
             fail_when_locked: Raise `AlreadyLocked` on the first
-                unsuccessful attempt instead of retrying. Defaults to the
+                conclusive probe that shows the channel held, instead of
+                waiting for the holders to leave. Defaults to the
                 instance's `fail_when_locked`.
 
         Returns:
@@ -1337,7 +1590,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         Raises:
             ~portalocker.exceptions.AlreadyLocked: The timeout expired
                 without acquiring the lock, or `fail_when_locked` was set
-                and the first attempt did not succeed.
+                and a conclusive probe showed the channel held.
             ~portalocker.exceptions.LockException: This instance is
                 already holding a lock. A `RedisLock` is not reentrant
                 and holds at most one lock at a time; use a second
@@ -1376,8 +1629,9 @@ class RedisLock(utils.LockBase['RedisLock']):
         if self.pubsub is not None:
             raise exceptions.LockException('This lock is already active')
         if self.flags == constants.LockFlags.EXCLUSIVE:
-            self.mode = RedisLockMode.PENDING
-            self.writer_elected = False
+            with self._mode_lock:
+                self.mode = RedisLockMode.PENDING
+                self.writer_elected = False
         connection: redis.client.Redis = self.get_connection()
 
         for _ in self._timeout_generator(
@@ -1641,7 +1895,8 @@ class RedisLock(utils.LockBase['RedisLock']):
                 re-raised after the remaining steps have run.
         """
         first_error: Exception | None = None
-        self.writer_elected = False
+        with self._mode_lock:
+            self.writer_elected = False
         try:
             self._unsubscribe()
         except Exception as error:
