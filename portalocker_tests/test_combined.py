@@ -197,3 +197,32 @@ def test_combine_emits_type_checking_block_verbatim(tmp_path):
     assert 'class RedisLock' not in output
     # The dedented line after the block resumes normal handling.
     assert 'value = 1' in output
+
+
+def test_combine_without_ruff_logs_and_still_runs(
+    tmp_path, monkeypatch, caplog
+):
+    """A missing ``ruff`` binary is reported, not fatal.
+
+    The combine step shells out to ``ruff`` purely to prettify the
+    generated file. On a machine without ruff on ``PATH`` that raises
+    ``FileNotFoundError``; combine must log the skip and still smoke-run
+    the combined file with the current interpreter.
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[0] == 'ruff':
+            raise FileNotFoundError(cmd[0])
+        calls.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    output_file = tmp_path / 'combined_no_ruff.py'
+
+    with caplog.at_level(logging.WARNING, logger='portalocker.__main__'):
+        __main__.main(['combine', '--output-file', str(output_file)])
+
+    assert 'Ruff is not installed' in caplog.text
+    # The smoke run of the combined file still happened.
+    assert [sys.executable, str(output_file)] in calls

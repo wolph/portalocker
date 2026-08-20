@@ -139,3 +139,71 @@ def test_direct_posix_locker_rejects_nonblocking_alone(tmpfile):
     locker = PosixLocker()
     with open(tmpfile, 'a+') as fh, pytest.raises(RuntimeError):
         locker.lock(fh, LockFlags.NON_BLOCKING)
+
+
+# --- error translation coverage ------------------------------------------
+
+
+def test_get_fd_rejects_unsupported_object():
+    """``PosixLocker._get_fd`` must reject objects with no descriptor.
+
+    The typed signature promises an ``int``, an IO object, or a
+    ``HasFileno`` implementation, but the method is plain runtime code
+    and can be handed anything. The guard raise is part of the contract
+    and therefore measured and tested rather than excluded from
+    coverage.
+    """
+    locker = PosixLocker()
+    with pytest.raises(TypeError, match='fileno'):
+        locker._get_fd(object())  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]  # noqa: E501
+
+
+def test_lock_wraps_non_contention_oserror(set_locker, tmpfile):
+    """A non-contention ``OSError`` becomes a plain ``LockException``.
+
+    ``EACCES`` / ``EAGAIN`` mean somebody else holds the lock and map to
+    ``AlreadyLocked``. Any other errno (``ENOLCK`` here, the classic
+    "no locks available" NFS failure) is a real error, must not be
+    retried, and surfaces as the base ``LockException`` with the
+    original ``OSError`` chained as the cause.
+    """
+    import errno
+
+    failure = OSError(errno.ENOLCK, 'No locks available')
+
+    def broken_locker(fd: int, flags: int) -> None:
+        raise failure
+
+    set_locker(broken_locker)
+    locker = PosixLocker()
+    with (
+        open(tmpfile, 'a+') as fh,
+        pytest.raises(portalocker.LockException) as exc_info,
+    ):
+        locker.lock(fh, LockFlags.EXCLUSIVE)
+    assert not isinstance(exc_info.value, portalocker.AlreadyLocked)
+    assert exc_info.value.__cause__ is failure
+
+
+def test_lock_wraps_eoferror(set_locker, tmpfile):
+    """The ``EOFError`` some NFS setups raise becomes ``LockException``.
+
+    ``fcntl`` on a broken NFS mount can fail with a bare ``EOFError``
+    instead of an ``OSError``. The locker must translate it exactly like
+    any other failure instead of leaking it raw. The NFS condition
+    itself cannot be staged in a unit test, so the raising locker
+    callable stands in for the broken mount.
+    """
+    failure = EOFError('lost communication with locking daemon')
+
+    def broken_locker(fd: int, flags: int) -> None:
+        raise failure
+
+    set_locker(broken_locker)
+    locker = PosixLocker()
+    with (
+        open(tmpfile, 'a+') as fh,
+        pytest.raises(portalocker.LockException) as exc_info,
+    ):
+        locker.lock(fh, LockFlags.EXCLUSIVE)
+    assert exc_info.value.__cause__ is failure

@@ -16,7 +16,7 @@ __description__ = 'Wraps the portalocker recipe for easy usage'
 __url__ = 'https://github.com/WoLpH/portalocker'
 
 
-def _read_pyproject_version(path: Path) -> str | None:  # pragma: no cover
+def _read_pyproject_version(path: Path) -> str | None:
     """Read the version from a ``pyproject.toml`` file if available.
 
     This uses a small regex parser that looks for the ``[project]`` table
@@ -41,7 +41,7 @@ def _read_pyproject_version(path: Path) -> str | None:  # pragma: no cover
     return match.group(1) if match else None
 
 
-def get_version() -> str:  # pragma: no cover
+def get_version() -> str:
     """Return the package version at runtime.
 
     Prefers installed package metadata. When running from a source tree it

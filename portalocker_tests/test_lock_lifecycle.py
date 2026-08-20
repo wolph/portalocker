@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import gc
 import os
+import pathlib
 import subprocess
 import sys
 import typing
@@ -152,3 +153,77 @@ def test_descriptor_delete_releases_class_attribute_lock(
     )
     contender.acquire()
     contender.release()
+
+
+def test_release_locks_at_exit_releases_only_owned_locks(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The ``atexit`` hook releases this process's locks and only those.
+
+    ``_release_locks_at_exit`` normally runs while the interpreter shuts
+    down, which is why it went unmeasured for a long time. It is a plain
+    function, though, so this test drives it directly: a lock recorded
+    under the current pid is released (its file unlinked), while a lock
+    recorded under a foreign pid - the state a forked child inherits
+    from its parent - is skipped and stays held.
+    """
+    owned_path: str = str(tmp_path / 'owned.lock')
+    foreign_path: str = str(tmp_path / 'foreign.lock')
+
+    owned = portalocker.TemporaryFileLock(owned_path, timeout=0)
+    owned.acquire()
+    foreign = portalocker.TemporaryFileLock(foreign_path, timeout=0)
+    foreign.acquire()
+    # Pretend the foreign lock was taken by the (fictional) parent.
+    utils._exit_releases[foreign] = os.getpid() + 12345
+
+    try:
+        assert os.path.isfile(owned_path)
+        assert os.path.isfile(foreign_path)
+
+        utils._release_locks_at_exit()
+
+        # The owned lock was released and its file removed. The foreign
+        # lock was left alone for its owning process to release.
+        assert not os.path.isfile(owned_path)
+        assert owned.fh is None
+        assert os.path.isfile(foreign_path)
+        assert foreign.fh is not None
+    finally:
+        utils._exit_releases.pop(foreign, None)
+        foreign.release()
+
+
+def test_release_locks_at_exit_suppresses_release_errors(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A failing ``release`` cannot break the interpreter-exit sweep.
+
+    Errors are suppressed because nobody is left to handle them at exit,
+    and one broken lock must not stop the remaining locks from being
+    released.
+    """
+    broken_path: str = str(tmp_path / 'broken.lock')
+    healthy_path: str = str(tmp_path / 'healthy.lock')
+
+    broken = portalocker.TemporaryFileLock(broken_path, timeout=0)
+    broken.acquire()
+    healthy = portalocker.TemporaryFileLock(healthy_path, timeout=0)
+    healthy.acquire()
+
+    def exploding_release() -> None:
+        raise RuntimeError('release failed at exit')
+
+    # Instance attribute shadows the method for this object only.
+    broken.release = exploding_release  # type: ignore[method-assign]  # ty: ignore[invalid-assignment]  # noqa: E501
+
+    try:
+        utils._release_locks_at_exit()
+        # The broken lock's failure was swallowed and the healthy lock
+        # was still released.
+        assert not os.path.isfile(healthy_path)
+        assert healthy.fh is None
+    finally:
+        del broken.release
+        utils._exit_releases.pop(broken, None)
+        broken.release()

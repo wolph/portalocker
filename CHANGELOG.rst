@@ -1,5 +1,23 @@
 4.1.1:
 
+ * Made the 100% coverage gate measure what it claims: the entire
+   Windows locking implementation, the ``LockBase`` base class (the
+   timeout generator, the context manager protocol and the retry
+   plumbing), the version discovery fallbacks, the redis-less
+   ``RedisLock`` stub and the pubsub failure escalation were all
+   excluded wholesale via blanket ``pragma: no cover`` comments, so the
+   gate passed without those regions ever being measured. Platform
+   splits now use the per-OS conditional coverage rules (measured on
+   the platform they run on, excluded only where they cannot run), the
+   policy-wide exemptions for guard raises (``raise AssertionError``,
+   ``raise NotImplementedError``, ``except ImportError:`` and friends)
+   are gone from the coverage configuration, and the newly measured
+   code is exercised by tests on every platform. The fork-safety hook
+   registration was also tagged for the wrong platform: it was excluded
+   on POSIX, where it runs, and measured on Windows, where it cannot
+   run. Two unreachable defensive ``import msvcrt`` guards inside the
+   ``os.name == 'nt'`` branch were removed outright: ``msvcrt`` ships
+   with every Windows Python build
  * Fixed two concurrent ``release()`` calls on one ``Lock`` unlocking a
    stranger's lock: both callers passed the held-handle guard, and the
    loser then ran the OS unlock on a closed and possibly reused file

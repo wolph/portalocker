@@ -408,13 +408,19 @@ def _reinit_state_locks_after_fork() -> None:
         lock._state_lock._at_fork_reinit()  # type: ignore[attr-defined]  # pyrefly: ignore[missing-attribute]  # ty: ignore[unresolved-attribute]  # noqa: E501
 
 
-# Windows has no fork, and no `os.register_at_fork` to register with.
+# Windows has no fork, and no `os.register_at_fork` to register with. The
+# hook exists on every POSIX build and never on nt, so the condition is a
+# platform constant: branch tracking is disabled instead of pretending
+# both outcomes are reachable on one platform, and the nt-unreachable
+# registration itself is excluded only there.
 _register_at_fork = getattr(os, 'register_at_fork', None)
-if _register_at_fork is not None:  # pragma: not-nt
-    _register_at_fork(after_in_child=_reinit_state_locks_after_fork)
+if _register_at_fork is not None:  # pragma: no branch - platform constant
+    _register_at_fork(  # pragma: not-posix
+        after_in_child=_reinit_state_locks_after_fork,
+    )
 
 
-class LockBase(  # pragma: no cover
+class LockBase(
     abc.ABC,
     typing.Generic[AcquireReturnT],
 ):
@@ -714,7 +720,7 @@ def _stacklevel_beyond_module() -> int:
         introspection (CPython always does).
     """
     frame: FrameType | None = inspect.currentframe()
-    if frame is None:  # pragma: no cover - non-CPython fallback
+    if frame is None:
         return 1
     # Start at the caller of this helper: stacklevel 1 is its own frame.
     frame = frame.f_back
@@ -911,11 +917,11 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             or bool(self.flags & constants.LockFlags.NON_BLOCKING)
         ):
             return
-        self._timeout_warned = True  # pragma: nt-no-pywin32
+        self._timeout_warned = True
         warnings.warn(
             'timeout has no effect in blocking mode',
             stacklevel=_stacklevel_beyond_module(),
-        )  # pragma: nt-no-pywin32
+        )
 
     def acquire(
         self,
@@ -1501,7 +1507,7 @@ _exit_releases: weakref.WeakKeyDictionary[TemporaryFileLock, int] = (
 )
 
 
-def _release_locks_at_exit() -> None:  # pragma: no cover - interpreter exit
+def _release_locks_at_exit() -> None:
     """Release every still-live `TemporaryFileLock` at interpreter exit.
 
     Registered with `atexit` exactly once, at import time, instead of once

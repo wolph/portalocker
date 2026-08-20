@@ -2411,3 +2411,63 @@ def test_redis_release_raises_connection_close_error(
 
     assert exc_info.value is close_error
     assert lock.connection is None
+
+
+def test_pubsub_worker_thread_failure_interrupts_main(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dying pubsub reader must interrupt the main thread, then re-raise.
+
+    The subscription this thread services *is* the lock, so a quietly
+    dying reader would leave the process believing it holds a lock the
+    rest of the world considers released. The escalation path runs the
+    thread body directly (no thread is started) with the underlying
+    redis-py reader patched to fail, and the ``interrupt_main`` call is
+    recorded instead of actually interrupting the test process.
+    """
+    interrupts: list[bool] = []
+    monkeypatch.setattr(
+        _thread, 'interrupt_main', lambda: interrupts.append(True)
+    )
+
+    failure: RuntimeError = RuntimeError('connection dropped')
+
+    def broken_reader(self: client.PubSubWorkerThread) -> None:
+        raise failure
+
+    monkeypatch.setattr(client.PubSubWorkerThread, 'run', broken_reader)
+
+    pubsub: client.PubSub = fakeredis.FakeStrictRedis(
+        decode_responses=True
+    ).pubsub()  # type: ignore[no-untyped-call]
+    worker: redis.PubSubWorkerThread = redis.PubSubWorkerThread(
+        pubsub,
+        sleep_time=0.01,
+        daemon=True,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        worker.run()
+
+    assert exc_info.value is failure
+    assert interrupts == [True]
+
+
+def test_channel_handler_ignores_control_frames(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """Subscribe confirmations and other control frames are dropped.
+
+    ``channel_handler`` only answers frames of type ``message``. The
+    subscribe/unsubscribe confirmations redis-py can hand a channel
+    callback must return without touching the connection at all. The
+    handler is called directly with a control frame, exactly as the
+    pubsub dispatch would.
+    """
+    lock_obj: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+    )
+    # Publishes nothing and raises nothing despite the frame carrying
+    # no usable payload.
+    lock_obj.channel_handler({'type': 'subscribe', 'data': '1'})

@@ -155,23 +155,22 @@ plugins = ['coverage_conditional_plugin']
 [tool.coverage.report]
 fail_under = 100
 ignore_errors = true
+# Only constructs that cannot execute at runtime are excluded by policy:
+# type-only blocks, the CLI entry-point guard and Protocol stub bodies.
+# Guard raises (AssertionError / NotImplementedError), ImportError
+# fallbacks and debug branches are measured like any other code and need
+# either a test or an explicit per-line pragma naming the reason.
 exclude_also = [
     'pragma: no cover',
-    'def __repr__',
-    'if self.debug:',
-    'if settings.DEBUG',
     'if typing.TYPE_CHECKING:',
     'if TYPE_CHECKING:',
     '@(typing\.)?overload',
-    'raise AssertionError',
-    'raise NotImplementedError',
-    'except ImportError:',
-    'if 0:',
     'if __name__ == .__main__.:', # CLI entry-point guard, not exercised by imports
     'typing.Protocol',
 ]
 
-# The `not-nt` / `not-posix` / `nt-no-pywin32` pragmas above are resolved
+# The `not-nt` / `not-posix` / `nt-no-pywin32` / `nt-or-posix` pragmas are
+# resolved
 # per-OS by coverage-conditional-plugin (see rules below) rather than the
 # static `exclude_also` list, so a POSIX-only branch stays *measured* on POSIX
 # (and is only excluded on the platforms where it cannot run) instead of being
@@ -182,6 +181,7 @@ exclude_also = [
 not-nt = "os_name != 'nt'"
 not-posix = "os_name != 'posix'"
 nt-no-pywin32 = "os_name == 'nt' and not is_installed('win32file')"
+nt-or-posix = "os_name in ('nt', 'posix')"
 
 [tool.mypy]
 python_version = '3.10'

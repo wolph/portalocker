@@ -114,3 +114,23 @@ def test_exception(monkeypatch, tmpdir):
 
     with pytest.raises(exceptions.LockException):
         lock.acquire()
+
+
+def test_base_locker_methods_are_abstract_by_raise(tmpfile):
+    """``BaseLocker.lock`` and ``unlock`` must refuse to run unimplemented.
+
+    ``BaseLocker`` is the documented extension point for custom locking
+    mechanisms. It is a plain class rather than an ABC, so forgetting to
+    override a method surfaces at call time: both placeholders raise
+    ``NotImplementedError``. These raises used to be hidden from coverage
+    by a blanket ``raise NotImplementedError`` exemption. They are guard
+    behavior and are measured and pinned here instead.
+    """
+    from portalocker.portalocker import BaseLocker
+
+    locker = BaseLocker()
+    with open(tmpfile, 'a') as fh:
+        with pytest.raises(NotImplementedError):
+            locker.lock(fh, portalocker.LockFlags.EXCLUSIVE)
+        with pytest.raises(NotImplementedError):
+            locker.unlock(fh)

@@ -196,7 +196,7 @@ class PubSubWorkerThread(redis.client.PubSubWorkerThread):
         """
         try:
             super().run()
-        except Exception:  # pragma: no cover
+        except Exception:
             _thread.interrupt_main()
             raise
 
@@ -443,7 +443,7 @@ class RedisLock(utils.LockBase['RedisLock']):
                 ``message`` are answered; subscribe confirmations and
                 other control frames are dropped.
         """
-        if message.get('type') != 'message':  # pragma: no cover
+        if message.get('type') != 'message':
             return
 
         raw_data: str | None = message.get('data')

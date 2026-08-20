@@ -97,3 +97,41 @@ def test_dunder_version_is_string() -> None:
     """portalocker.__version__ should be a non-empty string."""
     assert isinstance(portalocker.__version__, str)
     assert len(portalocker.__version__) > 0
+
+
+def test_read_pyproject_version_returns_none_when_unreadable(
+    tmp_path: Path,
+) -> None:
+    """An unreadable pyproject file must yield ``None``, not an error.
+
+    Version discovery is best-effort: a source tree without a readable
+    ``pyproject.toml`` (here simply a path that does not exist) makes
+    ``_read_pyproject_version`` swallow the read failure and report
+    ``None`` so ``get_version`` can fall through to its last-resort
+    default.
+    """
+    import portalocker.__about__ as about
+
+    assert about._read_pyproject_version(tmp_path / 'missing.toml') is None
+
+
+def test_get_version_last_resort_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no metadata and no pyproject, ``get_version`` returns 0.0.0.
+
+    Both discovery mechanisms failing at once (no installed
+    distribution, no parseable pyproject) still must produce a version
+    string rather than an exception at import time.
+    """
+    import portalocker.__about__ as about
+
+    def _raise(_: str) -> str:
+        raise RuntimeError('not installed')
+
+    monkeypatch.setattr('importlib.metadata.version', _raise, raising=True)
+    monkeypatch.setattr(
+        about, '_read_pyproject_version', lambda _path: None, raising=True
+    )
+
+    assert about.get_version() == '0.0.0'

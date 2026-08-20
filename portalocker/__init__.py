@@ -43,7 +43,7 @@ from .utils import (
 
 try:
     from .redis import RedisLock  # pyright: ignore[reportAssignmentType]
-except ImportError:  # pragma: no cover
+except ImportError:
     # `redis` is an optional dependency; keep the attribute importable so
     # the missing dependency surfaces at use time, not import time. Before
     # 4.1.1 the fallback was `None`, so constructing it failed with the

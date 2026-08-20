@@ -183,19 +183,17 @@ def _resolve_locker_pair(
     alone, so the concrete forms are recovered with explicit casts.
     """
     if isinstance(locker, BaseLocker):
-        return locker.lock, locker.unlock  # pragma: nt-no-pywin32
+        return locker.lock, locker.unlock
     if isinstance(locker, tuple):
-        pair = cast(
-            'tuple[LockCallable, UnlockCallable]', locker
-        )  # pragma: nt-no-pywin32
-        return pair[0], pair[1]  # pragma: nt-no-pywin32
+        pair = cast('tuple[LockCallable, UnlockCallable]', locker)
+        return pair[0], pair[1]
     if isinstance(locker, type):
         locker_cls = cast('type[BaseLocker]', locker)
         instance = _locker_instances.get(locker_cls)
         if instance is None:
             instance = _locker_instances[locker_cls] = locker_cls()
         return instance.lock, instance.unlock
-    return None  # pragma: not-posix
+    return None
 
 
 def _validate_lock_flags(flags: LockFlags) -> None:
@@ -284,7 +282,15 @@ def _resolve_msvcrt_lock_modes(msvcrt_module: object) -> dict[str, int]:
     }
 
 
-if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
+# The Windows implementation is measured on the Windows CI cells and only
+# excluded where it cannot run (POSIX, via the `not-nt` plugin rule).
+# The pywin32-only method bodies inside carry `nt-no-pywin32` so the
+# pywin32-less Windows cell is not failed on code it cannot reach.
+if os.name == 'nt':  # pragma: not-nt
+    # ``msvcrt`` ships with every Windows Python build, so inside this
+    # branch the import cannot fail and needs no guard.
+    import msvcrt
+
     # Windows-specific helper functions
     def _prepare_windows_file(
         file_obj: types.FileArgument,
@@ -428,20 +434,14 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
 
             Returns:
                 The Win32 file handle owning `fd`.
-
-            Raises:
-                ImportError: The built-in ``msvcrt`` module is missing.
             """
-            try:
-                import msvcrt
-            except ImportError as e:
-                raise ImportError(
-                    'msvcrt is required for _get_os_handle on Windows '
-                    'but not found.'
-                ) from e
             return cast(int, msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined]
 
-        def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
+        def lock(  # pragma: nt-no-pywin32 - the body needs pywin32
+            self,
+            file_obj: types.FileArgument,
+            flags: LockFlags,
+        ) -> None:
             """Lock `file_obj` through ``win32file.LockFileEx``.
 
             The file position is normalized to byte 0 before the call and
@@ -518,7 +518,10 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
             finally:
                 _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
-        def unlock(self, file_obj: types.FileArgument) -> None:
+        def unlock(  # pragma: nt-no-pywin32 - the body needs pywin32
+            self,
+            file_obj: types.FileArgument,
+        ) -> None:
             """Release a lock through ``win32file.UnlockFileEx``.
 
             ``ERROR_NOT_LOCKED`` is swallowed, so unlocking a range that
@@ -592,10 +595,6 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
             table whose values were wrong: ``LK_LOCK`` fell back to 0,
             which is ``LK_UNLCK``, so a "blocking lock" through the
             fallback would have issued an unlock.
-
-            Raises:
-                ImportError: The built-in ``msvcrt`` module is missing,
-                    i.e. this is not a Windows Python build.
             """
             try:
                 self._win32_locker = Win32Locker()
@@ -605,13 +604,6 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                 # below; shared locks and the unlock() fallback raise
                 # informative errors instead of crashing here.
                 self._win32_locker = None
-            try:
-                import msvcrt
-            except ImportError as e:
-                raise ImportError(
-                    'msvcrt is required for MsvcrtLocker but not found.'
-                ) from e
-
             self._lock_modes = _resolve_msvcrt_lock_modes(msvcrt)
 
         def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
@@ -660,8 +652,6 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                         locker.lock(fh, LockFlags.EXCLUSIVE)
                         locker.unlock(fh)
             """
-            import msvcrt
-
             if flags & LockFlags.SHARED:
                 win32_locker = self._win32_locker
                 if win32_locker is None:
@@ -724,8 +714,6 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                     fallback itself failed, in which case the message reports
                     both failures.
             """
-            import msvcrt
-
             fd, io_obj_ctx, pos_ctx = _prepare_windows_file(file_obj)
             took_fallback_path = False
 
@@ -958,7 +946,7 @@ else:  # pragma: not-posix
             # Check for fileno() method; covers typing.IO and HasFileno
             elif hasattr(file_obj, 'fileno') and callable(file_obj.fileno):
                 return file_obj.fileno()
-            else:  # pragma: no cover - defensive, unreachable in practice
+            else:
                 # Should not be reached if PosixFileArgument is correct.
                 # isinstance(file_obj, io.IOBase) could be an
                 # alternative check
@@ -1025,13 +1013,13 @@ else:  # pragma: not-posix
                         str(exc_value),
                         fh=file_obj,  # Pass original file_obj
                     ) from exc_value
-                else:  # pragma: no cover - non-contention errno, not exercised
+                else:
                     raise exceptions.LockException(
                         exc_value,
                         str(exc_value),
                         fh=file_obj,  # Pass original file_obj
                     ) from exc_value
-            except EOFError as exc_value:  # pragma: no cover - NFS-specific
+            except EOFError as exc_value:
                 raise exceptions.LockException(
                     exc_value,
                     str(exc_value),

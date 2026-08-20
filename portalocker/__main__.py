@@ -379,13 +379,13 @@ def combine(args: argparse.Namespace) -> None:
 
     logger.info(f'Wrote combined file to {output_path}')
     # Run ruff if available. If not then just run the file.
-    try:  # pragma: no cover
+    try:
         subprocess.run(['ruff', 'format', str(output_path)], timeout=3)
         subprocess.run(
             ['ruff', 'check', '--fix', '--fix-only', str(output_path)],
             timeout=3,
         )
-    except FileNotFoundError:  # pragma: no cover
+    except FileNotFoundError:
         logger.warning(
             'Ruff is not installed. Skipping linting and formatting step.'
         )

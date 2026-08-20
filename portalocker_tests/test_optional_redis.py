@@ -63,3 +63,68 @@ def test_redislock_without_redis_raises_importerror():
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'OK' in result.stdout
+
+
+def test_redislock_stub_import_and_raise_in_process():
+    """Execute the redis-less import fallback under coverage measurement.
+
+    The subprocess test above proves the user-facing behaviour, but a
+    subprocess leaves no trace in the coverage data, which is how the
+    fallback stayed hidden behind a ``pragma: no cover`` for years. Here
+    the package's ``__init__.py`` is executed a second time, in this
+    process, under an alias whose ``.redis`` submodule import is blocked,
+    so the ``except ImportError`` branch and the stub class body are
+    measured like any other code.
+    """
+    import importlib.abc
+    import importlib.machinery
+    import importlib.util
+    import types as types_module
+
+    alias = '_portalocker_no_redis'
+    package_dir = _REPO_ROOT / 'portalocker'
+
+    class SubmoduleBlocker(importlib.abc.MetaPathFinder):
+        """Make ``from .redis import ...`` fail inside the aliased package."""
+
+        def find_spec(
+            self,
+            name: str,
+            path: object = None,
+            target: object = None,
+        ) -> None:
+            if name == f'{alias}.redis':
+                raise ImportError('redis is hidden for this test')
+            return
+
+    spec: importlib.machinery.ModuleSpec | None = (
+        importlib.util.spec_from_file_location(
+            alias,
+            package_dir / '__init__.py',
+            submodule_search_locations=[str(package_dir)],
+        )
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module: types_module.ModuleType = importlib.util.module_from_spec(spec)
+
+    blocker = SubmoduleBlocker()
+    sys.meta_path.insert(0, blocker)
+    sys.modules[alias] = module
+    try:
+        spec.loader.exec_module(module)
+
+        stub: type = module.RedisLock
+        assert isinstance(stub, type)
+        try:
+            stub('some_channel')
+        except ImportError as exc:
+            assert 'pip install "portalocker[redis]"' in str(exc)
+        else:
+            raise AssertionError(
+                'stub RedisLock construction did not raise ImportError'
+            )
+    finally:
+        sys.meta_path.remove(blocker)
+        for name in [n for n in sys.modules if n.split('.')[0] == alias]:
+            del sys.modules[name]

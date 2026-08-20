@@ -122,3 +122,23 @@ def test_rlock_acquire_timeout_warning_names_caller(tmpfile: str) -> None:
     assert len(record) == 1
     assert record[0].filename == __file__
     lock.release()
+
+
+def test_stacklevel_falls_back_without_frame_introspection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without frame introspection the stacklevel falls back to ``1``.
+
+    ``inspect.currentframe()`` may return ``None`` on interpreters that
+    do not expose Python stack frames. CPython and PyPy always do, so
+    the fallback cannot be reached by walking a real stack. The patched
+    ``currentframe`` stands in for such an interpreter and the helper
+    must degrade to stacklevel ``1`` (blaming the caller) instead of
+    crashing.
+    """
+    import inspect
+
+    from portalocker import utils
+
+    monkeypatch.setattr(inspect, 'currentframe', lambda: None)
+    assert utils._stacklevel_beyond_module() == 1
