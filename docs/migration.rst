@@ -168,9 +168,10 @@ On 3.x, `Lock.release` unlocked and then closed, with no error handling
 around either step. An unlock failure therefore propagated to the caller
 *and* skipped the close, leaving the handle open and ``lock.fh`` still
 set. Since 4.0.0 both steps are always attempted and ``lock.fh`` is
-always cleared, and failures are swallowed by default -- which matters
-most where you cannot handle them anyway, in ``__del__`` and when leaving
-a ``with`` block that is already unwinding an exception:
+always cleared, and failures are suppressed by default -- which matters
+most where you cannot handle them anyway, such as a ``with`` block that
+is already unwinding an exception, or the ``atexit`` cleanup of
+`TemporaryFileLock`:
 
 >>> import portalocker
 >>> lock = portalocker.Lock('release_demo.txt', 'w', timeout=1)
@@ -191,6 +192,13 @@ Opt back into reporting with ``raise_on_release_error=True`` (#117):
 Traceback (most recent call last):
     ...
 ValueError: I/O operation on closed file
+
+.. note::
+   The 4.0.0 changelog originally described this as ``release()``
+   "continuing" to suppress these errors. That was wrong: 3.x propagated
+   them, so the suppression is a 4.0.0 behaviour change. Since 4.1.1 a
+   suppressed release error is logged at warning level on the
+   ``portalocker.utils`` logger instead of vanishing entirely.
 
 ``BoundedSemaphore`` recovers from non-contention errors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

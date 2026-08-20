@@ -73,6 +73,33 @@
    losing waiters retry. Also documented that ``RedisLock`` requires a
    single standalone Redis endpoint, since ``PUBSUB NUMSUB`` is node-local
    in cluster and replica setups (#139)
+ * Fixed a 4.0.0 regression where garbage collection of a lock object tore
+   down a held lock: ``LockBase.__del__`` released the OS lock, closed the
+   filehandle and, for ``TemporaryFileLock`` and ``PidFileLock``, unlinked
+   the lock file the moment the wrapper was collected. The throwaway idiom
+   ``fh = Lock(path).acquire()`` therefore lost mutual exclusion instantly,
+   since only the filehandle stays referenced. The finalizer is removed,
+   restoring the 3.2.0 semantics, and ``TemporaryFileLock`` still cleans
+   up a lock held at interpreter exit through its ``atexit`` handler
+ * ``release()`` now honours ``raise_on_release_error=False`` on every
+   teardown path: ``TemporaryFileLock.release()`` suppressed only
+   ``FileNotFoundError`` from the unlink, so for example a
+   ``PermissionError`` from a read-only directory escaped despite the
+   default and could replace an exception already leaving a ``with``
+   block. Suppressed release errors are now logged at warning level
+   instead of disappearing, and ``Lock.__exit__`` guarantees the block's
+   own exception wins whether or not ``raise_on_release_error`` is set,
+   with the release error chained on as its ``__context__``
+ * Fixed ``LockBase.__delete__`` releasing the wrong object: deleting a
+   lock stored as a class attribute (``del owner.attribute``) called
+   ``release()`` on the owner instead of the lock, raising
+   ``AttributeError`` and leaving the lock held. The lock now releases
+   itself
+ * Corrected the 4.0.0 changelog entry that claimed ``Lock.release()``
+   "continues suppressing unlock and close errors by default": 3.x
+   propagated those errors, so the suppression was a 4.0.0 behaviour
+   change. The default stays as documented in 4.0.0, now with the
+   warning-level logging described above
 
 4.1.0:
 
@@ -157,10 +184,11 @@
    ``LockException`` per the documented contract
  * ``RedisLock`` tests now run everywhere via ``fakeredis``, with a live
    Redis server still tested in CI
- * ``Lock.release()`` continues suppressing unlock and close errors by default;
-   closing is always attempted and the file handle reference is cleared.
-   Callers can opt into reporting cleanup failures with
-   ``Lock(..., raise_on_release_error=True)`` (#117)
+ * Behaviour change: ``Lock.release()`` now suppresses unlock and close
+   errors by default, where 3.x propagated them (and an unlock failure
+   skipped the close). Closing is always attempted and the file handle
+   reference is cleared. Callers can opt into reporting cleanup failures
+   with ``Lock(..., raise_on_release_error=True)`` (#117)
  * ``TemporaryFileLock.release()`` and ``PidFileLock.release()`` are now
    no-ops when the object does not hold the lock, so a stale object (double
    release, or garbage collection of a failed acquire) can no longer unlink

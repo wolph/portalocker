@@ -97,11 +97,10 @@ A stale lock file is left behind after a crash
 ----------------------------------------------
 
 **Cause:** `TemporaryFileLock` and `PidFileLock` remove their lock file
-in `release`, with two fallbacks for code that forgets to call it:
-garbage collection (`LockBase.__del__`) and an `atexit` handler
-registered when the lock is constructed. None of those three run when
-the process is killed outright -- ``SIGKILL``, a segfault, a lost VM --
-so the file stays on disk.
+in `release`, with one fallback for code that forgets to call it: an
+`atexit` handler registered when the lock is constructed. Neither runs
+when the process is killed outright -- ``SIGKILL``, a segfault, a lost
+VM -- so the file stays on disk.
 
 This is expected, and mostly harmless. The kernel releases the
 process's advisory lock the moment it dies, file present or not, so the
