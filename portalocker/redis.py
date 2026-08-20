@@ -464,8 +464,12 @@ class RedisLock(utils.LockBase['RedisLock']):
             with this lock as its only argument. It runs on the
             keep-alive worker thread, so keep it short, do not block in
             it, and do not take application locks inside it; anything it
-            raises is caught and logged rather than propagated. `None`
-            (the default) disables the callback.
+            raises is caught and logged rather than propagated. The
+            loss is recorded first and the callback runs afterwards, so
+            `lost` can already be `True` while the callback has not run
+            yet: code that needs the callback to have completed must
+            wait on the callback, not on `lost`. `None` (the default)
+            disables the callback.
         interrupt_on_lost: Whether losing a held lock also interrupts
             the main thread with a `KeyboardInterrupt`. The default
             (`None`) currently behaves as `True` and emits a

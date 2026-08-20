@@ -235,9 +235,11 @@ server:
 ...     raise redis.exceptions.ConnectionError('connection killed')
 >>> lock.pubsub.get_message = broken_read
 >>> import time
->>> while not lock.lost:  # the worker notices within its sleep interval
+>>> while not lost_locks:  # the worker notices within its sleep interval
 ...     time.sleep(0.01)
 >>> lost_locks == [lock]
+True
+>>> lock.lost  # recorded before the callback ran, so already true here
 True
 >>> try:
 ...     lock.ensure_held()
