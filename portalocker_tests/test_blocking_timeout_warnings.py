@@ -1,10 +1,12 @@
 """The "timeout has no effect in blocking mode" warning contract.
 
-The warning fires at most once per lock instance, points at the caller
-(``stacklevel=2``), and never fires for subclasses that were constructed
-without any timeout argument. The whole suite runs with
-``filterwarnings = error``, so a stray warning in these constructors
-would already fail unrelated user suites configured the same way.
+The warning fires at most once per lock instance, points at the
+caller's own file for every entry point (the stacklevel is computed by
+walking past portalocker's internal frames), and never fires for
+subclasses that were constructed without any timeout argument. The
+whole suite runs with ``filterwarnings = error``, so a stray warning in
+these constructors would already fail unrelated user suites configured
+the same way.
 """
 
 import warnings
@@ -81,7 +83,42 @@ def test_pid_file_lock_without_timeout_is_silent(tmpfile: str) -> None:
         portalocker.PidFileLock(tmpfile, flags=BLOCKING)
 
 
-def test_explicit_timeout_still_warns_in_subclass(tmpfile: str) -> None:
-    """A real, caller-provided timeout still triggers the warning."""
-    with pytest.warns(UserWarning, match='timeout has no effect'):
-        portalocker.RLock(tmpfile, timeout=1, flags=BLOCKING)
+@pytest.mark.parametrize(
+    'lock_class',
+    [
+        portalocker.RLock,
+        portalocker.TemporaryFileLock,
+        portalocker.PidFileLock,
+    ],
+)
+def test_explicit_timeout_still_warns_in_subclass(
+    lock_class: type,
+    tmpfile: str,
+) -> None:
+    """A caller-provided timeout warns once and names the caller's file.
+
+    Each subclass constructor stacks its own frames on top of
+    ``Lock.__init__``, so a fixed stacklevel would blame portalocker's
+    own source here. The computed stacklevel must walk past all of them.
+    """
+    with pytest.warns(UserWarning, match='timeout has no effect') as record:
+        lock_class(tmpfile, timeout=1, flags=BLOCKING)
+    assert len(record) == 1
+    assert record[0].filename == __file__
+
+
+def test_rlock_acquire_timeout_warning_names_caller(tmpfile: str) -> None:
+    """The ``RLock.acquire`` chain also attributes the warning correctly.
+
+    ``RLock.acquire`` delegates to ``Lock.acquire``, adding one more
+    internal frame between the caller and the warning.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        lock = portalocker.RLock(tmpfile, flags=BLOCKING)
+
+    with pytest.warns(UserWarning, match='timeout has no effect') as record:
+        lock.acquire(timeout=0.1)
+    assert len(record) == 1
+    assert record[0].filename == __file__
+    lock.release()

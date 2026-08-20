@@ -45,6 +45,7 @@ import atexit
 import collections.abc
 import contextlib
 import errno
+import inspect
 import logging
 import os
 import pathlib
@@ -54,6 +55,7 @@ import time
 import typing
 import warnings
 import weakref
+from types import FrameType
 
 from . import constants, exceptions, portalocker, types
 from .types import Filename, Mode
@@ -429,6 +431,40 @@ class LockBase(  # pragma: no cover
             self.release()
 
 
+def _stacklevel_beyond_module() -> int:
+    """Return the `warnings.warn` stacklevel of the first foreign frame.
+
+    Computed for the caller: starting from the function that called this
+    helper, every consecutive stack frame that still lives in this
+    module is skipped, and the returned stacklevel makes
+    `warnings.warn`, invoked from that caller, attribute the warning to
+    the first frame outside the module. That keeps warnings pointing at
+    the user's own code no matter how many subclass constructors or
+    ``acquire`` wrappers sit in between: `Lock` warns through one
+    internal frame, `RLock` and `TemporaryFileLock` through two,
+    `PidFileLock` through three.
+
+    Python 3.12 grew ``warnings.warn(skip_file_prefixes=...)`` for
+    exactly this job. This helper is the 3.10 compatible spelling.
+
+    Returns:
+        The stacklevel to pass to `warnings.warn` from the caller's
+        frame, at least ``1``. Falls back to ``1``, which names the
+        caller itself, when the interpreter offers no frame
+        introspection (CPython always does).
+    """
+    frame: FrameType | None = inspect.currentframe()
+    if frame is None:  # pragma: no cover - non-CPython fallback
+        return 1
+    # Start at the caller of this helper: stacklevel 1 is its own frame.
+    frame = frame.f_back
+    stacklevel: int = 1
+    while frame is not None and frame.f_code.co_filename == __file__:
+        stacklevel += 1
+        frame = frame.f_back
+    return stacklevel
+
+
 def _restore_positional_writes(fh: types.IO) -> None:  # pragma: not-posix
     """Clear the kernel append flag so ``fh`` honours seek positions.
 
@@ -511,8 +547,10 @@ class Lock(LockBase[typing.IO[typing.Any]]):
     file_open_kwargs: dict[str, typing.Any]
     #: whether the "timeout has no effect in blocking mode" warning has
     #: already been emitted for this instance. It fires at most once per
-    #: lock, at construction or on the first `acquire` with a timeout
-    _timeout_warned: bool
+    #: lock, at construction or on the first `acquire` with a timeout.
+    #: A real class-level default, so a subclass that skips
+    #: `Lock.__init__` can still `acquire` without an `AttributeError`
+    _timeout_warned: bool = False
 
     def __init__(
         self,
@@ -589,8 +627,11 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         system waits inside the locking call itself, so a timeout has
         nothing left to do. The warning fires at most once per instance,
         whether that happens at construction or on the first `acquire`
-        that passes a timeout, and it points at the caller thanks to the
-        ``stacklevel`` (both call sites sit one frame below the caller).
+        that passes a timeout. Its stacklevel is computed by
+        `_stacklevel_beyond_module`, so it names the caller's own file
+        for every entry point: a `Lock` built directly, the `RLock`,
+        `TemporaryFileLock` and `PidFileLock` constructors, and the
+        ``acquire`` chains of all four.
 
         Args:
             timeout: The caller-provided timeout, or `None` when the
@@ -605,7 +646,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         self._timeout_warned = True  # pragma: nt-no-pywin32
         warnings.warn(
             'timeout has no effect in blocking mode',
-            stacklevel=3,
+            stacklevel=_stacklevel_beyond_module(),
         )  # pragma: nt-no-pywin32
 
     def acquire(

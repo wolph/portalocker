@@ -83,11 +83,18 @@
  * Behaviour change: ``Lock.acquire`` now retries only contention, which
    the locking backend reports as ``AlreadyLocked``. A plain
    ``LockException``, such as ``flock`` refusing a FIFO or an NFS/SMB
-   mount without locking support, or ``ENOLCK``, is permanent: it is now
-   raised immediately instead of being retried for the whole timeout, and
-   with ``fail_when_locked=True`` it is no longer wrapped in
+   mount without locking support, ``ENOLCK``, or the ``EOFError`` some
+   NFS setups raise from ``fcntl``, is permanent: it is now raised
+   immediately instead of being retried for the whole timeout, because
+   retrying cannot make a filesystem grow locking support. With
+   ``fail_when_locked=True`` it is no longer wrapped in
    ``AlreadyLocked``, which claimed somebody held a lock on a filesystem
-   that cannot lock at all
+   that cannot lock at all. The same classification reaches
+   ``BoundedSemaphore``: a plain ``LockException`` while probing a slot
+   used to be mistaken for a taken slot and skipped, it now propagates
+   and aborts the acquire. Custom lockers must raise ``AlreadyLocked``
+   for contention to keep being retried, as the bundled lockers already
+   do
  * Fixed ``LockBase._timeout_generator`` sleeping past its deadline by up
    to one full ``check_interval``: a contended ``Lock(timeout=0.5,
    check_interval=3)`` gave up after roughly 3 seconds instead of 0.5.
@@ -101,7 +108,9 @@
    without any timeout argument, which failed user suites running with
    ``filterwarnings = error``. The subclasses now forward ``None`` so the
    default timeout no longer counts as caller-provided, and the warning
-   fires at most once per lock instance with ``stacklevel=2``
+   fires at most once per lock instance, with a stacklevel computed by
+   walking past portalocker's internal frames so it names the caller's
+   file from every entry point, subclass constructors included
  * Behaviour change: ``RLock.acquire`` on an instance whose acquire count
    claims the lock is held while no filehandle exists now raises
    ``portalocker.LockException`` instead of relying on a bare ``assert``,

@@ -60,7 +60,10 @@ def test_rlock_inconsistent_state_raises_optimized(tmpdir):
     tmpfile = str(tmpdir.join('test_rlock_optimized.lock'))
     code: str = (
         'import sys\n'
-        'assert not __debug__, "expected -O mode"\n'
+        '# A bare assert would be stripped by -O itself, so check\n'
+        '# the optimize flag for real.\n'
+        'if sys.flags.optimize < 1:\n'
+        '    raise SystemExit("expected python -O")\n'
         'import portalocker\n'
         f'lock = portalocker.RLock({tmpfile!r})\n'
         'lock._acquire_count = 1\n'
