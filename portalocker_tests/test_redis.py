@@ -1132,9 +1132,11 @@ def test_redis_collect_holders_kills_only_unresponsive_holder(
         connection=connection,
         thread_sleep_time=0.001,
     )
+    responding_id: str = 'a' * 32
+    stale_id: str = 'b' * 32
     response: str = json.dumps(
         {
-            'holder_id': 'responding',
+            'holder_id': responding_id,
             'mode': 'shared',
             'protocol': 1,
         }
@@ -1150,9 +1152,9 @@ def test_redis_collect_holders_kills_only_unresponsive_holder(
         lambda: [
             {
                 'id': 'responding-client',
-                'name': 'stale-channel-lock-responding',
+                'name': f'stale-channel-lock-{responding_id}',
             },
-            {'id': 'stale-client', 'name': 'stale-channel-lock-stale'},
+            {'id': 'stale-client', 'name': f'stale-channel-lock-{stale_id}'},
         ],
     )
     monkeypatch.setattr(
@@ -1169,6 +1171,105 @@ def test_redis_collect_holders_kills_only_unresponsive_holder(
 
     assert holders is None
     assert killed == ['stale-client']
+
+
+def test_redis_kill_unavailable_locks_spares_other_channels(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for issue #142.
+
+    A holder of channel ``<base>-lock-x`` names its connection
+    ``<base>-lock-x-lock-<id>``, which starts with channel ``<base>``'s
+    holder prefix ``<base>-lock-``. The prefix match used by
+    ``_kill_unavailable_locks`` therefore treated it as a crashed holder
+    of channel ``<base>`` and killed it, even though it was healthy and
+    holding a completely different lock.
+    """
+    base: str = str(random.random())
+    neighbour: redis.RedisLock = redis.RedisLock(
+        f'{base}-lock-x',
+        connection=redis_connection(),
+    )
+    prober: redis.RedisLock = redis.RedisLock(
+        base,
+        connection=redis_connection(),
+    )
+    killed: list[str | None] = []
+
+    neighbour.acquire()
+    prober.acquire()
+    try:
+        connection: client.Redis = prober.get_connection()
+        monkeypatch.setattr(
+            connection,
+            'client_kill_filter',
+            lambda client_id: killed.append(client_id),
+        )
+        prober._kill_unavailable_locks(
+            connection,
+            [
+                redis.RedisLockHolder(
+                    holder_id=prober.holder_id,
+                    mode=redis.RedisLockMode.EXCLUSIVE,
+                ),
+            ],
+        )
+    finally:
+        prober.release()
+        neighbour.release()
+
+    assert killed == []
+
+
+def test_redis_kill_unavailable_locks_requires_holder_id_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only names shaped like ``<channel>-lock-<32 char hex>`` are reaped.
+
+    An unrelated client whose name merely starts with the holder prefix
+    must survive, while a silent current holder and a silent legacy
+    holder are still killed.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        'stale-channel',
+        connection=connection,
+    )
+    responding_id: str = 'a' * 32
+    stale_id: str = 'b' * 32
+    killed: list[str | None] = []
+    monkeypatch.setattr(
+        connection,
+        'client_list',
+        lambda: [
+            {'id': '1', 'name': f'stale-channel-lock-{responding_id}'},
+            {'id': '2', 'name': f'stale-channel-lock-{stale_id}'},
+            {'id': '3', 'name': 'stale-channel-lock-notahexid'},
+            {'id': '4', 'name': 'stale-channel-lock'},
+            {'id': '5', 'name': ''},
+        ],
+    )
+    monkeypatch.setattr(
+        connection,
+        'client_kill_filter',
+        lambda client_id: killed.append(client_id),
+    )
+
+    lock._kill_unavailable_locks(
+        connection,
+        [
+            redis.RedisLockHolder(
+                holder_id=responding_id,
+                mode=redis.RedisLockMode.SHARED,
+            ),
+        ],
+    )
+
+    assert killed == ['2', '4']
 
 
 def test_redis_check_or_kill_lock_kills_unresponsive_client(

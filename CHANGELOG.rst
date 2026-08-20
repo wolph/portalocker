@@ -1,5 +1,13 @@
 4.1.1:
 
+ * Fixed ``RedisLock`` stale-holder cleanup killing healthy holders of
+   other channels. The cleanup prefix-matched ``CLIENT LIST`` names, so a
+   probe on channel ``a`` matched the holders of a channel named
+   ``a-lock-b`` (whose connections are named ``a-lock-b-lock-<id>``) and
+   killed them, along with any unrelated client whose name happened to
+   start with ``a-lock-``. Client names are now matched exactly against
+   the ``<channel>-lock-<32 character hex holder id>`` shape, and the
+   bare legacy ``<channel>-lock`` name is still reaped as before (#142)
  * Fixed a contended ``RedisLock`` with a self-created connection (no
    ``connection=`` argument) killing its own worker thread and delivering a
    ``KeyboardInterrupt`` to the main thread. The release between retries

@@ -65,6 +65,7 @@ import enum
 import json
 import logging
 import random
+import re
 import time
 import typing
 import uuid
@@ -670,8 +671,18 @@ class RedisLock(utils.LockBase['RedisLock']):
         - exactly `legacy_client_name`: a portalocker 3.2.0 or older
           holder. Killed unless some legacy reply arrived in this probe,
           since old holders are indistinguishable from one another.
-        - `legacy_client_name` plus a `holder_id` suffix: a current
-          holder. Killed unless that exact holder id replied.
+        - `legacy_client_name` plus a `holder_id` suffix. The suffix must
+          be exactly 32 lowercase hex characters, the shape of the uuid4
+          hex `holder_id` every lock allocates, and the holder is killed
+          unless that exact id replied.
+
+        The suffix shape is validated because channel names may
+        themselves contain ``-lock-``. A holder of channel ``a-lock-b``
+        is named ``a-lock-b-lock-<id>``, which starts with channel
+        ``a``'s prefix but does not parse as one of its holders. A bare
+        prefix match here used to kill those healthy neighbours, along
+        with any unrelated client that coincidentally shared the prefix
+        (#142).
 
         This lock names its own connection the same way, so the caller
         must include its own reply in `responding_holders` or it will
@@ -690,16 +701,22 @@ class RedisLock(utils.LockBase['RedisLock']):
             holder.holder_id for holder in holders if not holder.legacy
         }
         legacy_responded: bool = any(holder.legacy for holder in holders)
-        client_name_prefix: str = f'{self.legacy_client_name}-'
+        # fakeredis rejects `client_list('pubsub')`, so the list stays
+        # unfiltered and the name shape does all the narrowing.
+        holder_name_pattern: re.Pattern[str] = re.compile(
+            re.escape(self.legacy_client_name) + '-(?P<holder_id>[0-9a-f]{32})'
+        )
         clients: list[dict[str, str]] = connection.client_list()
         for client_ in clients:
             client_name: str = client_.get('name', '')
+            match: re.Match[str] | None = holder_name_pattern.fullmatch(
+                client_name,
+            )
             unavailable: bool = (
                 client_name == self.legacy_client_name and not legacy_responded
             ) or (
-                client_name.startswith(client_name_prefix)
-                and client_name.removeprefix(client_name_prefix)
-                not in responding_holder_ids
+                match is not None
+                and match.group('holder_id') not in responding_holder_ids
             )
             if unavailable:
                 logger.warning(
