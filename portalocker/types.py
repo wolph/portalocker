@@ -15,9 +15,10 @@ import typing
 # spellchecker: off
 # fmt: off
 #: Every mode string accepted by the built-in `open()`, spelled out
-#: explicitly - including the binary and legacy universal-newline (`U`)
-#: forms - so type checkers reject a typo'd mode string instead of letting
-#: it fail at runtime.
+#: explicitly - including the binary forms - so type checkers reject a
+#: typo'd mode string instead of letting it fail at runtime. The legacy
+#: universal-newline (`U`) modes are deliberately absent: Python 3.11
+#: removed them, and 3.10 only accepted them with a warning.
 Mode = typing.Literal[
     # Text modes
     # Read text
@@ -36,8 +37,6 @@ Mode = typing.Literal[
     'a+', '+a', 'at+', 'a+t', '+at', 'ta+', 't+a', '+ta',
     # Exclusive creation and read text
     'x+', '+x', 'xt+', 'x+t', '+xt', 'tx+', 't+x', '+tx',
-    # Universal newline support
-    'U', 'rU', 'Ur', 'rtU', 'rUt', 'Urt', 'trU', 'tUr', 'Utr',
 
     # Binary modes
     # Read binary
@@ -56,8 +55,6 @@ Mode = typing.Literal[
     'ab+', 'a+b', '+ab', 'ba+', 'b+a', '+ba',
     # Exclusive creation and read binary
     'xb+', 'x+b', '+xb', 'bx+', 'b+x', '+bx',
-    # Universal newline support in binary mode
-    'rbU', 'rUb', 'Urb', 'brU', 'bUr', 'Ubr',
 ]
 # spellchecker: on
 #: A filename argument: either a plain string path or a `pathlib.Path`.

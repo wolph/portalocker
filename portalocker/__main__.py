@@ -18,6 +18,7 @@ the package would be caught.
 from __future__ import annotations
 
 import argparse
+import io
 import logging
 import pathlib
 import re
@@ -44,6 +45,60 @@ _TEXT_TEMPLATE = """'''
 """
 
 logger = logging.getLogger(__name__)
+
+
+def _log_decode_error(
+    path: pathlib.Path,
+    exception: UnicodeDecodeError,
+) -> None:
+    """Log a snippet of `path` around the bytes that failed to decode.
+
+    Shared by every ASCII read in this module (see `_read_text_ascii`),
+    so a stray non-ASCII byte in a source file, ``README.rst`` or
+    ``LICENSE`` always produces an error naming the offending file and
+    showing the surrounding context instead of a bare traceback.
+
+    Args:
+        path: The file that failed to decode, named in the log message.
+        exception: The decode failure. Its ``args`` carry the undecoded
+            bytes and the offset range of the offending byte(s).
+    """
+    _, text, start_byte, end_byte, error = exception.args
+
+    offset = 100
+    snippet = text[max(start_byte - offset, 0) : end_byte + offset]
+    logger.error(  # noqa: TRY400
+        f'Invalid encoding for {path}: {error} at byte '
+        f'({start_byte}:{end_byte})\n'
+        f'Snippet: {snippet!r}'
+    )
+
+
+def _read_text_ascii(path: pathlib.Path) -> str:
+    """Read `path` as ASCII, logging a clear error on failure.
+
+    Args:
+        path: The file to read.
+
+    Returns:
+        The file's text, decoded as ASCII with universal newlines.
+
+    Raises:
+        UnicodeDecodeError: `path` contains a byte that is not valid
+            ASCII. The offending snippet is logged through
+            `_log_decode_error` before this is re-raised.
+        SystemExit: `path` does not exist. The missing file is named in
+            a logged error and the exit status is 1, instead of the raw
+            ``FileNotFoundError`` traceback the CLI used to die with.
+    """
+    try:
+        return path.read_text(encoding='ascii')
+    except UnicodeDecodeError as exception:
+        _log_decode_error(path, exception)
+        raise
+    except FileNotFoundError as exception:
+        logger.error(f'Input file not found: {path}')  # noqa: TRY400
+        raise SystemExit(1) from exception
 
 
 def main(argv: typing.Sequence[str] | None = None) -> None:
@@ -138,75 +193,63 @@ def _read_file(  # noqa: C901
     from_ = None
     in_type_checking = False
     type_checking_indent = 0
-    try:
-        for line in path.open(encoding='ascii'):
-            if '__future__' in line:
+    for line in io.StringIO(_read_text_ascii(path)):
+        if '__future__' in line:
+            continue
+
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
+
+        # ``if TYPE_CHECKING:`` blocks are type-only (never executed at
+        # runtime). Emit them verbatim without inlining: inlining their
+        # relative imports would duplicate a module or break the guard
+        # the else-branch relies on.
+        if in_type_checking and (
+            not stripped.strip() or len(indent) > type_checking_indent
+        ):
+            yield _clean_line(line, names)
+            continue
+        in_type_checking = False
+        if not paren and _TYPE_CHECKING_RE.match(stripped):
+            in_type_checking = True
+            type_checking_indent = len(indent)
+            yield _clean_line(line, names)
+            continue
+
+        if paren:
+            if ')' in line:
+                line = line.split(')', 1)[1]
+                paren = False
                 continue
 
-            stripped = line.lstrip()
-            indent = line[: len(line) - len(stripped)]
+            match = _NAMES_RE.match(line)
+        else:
+            match = _RELATIVE_IMPORT_RE.match(stripped)
 
-            # ``if TYPE_CHECKING:`` blocks are type-only (never executed at
-            # runtime). Emit them verbatim without inlining: inlining their
-            # relative imports would duplicate a module or break the guard
-            # the else-branch relies on.
-            if in_type_checking and (
-                not stripped.strip() or len(indent) > type_checking_indent
-            ):
-                yield _clean_line(line, names)
-                continue
-            in_type_checking = False
-            if not paren and _TYPE_CHECKING_RE.match(stripped):
-                in_type_checking = True
-                type_checking_indent = len(indent)
-                yield _clean_line(line, names)
-                continue
+        if match:
+            if not paren:
+                paren = bool(match.group('paren'))
+                from_ = match.group('from')
 
-            if paren:
-                if ')' in line:
-                    line = line.split(')', 1)[1]
-                    paren = False
-                    continue
-
-                match = _NAMES_RE.match(line)
+            # An indented relative import (e.g. the optional-redis guard's
+            # ``try`` block) is inlined re-indented so the module lands
+            # inside the guard; a column-0 import inlines at module level.
+            if from_:
+                names.add(from_)
+                yield from _reindent(
+                    _read_file(src_path / f'{from_}.py', seen_files),
+                    indent,
+                )
             else:
-                match = _RELATIVE_IMPORT_RE.match(stripped)
-
-            if match:
-                if not paren:
-                    paren = bool(match.group('paren'))
-                    from_ = match.group('from')
-
-                # An indented relative import (e.g. the optional-redis guard's
-                # ``try`` block) is inlined re-indented so the module lands
-                # inside the guard; a column-0 import inlines at module level.
-                if from_:
-                    names.add(from_)
+                for name in match.group('names').split(','):
+                    name = name.strip()
+                    names.add(name)
                     yield from _reindent(
-                        _read_file(src_path / f'{from_}.py', seen_files),
+                        _read_file(src_path / f'{name}.py', seen_files),
                         indent,
                     )
-                else:
-                    for name in match.group('names').split(','):
-                        name = name.strip()
-                        names.add(name)
-                        yield from _reindent(
-                            _read_file(src_path / f'{name}.py', seen_files),
-                            indent,
-                        )
-            else:
-                yield _clean_line(line, names)
-    except UnicodeDecodeError as exception:  # pragma: no cover
-        _, text, start_byte, end_byte, error = exception.args
-
-        offset = 100
-        snippet = text[start_byte - offset : end_byte + offset]
-        logger.error(  # noqa: TRY400
-            f'Invalid encoding for {path}: {error} at byte '
-            f'({start_byte}:{end_byte})\n'
-            f'Snippet: {snippet!r}'
-        )
-        raise
+        else:
+            yield _clean_line(line, names)
 
 
 def _clean_line(line: str, names: set[str]) -> str:
@@ -279,8 +322,8 @@ def combine(args: argparse.Namespace) -> None:
     ``try: from .redis import RedisLock`` guard in ``__init__.py``:
     ``redis.py`` is inlined the same way as any other sibling module,
     re-indented to stay inside the ``try``, so the combined file binds
-    `RedisLock` the same way the package does -- to `None` if importing
-    it fails.
+    `RedisLock` the same way the package does -- to the stub class that
+    raises ``ImportError`` on construction if importing it fails.
 
     Every module under `src_path`, plus ``README.rst`` and ``LICENSE``,
     is read with ``encoding='ascii'`` (see the module docstring): all of
@@ -290,6 +333,14 @@ def combine(args: argparse.Namespace) -> None:
     are not the output file's docstring, since the single
     ``from __future__ import annotations`` line this function writes
     first has to stay the first statement.
+
+    All inputs are read and assembled in memory first, and the output
+    file is only opened once the assembly has succeeded. Writing first
+    used to truncate ``--output-file`` before the first input was read,
+    so a decode failure destroyed a pre-existing build. A plain write is
+    deliberate here: ``--output-file`` legitimately overwrites its
+    previous build, which is exactly the no-replace semantic
+    `portalocker.utils.open_atomic` exists to forbid.
 
     If the ``ruff`` command is available, the output is formatted and
     lint-fixed in place; if not, that step is skipped with a warning.
@@ -309,27 +360,22 @@ def combine(args: argparse.Namespace) -> None:
         to ``redis``, not ``redis`` itself.
     """
     output_path: pathlib.Path = args.output_file
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with output_path.open('w') as output_file:
+    # Read and assemble every input before touching the output file, so
+    # a failure while reading (a non-ASCII byte, a missing file) cannot
+    # truncate a pre-existing build.
+    parts: list[str] = [
         # We're handling this separately because it has to be the first
         # import.
-        output_file.write('from __future__ import annotations\n')
+        'from __future__ import annotations\n',
+        _TEXT_TEMPLATE.format(_read_text_ascii(base_path / 'README.rst')),
+        _TEXT_TEMPLATE.format(_read_text_ascii(base_path / 'LICENSE')),
+    ]
+    seen_files: set[pathlib.Path] = set()
+    parts.extend(_read_file(src_path / '__init__.py', seen_files))
 
-        output_file.write(
-            _TEXT_TEMPLATE.format(
-                (base_path / 'README.rst').read_text(encoding='ascii')
-            ),
-        )
-        output_file.write(
-            _TEXT_TEMPLATE.format(
-                (base_path / 'LICENSE').read_text(encoding='ascii')
-            ),
-        )
-
-        seen_files: set[pathlib.Path] = set()
-        for line in _read_file(src_path / '__init__.py', seen_files):
-            output_file.write(line)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(''.join(parts))
 
     logger.info(f'Wrote combined file to {output_path}')
     # Run ruff if available. If not then just run the file.

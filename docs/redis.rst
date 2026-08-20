@@ -48,13 +48,15 @@ Installation
 
     pip install "portalocker[redis]"
 
-Without it, ``portalocker.RedisLock`` is `None` rather than an import
-failure: `portalocker/__init__.py` imports `portalocker.redis` inside a
-``try``/``except ImportError``, so the rest of the package stays usable
-without the extra. A missing ``redis`` package therefore only surfaces
-when something actually tries to *use* `RedisLock` - constructing it, or
-noticing ``portalocker.RedisLock is None`` - not when ``import
-portalocker`` itself runs.
+Without it, ``portalocker.RedisLock`` is a stub class rather than an
+import failure: `portalocker/__init__.py` imports `portalocker.redis`
+inside a ``try``/``except ImportError``, so the rest of the package
+stays usable without the extra. A missing ``redis`` package therefore
+only surfaces when something actually tries to *use* `RedisLock` -
+constructing the stub raises an ``ImportError`` naming the extra - not
+when ``import portalocker`` itself runs. Before 4.1.1 the fallback was
+`None`, so constructing it failed with ``TypeError: 'NoneType' object
+is not callable`` instead of naming the missing dependency.
 
 Basic usage
 ------------

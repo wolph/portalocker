@@ -194,9 +194,17 @@ is platform-independent:
 lock EXCLUSIVE
 unlock
 
-One POSIX-only validation is worth knowing about: `LockFlags.NON_BLOCKING`
-only says *how* to wait, so passing it on its own raises ``RuntimeError``
-there. Combine it with `LockFlags.SHARED` or `LockFlags.EXCLUSIVE`.
+Since 4.1.1 the module-level ``lock()`` also validates its flags on
+every platform, before any system call reads them. Three combinations
+raise ``RuntimeError``:
+
+* anything carrying `LockFlags.UNBLOCK` - releasing is ``unlock()``'s
+  job, and on POSIX this combination used to silently *release* a held
+  lock instead of acquiring one.
+* ``SHARED | EXCLUSIVE`` - the two lock types contradict each other.
+* a flag set naming no lock type at all, such as ``LockFlags(0)`` or
+  `LockFlags.NON_BLOCKING` on its own - that flag only says *how* to
+  wait, so combine it with `LockFlags.SHARED` or `LockFlags.EXCLUSIVE`.
 
 Windows: ``msvcrt`` versus ``pywin32``
 ---------------------------------------
@@ -242,6 +250,25 @@ Two more consequences of the split:
 * Because Windows locking is mandatory (see above), a shared lock is not
   merely an optimisation there — without one, readers that would happily
   coexist on POSIX are locked out.
+
+Blocking locks give up after about ten seconds
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+On POSIX, a blocking lock request - one without
+`LockFlags.NON_BLOCKING` - waits indefinitely until the lock is
+granted. The msvcrt path cannot match that: ``msvcrt.locking`` with
+``LK_LOCK`` retries once per second, ten times, and then fails. A
+blocking ``portalocker.lock`` through `MsvcrtLocker` therefore raises
+`AlreadyLocked` after roughly ten seconds instead of waiting out a
+longer-held lock. Code ported from POSIX that relies on "blocking means
+waiting forever" will see that exception on Windows.
+
+To wait longer, retry in a loop yourself, or hand the waiting to
+`portalocker.Lock`: its ``timeout`` machinery polls with non-blocking
+attempts at ``check_interval``, so it is not subject to the cap and
+waits however long you ask. `Win32Locker` is also unaffected -
+``LockFileEx`` without ``LOCKFILE_FAIL_IMMEDIATELY`` blocks
+indefinitely, like POSIX.
 
 Networked filesystems
 ---------------------

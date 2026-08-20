@@ -151,6 +151,53 @@
    propagated those errors, so the suppression was a 4.0.0 behaviour
    change. The default stays as documented in 4.0.0, now with the
    warning-level logging described above
+ * Behaviour change: the module-level ``lock()`` now validates its flags
+   on every platform, before any system call. Flags carrying
+   ``LockFlags.UNBLOCK`` raise ``RuntimeError`` (on POSIX they used to
+   silently *release* the held lock, since the bit went straight through
+   to ``fcntl``). ``SHARED | EXCLUSIVE`` raises ``RuntimeError``. A flag
+   set naming no lock type at all (``LockFlags(0)`` or ``NON_BLOCKING``
+   alone) raises ``RuntimeError`` on every platform instead of on POSIX
+   only
+ * Fixed the ``MsvcrtLocker`` fallback table for ``LK_*`` constants
+   missing from ``msvcrt``. The old values were shifted against the real
+   ``<sys/locking.h>`` numbers, so a "blocking lock" through the fallback
+   would have issued an *unlock* (``LK_LOCK`` fell back to the
+   ``LK_UNLCK`` value). The corrected values also now live on the locker
+   instance instead of being ``setattr``'d onto the shared stdlib
+   ``msvcrt`` module
+ * ``Win32Locker.lock`` now wraps ``OSError`` (for example a stale file
+   descriptor handed to ``msvcrt.get_osfhandle``) in ``LockException``,
+   matching the unlock path. Previously the raw ``OSError`` escaped
+   ``lock()``
+ * ``Win32Locker`` now creates a fresh ``OVERLAPPED`` structure for every
+   ``LockFileEx``/``UnlockFileEx`` call instead of reusing one cached
+   instance across calls and threads, which the Win32 API contract
+   forbids
+ * ``python -m portalocker combine`` now reads and assembles all of its
+   inputs before opening ``--output-file``. It used to truncate the
+   output file first, so a non-ASCII byte in an input destroyed a
+   pre-existing build and died with a raw traceback. Decode failures in
+   ``README.rst`` and ``LICENSE`` now log the same snippet, naming the
+   offending file, that the source modules already got
+ * Behaviour change: without the optional redis dependency installed,
+   ``portalocker.RedisLock`` is now a stub class whose constructor raises
+   ``ImportError`` naming the dependency and the install command
+   (``pip install "portalocker[redis]"``). It used to be ``None``, so
+   constructing it failed with ``TypeError: 'NoneType' object is not
+   callable``. Code that compared ``RedisLock is None`` to detect the
+   extra should try constructing it and catch ``ImportError`` instead
+ * Removed the legacy universal-newline (``U``) mode strings from the
+   ``portalocker.types.Mode`` literal. Python 3.11 removed them, and 3.10
+   only accepted them with a warning, so this narrows the static typing
+   contract only and changes nothing at runtime
+ * Documented that a blocking ``msvcrt`` lock retries ten times at one
+   second intervals and then raises, instead of blocking indefinitely
+   like POSIX, and added the missing 4.0.0 migration note for
+   ``LockfLocker``: it silently used ``flock`` up to 3.2.0, and the
+   switch to real ``lockf`` changes same-process contention, makes
+   closing any descriptor for the file drop the locks, and leaves a 3.x
+   holder and a 4.x holder unable to exclude each other on Linux
 
 4.1.0:
 
