@@ -49,12 +49,20 @@
    ``release()`` landed between publishing the lock and returning: the
    return value is the locally bound sidecar handle now, never re-read
    from the shared state
- * Fixed two acquires racing on one ``Lock`` instance both publishing
-   their filehandle when the locker grants per-process semantics (POSIX
-   ``lockf``): the overwritten handle's garbage collected close dropped
-   the process's whole ``lockf`` lock. The publication is atomic now
-   and the loser tears its own descriptor down and shares the published
-   handle, matching the idempotent re-acquire contract
+ * Documented that two threads racing ``Lock.acquire`` on one instance
+   is unsupported: with a per-process locker (POSIX ``lockf``) both
+   lock calls succeed, the second publication overwrites the first, and
+   the overwritten descriptor's eventual close releases the process's
+   record locks on the file. That is inherent to POSIX record locks
+   (any descriptor's close drops them), so no publication strategy can
+   paper over it; use one instance per thread
+ * Hardened the verified acquire of ``TemporaryFileLock`` and the
+   ``PidFileLock`` sidecar against reentrant releases: a handle a
+   signal handler claimed and closed mid-acquire is retried within the
+   remaining timeout budget instead of failing the inode verification,
+   and a closed handle found by the held-lock re-acquire reports the
+   documented compromised-lock ``LockException`` instead of leaking a
+   raw ``ValueError`` from ``fileno()``
  * Behaviour change: ``Lock`` resolves its path with ``os.path.abspath``
    at construction, so the ``filename`` attribute now holds an absolute
    path. A relative path used to be resolved on every later OS call,

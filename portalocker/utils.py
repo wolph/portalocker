@@ -479,9 +479,13 @@ class LockBase(  # pragma: no cover
         count, which semaphore slot is taken) cannot be corrupted by
         concurrent calls, but which thread's `acquire` wins, or whether a
         concurrent `release` makes another thread's `acquire` succeed, is
-        still scheduling. Use one instance per thread, or a
-        `threading.Lock` of your own, when you need per-thread mutual
-        exclusion.
+        still scheduling. Two threads racing `acquire` on one instance
+        is explicitly unsupported: with a per-process locker (POSIX
+        ``lockf``) both lock calls succeed, the second publication
+        overwrites the first, and the overwritten descriptor's eventual
+        close releases the process's record locks on the file. Use one
+        instance per thread, or a `threading.Lock` of your own, when you
+        need per-thread mutual exclusion.
 
     See Also:
         `Lock`: the file based implementation nearly everything else in
@@ -925,6 +929,16 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         filehandle taken earlier is returned as is, without touching the
         operating system.
 
+        Two threads *racing* this method on one instance is unsupported.
+        The instance's bookkeeping stays consistent, but with a
+        per-process locker (POSIX ``lockf``) both lock calls succeed,
+        one thread's filehandle overwrites the other's, and the
+        orphaned descriptor's eventual close releases the process's
+        record locks on the file, the winner's included: that is how
+        POSIX record locks work, and no publication strategy on this
+        side can paper over it. Give each thread its own lock instance
+        instead.
+
         Args:
             timeout: Overrides `timeout` for this call. See `LockBase`.
             check_interval: Overrides `check_interval` for this call.
@@ -1047,42 +1061,9 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                 fh.close()
             raise
 
-        return self._publish_or_share_fh(fh)
-
-    def _publish_or_share_fh(self, fh: types.IO) -> types.IO:
-        """Publish a freshly locked handle, or share the already held one.
-
-        The read of the held handle and the publication of the new one
-        are a single state-lock scope, so two acquires racing on one
-        instance cannot both publish. The losing thread's handle is torn
-        down and the winner's handle is returned instead, matching the
-        idempotent held-lock fast path at the top of `Lock.acquire`. The
-        race is only reachable at all under per-process locker semantics
-        (POSIX ``lockf``), where both lock calls succeed; the historical
-        unconditional overwrite then orphaned the first handle, and its
-        garbage collected close dropped the process's whole ``lockf``
-        lock.
-
-        Args:
-            fh: The locked, prepared filehandle this acquire produced.
-
-        Returns:
-            ``fh`` itself when it was published, otherwise the handle
-            another thread published first, with ``fh`` unlocked and
-            closed.
-        """
-        existing_fh: types.IO | None
         with self._state_lock:
-            existing_fh = self.fh
-            if existing_fh is None:
-                self.fh = fh
-        if existing_fh is None:
-            return fh
-        with contextlib.suppress(Exception):
-            portalocker.unlock(fh)
-        with contextlib.suppress(Exception):
-            fh.close()
-        return existing_fh
+            self.fh = fh
+        return fh
 
     def _prepare_locked_fh(self, fh: types.IO) -> types.IO:
         """Run `Lock._prepare_fh`, rolling the lock back when it fails.
@@ -1493,6 +1474,12 @@ def _fh_matches_path(fh: types.IO, filename: str) -> bool:  # pragma: not-posix
     except FileNotFoundError:
         # The path was unlinked and not (yet) recreated.
         return False
+    except ValueError:
+        # ``fh`` is closed (``fileno()`` refuses closed files), usually
+        # because a reentrant release claimed it: it certainly no longer
+        # guards the path, and reporting that beats leaking the raw
+        # `ValueError` through the held-lock verification.
+        return False
 
 
 #: Live `TemporaryFileLock` instances (and `PidFileLock`, which inherits
@@ -1763,6 +1750,14 @@ class TemporaryFileLock(Lock):
                 check_interval,
                 fail_when_locked,
             )
+            if fh.closed:
+                # A reentrant release (a signal handler is the usual
+                # culprit) claimed and closed the handle between the
+                # acquire returning it and this verification. There is
+                # nothing to verify and nothing left to release, so try
+                # again within the remaining budget.
+                attempt_timeout = max(0.0, deadline - time.perf_counter())
+                continue
             if os.name == 'nt':  # Windows: a locked file can't be swapped.
                 return fh  # pragma: not-nt
             if _fh_matches_path(fh, filename):  # pragma: not-posix

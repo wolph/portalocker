@@ -921,3 +921,62 @@ def test_temporaryfilelock_nt_release_tolerates_vanished_file(
     assert len(attempts) == 1
     assert sleeps == []
     assert lock.fh is None
+
+
+def test_temporaryfilelock_acquire_retries_closed_handle(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reentrant release that claims and closes the freshly locked
+    handle before the inode verification must make the verified acquire
+    retry within its remaining budget, not leak a ``ValueError`` from
+    ``fstat`` on a closed file.
+    """
+    real_acquire = utils.Lock.acquire
+    handles: list[typing.IO[typing.Any]] = []
+
+    def sabotaged_acquire(
+        self: utils.Lock,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> typing.IO[typing.Any]:
+        fh = real_acquire(self, *args, **kwargs)
+        handles.append(fh)
+        if len(handles) == 1:
+            # The SIGTERM-handler shape: a reentrant release claims and
+            # closes the handle right after the acquire returns it.
+            utils.Lock.release(self)
+        return fh
+
+    monkeypatch.setattr(utils.Lock, 'acquire', sabotaged_acquire)
+    lock = portalocker.TemporaryFileLock(
+        tmpfile,
+        timeout=1,
+        check_interval=0.01,
+        fail_when_locked=False,
+    )
+    fh = lock.acquire()
+    monkeypatch.undo()
+
+    assert len(handles) >= 2, 'the closed handle was not retried'
+    assert not fh.closed
+    assert lock.fh is fh
+    lock.release()
+    assert not os.path.exists(tmpfile)
+
+
+@posix_inode_only
+def test_temporaryfilelock_reacquire_with_closed_handle_is_compromised(
+    tmpfile: str,
+) -> None:
+    """Re-acquiring while the held handle is closed must report the
+    documented compromised-lock ``LockException``: a closed handle
+    certainly no longer guards the path, and the inode comparison used
+    to leak a raw ``ValueError`` from ``fileno()`` instead.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    fh = lock.acquire()
+    fh.close()  # a stray close: the OS lock died with the descriptor
+    with pytest.raises(portalocker.LockException, match='compromised'):
+        lock.acquire()
+    lock.release()
