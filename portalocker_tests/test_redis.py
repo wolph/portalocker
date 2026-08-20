@@ -4094,9 +4094,13 @@ def test_redis_exit_release_error_does_not_mask_body_exception(
     monkeypatch.undo()
     context: BaseException | None = error.value.__context__
     assert isinstance(context, _TeardownError)
-    assert 'portalocker release failed; see exception context' in getattr(
-        error.value, '__notes__', []
-    )
+    if hasattr(error.value, 'add_note'):
+        # Notes exist on 3.11+; on 3.10 the chain helper suppresses the
+        # add_note call and the __context__ assertion above carries the
+        # guarantee alone.
+        assert 'portalocker release failed; see exception context' in getattr(
+            error.value, '__notes__', []
+        )
     lock.release()
 
 
