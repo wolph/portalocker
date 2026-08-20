@@ -1702,6 +1702,8 @@ class _SubscribeError(Exception):
 class _BoomPubSub:
     """Pubsub whose ``subscribe`` always raises."""
 
+    connection: typing.Any = None
+
     def execute_command(self, *args: typing.Any) -> None:
         pass
 
@@ -2039,3 +2041,373 @@ def test_redis_start_subscription_returns_subscribed(
         assert lock.pubsub.subscribed
     finally:
         lock.release()
+
+
+class _TeardownError(Exception):
+    """Raised by teardown stubs to simulate a dead Redis connection."""
+
+
+class _TeardownPubSub:
+    """Stand-in pubsub for exception-safe teardown tests.
+
+    Records ``unsubscribe`` and ``close`` calls in order and raises the
+    configured errors, mimicking a pubsub whose connection died while
+    the lock was held.
+    """
+
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        connection: object | None = None,
+        unsubscribe_error: Exception | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
+        self.events: list[str] = events
+        self.connection: object | None = connection
+        self.unsubscribe_error: Exception | None = unsubscribe_error
+        self.close_error: Exception | None = close_error
+
+    def unsubscribe(self, *channels: str) -> None:
+        self.events.append('unsubscribe')
+        if self.unsubscribe_error is not None:
+            raise self.unsubscribe_error
+
+    def close(self) -> None:
+        self.events.append('close')
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class _BrokenThread:
+    """Stand-in worker thread whose ``stop`` raises."""
+
+    ident: int | None = None
+
+    def __init__(self, error: Exception) -> None:
+        self.error: Exception = error
+
+    def stop(self) -> None:
+        raise self.error
+
+    def join(self) -> None:  # pragma: no cover - must not be reached
+        raise AssertionError('join must not run when stop fails')
+
+
+def test_redis_release_survives_unsubscribe_error(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """A failing UNSUBSCRIBE must not brick the lock instance.
+
+    The pubsub is closed and cleared anyway, the error still propagates,
+    and the same instance can acquire again once Redis is back.
+    """
+    events: list[str] = []
+    unsubscribe_error: _TeardownError = _TeardownError('unsubscribe failed')
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+    )
+    lock.pubsub = typing.cast(
+        'client.PubSub | None',
+        _TeardownPubSub(
+            events,
+            connection=object(),
+            unsubscribe_error=unsubscribe_error,
+        ),
+    )
+
+    exc_info: pytest.ExceptionInfo[_TeardownError]
+    with pytest.raises(_TeardownError) as exc_info:
+        lock.release()
+
+    assert exc_info.value is unsubscribe_error
+    assert events == ['unsubscribe', 'close']
+    assert lock.pubsub is None
+    assert lock.thread is None
+
+    # The instance is not bricked: a later acquire works.
+    lock.acquire()
+    lock.release()
+
+
+def test_redis_release_prefers_first_teardown_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The first teardown error is raised, later ones are only logged."""
+    events: list[str] = []
+    unsubscribe_error: _TeardownError = _TeardownError('unsubscribe failed')
+    close_error: _TeardownError = _TeardownError('close failed')
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.pubsub = typing.cast(
+        'client.PubSub | None',
+        _TeardownPubSub(
+            events,
+            connection=object(),
+            unsubscribe_error=unsubscribe_error,
+            close_error=close_error,
+        ),
+    )
+
+    exc_info: pytest.ExceptionInfo[_TeardownError]
+    with (
+        caplog.at_level(logging.WARNING, logger='portalocker.redis'),
+        pytest.raises(_TeardownError) as exc_info,
+    ):
+        lock.release()
+
+    assert exc_info.value is unsubscribe_error
+    assert events == ['unsubscribe', 'close']
+    assert lock.pubsub is None
+    assert any(
+        'Suppressed secondary' in record.message for record in caplog.records
+    )
+
+
+def test_redis_release_survives_thread_stop_error() -> None:
+    """A worker thread that fails to stop must not block the teardown.
+
+    The pubsub is still closed and both ``thread`` and ``pubsub`` are
+    cleared before the error propagates.
+    """
+    events: list[str] = []
+    stop_error: _TeardownError = _TeardownError('stop failed')
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.thread = typing.cast(
+        'redis.PubSubWorkerThread | None',
+        _BrokenThread(stop_error),
+    )
+    lock.pubsub = typing.cast(
+        'client.PubSub | None',
+        _TeardownPubSub(events),
+    )
+
+    exc_info: pytest.ExceptionInfo[_TeardownError]
+    with pytest.raises(_TeardownError) as exc_info:
+        lock.release()
+
+    assert exc_info.value is stop_error
+    # No unsubscribe: the stub pubsub has no connection left. The close
+    # still ran and the state is cleared.
+    assert events == ['close']
+    assert lock.thread is None
+    assert lock.pubsub is None
+
+
+def test_redis_acquire_thread_start_failure_propagates(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """When the worker thread cannot start the original error propagates.
+
+    The rollback used to join the never-started thread, replacing the
+    real error with ``RuntimeError: cannot join thread before it is
+    started`` and leaking a subscribed pubsub that kept this process
+    counted as a holder.
+    """
+    connection: client.Redis = redis_connection()
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+    )
+    start_error: RuntimeError = RuntimeError("can't start new thread")
+
+    def broken_start(self: redis.PubSubWorkerThread) -> None:
+        raise start_error
+
+    exc_info: pytest.ExceptionInfo[RuntimeError]
+    with pytest.MonkeyPatch.context() as thread_patch:
+        thread_patch.setattr(redis.PubSubWorkerThread, 'start', broken_start)
+        with pytest.raises(RuntimeError) as exc_info:
+            lock.acquire()
+
+    assert exc_info.value is start_error
+    assert lock.pubsub is None
+    assert lock.thread is None
+    # The rollback really unsubscribed: nobody is left on the channel.
+    subscriber_count: int = lock._get_subscriber_count(connection)
+    deadline: float = time.monotonic() + 5
+    while subscriber_count and time.monotonic() < deadline:
+        time.sleep(0.01)
+        subscriber_count = lock._get_subscriber_count(connection)
+    assert subscriber_count == 0
+
+    # With threads available again the same instance acquires normally.
+    lock.acquire()
+    lock.release()
+
+
+def test_redis_release_skips_unsubscribe_for_closed_pubsub(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Release must not reconnect purely to send a pointless UNSUBSCRIBE.
+
+    The worker thread closes the pubsub when it stops, so after a normal
+    hold the subscription is already gone. Sending UNSUBSCRIBE anyway
+    would check a fresh connection out of the pool and reconnect, which
+    is what used to blow up during interpreter shutdown.
+    """
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+    )
+    lock.acquire()
+    pubsub: client.PubSub | None = lock.pubsub
+    assert pubsub is not None
+    commands: list[str] = []
+    original_execute: typing.Callable[..., typing.Any] = pubsub.execute_command
+
+    def recording_execute(*args: typing.Any) -> typing.Any:
+        commands.append(str(args[0]))
+        return original_execute(*args)
+
+    monkeypatch.setattr(pubsub, 'execute_command', recording_execute)
+
+    lock.release()
+
+    assert lock.pubsub is None
+    assert lock.thread is None
+    assert pubsub.connection is None
+    assert 'UNSUBSCRIBE' not in commands
+
+
+def test_redis_del_suppresses_teardown_errors() -> None:
+    """``__del__`` is best effort and must stay quiet.
+
+    A broken connection during garbage collection must not surface as an
+    interpreter-level "Exception ignored in" message.
+    """
+    events: list[str] = []
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.pubsub = typing.cast(
+        'client.PubSub | None',
+        _TeardownPubSub(
+            events,
+            connection=object(),
+            unsubscribe_error=_TeardownError('unsubscribe failed'),
+        ),
+    )
+
+    lock.__del__()
+
+    assert events == ['unsubscribe', 'close']
+    assert lock.pubsub is None
+
+
+class _BoomTeardownPubSub(_BoomPubSub):
+    """Pubsub whose ``subscribe`` and rollback ``unsubscribe`` both raise."""
+
+    def __init__(self) -> None:
+        self.connection: object | None = object()
+
+    def unsubscribe(self, *channels: str) -> None:
+        raise _TeardownError('unsubscribe failed')
+
+
+def test_redis_rollback_failure_keeps_original_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A rollback that fails too is logged, the original error propagates.
+
+    If the rollback error replaced the original one the caller would see
+    the release failure instead of what actually broke the acquire.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.001,
+    )
+    monkeypatch.setattr(
+        lock, '_get_pubsub', lambda conn: _BoomTeardownPubSub()
+    )
+
+    with (
+        caplog.at_level(logging.WARNING, logger='portalocker.redis'),
+        pytest.raises(_SubscribeError),
+    ):
+        lock.acquire()
+
+    assert lock.pubsub is None
+    assert lock.thread is None
+    assert any('roll back' in record.message for record in caplog.records)
+
+
+def test_redis_release_clears_broken_created_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A broken self-created connection is cleared, first error wins.
+
+    Both the pubsub teardown and the connection close fail here. The
+    unsubscribe error propagates, the close error is logged, and the
+    connection is cleared so a later acquire builds a fresh one.
+    """
+    events: list[str] = []
+    unsubscribe_error: _TeardownError = _TeardownError('unsubscribe failed')
+    close_error: _TeardownError = _TeardownError('close failed')
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    assert lock.close_connection is True
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+
+    def broken_close() -> None:
+        raise close_error
+
+    monkeypatch.setattr(connection, 'close', broken_close)
+    lock.connection = typing.cast('client.Redis | None', connection)
+    lock.pubsub = typing.cast(
+        'client.PubSub | None',
+        _TeardownPubSub(
+            events,
+            connection=object(),
+            unsubscribe_error=unsubscribe_error,
+        ),
+    )
+
+    exc_info: pytest.ExceptionInfo[_TeardownError]
+    with (
+        caplog.at_level(logging.WARNING, logger='portalocker.redis'),
+        pytest.raises(_TeardownError) as exc_info,
+    ):
+        lock.release()
+
+    assert exc_info.value is unsubscribe_error
+    assert events == ['unsubscribe', 'close']
+    assert lock.connection is None
+    assert lock.pubsub is None
+    assert any(
+        'Suppressed secondary' in record.message for record in caplog.records
+    )
+
+
+def test_redis_release_raises_connection_close_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing connection close propagates but still clears the state."""
+    close_error: _TeardownError = _TeardownError('close failed')
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    assert lock.close_connection is True
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+
+    def broken_close() -> None:
+        raise close_error
+
+    monkeypatch.setattr(connection, 'close', broken_close)
+    lock.connection = typing.cast('client.Redis | None', connection)
+
+    exc_info: pytest.ExceptionInfo[_TeardownError]
+    with pytest.raises(_TeardownError) as exc_info:
+        lock.release()
+
+    assert exc_info.value is close_error
+    assert lock.connection is None
