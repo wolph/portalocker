@@ -2308,8 +2308,12 @@ class PidFileLock(TemporaryFileLock):
             owns. The file is read as bytes and validated as ASCII, so
             content the locale encoding cannot decode also comes back as
             `None` instead of raising ``UnicodeDecodeError`` as it did
-            before 4.1.1. Note that a returned PID only says who *wrote*
-            the file, the process may since have died.
+            before 4.1.1. Digit runs longer than 20 characters are junk
+            by the same rule (no real PID needs them), and rejecting
+            them before the `int` call keeps CPython's 4300-digit
+            conversion limit from escaping as a ``ValueError``. Note
+            that a returned PID only says who *wrote* the file, the
+            process may since have died.
         """
         pid, _error = self._read_pid()
         return pid
@@ -2344,6 +2348,12 @@ class PidFileLock(TemporaryFileLock):
         # `UnicodeDecodeError` where the contract promises `None`.
         content: str = raw.decode('ascii', errors='replace').strip()
         if not (content.isascii() and content.isdigit()):
+            return None, None
+        if len(content) > 20:
+            # CPython refuses `int` conversions past 4300 digits with a
+            # `ValueError` (see `sys.set_int_max_str_digits`), and no
+            # real PID comes close anyway: a 64-bit ``pid_max`` is 20
+            # digits. Longer content is junk, reported like any other.
             return None, None
         pid: int = int(content)
         if pid > 0:

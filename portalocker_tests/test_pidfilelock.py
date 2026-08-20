@@ -1296,6 +1296,22 @@ def test_read_pid_rejects_undecodable_bytes(tmp_path):
     assert lock.read_pid() is None
 
 
+def test_read_pid_rejects_over_long_digit_strings(tmp_path):
+    """R6: a preposterous digit run must read as `None`, not raise.
+
+    CPython caps `int(str)` conversion at 4300 digits (see
+    `sys.set_int_max_str_digits`) and raises `ValueError` beyond it, so
+    a junk PID file of 5000 digits escaped `read_pid` as an exception
+    where the contract promises `None`. No real PID needs more than 20
+    digits (a 64-bit ``pid_max`` is 20), so longer content is now
+    rejected before the conversion is attempted.
+    """
+    pid_file = tmp_path / 'oversized.pid'
+    pid_file.write_text('9' * 5000, encoding='ascii')
+    lock = utils.PidFileLock(str(pid_file))
+    assert lock.read_pid() is None
+
+
 def test_read_pid_accepts_surrounding_whitespace(tmp_path):
     """A trailing newline from `echo $$ > file` style writers stays valid."""
     pid_file = tmp_path / 'whitespace.pid'
@@ -1582,15 +1598,15 @@ def test_pidfilelock_atexit_releases_lock_acquired_in_forked_child(
         import sys
 
         import portalocker
-        from portalocker import utils
 
         # Constructed in the parent, before the fork.
         lock = portalocker.PidFileLock({str(pid_path)!r})
 
         pid = os.fork()
         if pid == 0:
-            # Neutralize everything except the atexit path.
-            utils.LockBase.__del__ = lambda self: None
+            # `LockBase` has no finalizer (4.1.1 removed it) and the
+            # cycle collector is off besides: the atexit path alone
+            # must clean up after the child.
             gc.disable()
             lock.acquire()
             sys.exit(0)

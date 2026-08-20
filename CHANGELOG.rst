@@ -62,6 +62,11 @@
    as bytes and validated as ASCII digits now, so undecodable content
    reads as ``None`` like any other unreadable value, on every platform
    alike
+ * Fixed ``PidFileLock.read_pid`` raising ``ValueError`` for a PID file
+   holding more than 4300 digits, CPython's integer-conversion limit.
+   No real PID needs more than 20 digits, so longer digit runs now read
+   as ``None`` like any other junk instead of leaking an exception the
+   contract does not allow
  * Fixed ``RLock.release`` zeroing the count and claiming the handle in
    two separate state-lock scopes: an acquire racing into the gap saw
    the count at zero with the handle still published, took the fast

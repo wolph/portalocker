@@ -611,8 +611,9 @@ def test_atexit_hook_releases_lock_held_at_interpreter_exit(
 ) -> None:
     """A lock still held at interpreter exit must have its file unlinked.
 
-    The garbage collection fallback is neutralized inside the child, so
-    only the module level atexit hook can perform the cleanup.
+    `LockBase` has no garbage collection finalizer (4.1.1 removed it)
+    and the subprocess disables the cycle collector besides, so only
+    the module level atexit hook can perform the cleanup.
     """
     lock_path: pathlib.Path = tmp_path / 'held.lock'
     script: str = textwrap.dedent(
@@ -620,11 +621,10 @@ def test_atexit_hook_releases_lock_held_at_interpreter_exit(
         import gc
 
         import portalocker
-        from portalocker import utils
 
-        # Neutralize the garbage collection fallback so that only the
-        # atexit hook can clean up.
-        utils.LockBase.__del__ = lambda self: None
+        # `LockBase` has no finalizer (4.1.1 removed it) and the cycle
+        # collector is off besides, so only the atexit hook can clean
+        # up.
         gc.disable()
 
         lock = portalocker.TemporaryFileLock({str(lock_path)!r})
@@ -665,16 +665,15 @@ def test_atexit_hook_ignores_inherited_locks_in_forked_child(
         import sys
 
         import portalocker
-        from portalocker import utils
 
         lock = portalocker.TemporaryFileLock({str(lock_path)!r})
         lock.acquire()
 
         pid = os.fork()
         if pid == 0:
-            # The garbage collection fallback is neutralized in the child
-            # only, so this test isolates the atexit path.
-            utils.LockBase.__del__ = lambda self: None
+            # The child exits immediately: `LockBase` has no garbage
+            # collection finalizer (4.1.1 removed it), so its normal
+            # exit exercises the atexit path alone.
             sys.exit(0)
 
         os.waitpid(pid, 0)
@@ -743,15 +742,15 @@ def test_atexit_hook_releases_lock_acquired_in_forked_child(
         import sys
 
         import portalocker
-        from portalocker import utils
 
         # Constructed in the parent, before the fork.
         lock = portalocker.TemporaryFileLock({str(lock_path)!r})
 
         pid = os.fork()
         if pid == 0:
-            # Neutralize everything except the atexit path.
-            utils.LockBase.__del__ = lambda self: None
+            # `LockBase` has no finalizer (4.1.1 removed it) and the
+            # cycle collector is off besides: the atexit path alone
+            # must clean up after the child.
             gc.disable()
             lock.acquire()
             sys.exit(0)
