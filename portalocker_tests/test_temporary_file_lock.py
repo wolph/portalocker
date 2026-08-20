@@ -1,4 +1,5 @@
 import gc
+import logging
 import os
 import pathlib
 
@@ -26,8 +27,8 @@ posix_inode_only = pytest.mark.skipif(
 
 
 def test_temporary_file_lock(tmpfile):
-    """The lock file must be deleted on context exit and GC must close
-    the lock gracefully.
+    """The lock file must be deleted on context exit, and GC of a held
+    lock wrapper must leave the lock file alone.
     """
     with portalocker.TemporaryFileLock(tmpfile):
         pass
@@ -37,11 +38,12 @@ def test_temporary_file_lock(tmpfile):
     lock = portalocker.TemporaryFileLock(tmpfile)
     lock.acquire()
     del lock
-    # CPython removes the file via refcount-driven `__del__`, but PyPy defers
-    # finalizers, so force a collection to run them before asserting.
+    # PyPy defers collection, so force one before asserting. Collection of
+    # the wrapper must not tear down the held lock: the file stays until an
+    # explicit release or interpreter exit (the ``atexit`` fallback).
     gc.collect()
-    assert not pathlib.Path(tmpfile).exists(), (
-        'Lock file should be removed on lock object deletion'
+    assert pathlib.Path(tmpfile).exists(), (
+        'Lock file must survive garbage collection of the lock object'
     )
 
 
@@ -91,22 +93,58 @@ def test_temporaryfilelock_unlinks_before_unlock(tmpfile, monkeypatch):
     assert events == ['unlink', 'unlock']
 
 
+def _fail_unlink(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``os.unlink`` raise `PermissionError` for every path."""
+
+    def failing_unlink(target: str, *args: object, **kwargs: object) -> None:
+        raise PermissionError(f'unlink denied for {target!r}')
+
+    monkeypatch.setattr(os, 'unlink', failing_unlink)
+
+
 @posix_release_only
-def test_temporaryfilelock_unlocks_even_when_unlink_fails(
+def test_temporaryfilelock_release_suppresses_unlink_error_by_default(
     tmpfile,
     monkeypatch,
+    caplog,
 ):
-    """Fix round 1: a non-FileNotFoundError unlink failure must still
-    propagate, but the OS lock must be freed regardless — otherwise the
-    error would leave the lock held forever.
+    """With ``raise_on_release_error`` unset an unlink failure must be
+    suppressed and logged, and the OS lock must be freed regardless.
+    Anything else would leave the lock held forever.
     """
     lock = portalocker.TemporaryFileLock(tmpfile)
     lock.acquire()
 
-    def failing_unlink(path, *args, **kwargs):
-        raise PermissionError(f'unlink denied for {path!r}')
+    _fail_unlink(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger='portalocker.utils'):
+        lock.release()
+    monkeypatch.undo()
 
-    monkeypatch.setattr(os, 'unlink', failing_unlink)
+    assert lock.fh is None, 'release left the instance holding a handle'
+    assert any(
+        'suppressed error' in record.getMessage() for record in caplog.records
+    ), 'suppressed unlink error was not logged'
+
+    # The unlock ran: a fresh lock on the same path acquires immediately.
+    fresh = portalocker.TemporaryFileLock(tmpfile, timeout=0)
+    fresh.acquire()
+    fresh.release()
+    assert not os.path.isfile(tmpfile)
+
+
+@posix_release_only
+def test_temporaryfilelock_strict_release_raises_unlink_error(
+    tmpfile,
+    monkeypatch,
+):
+    """With ``raise_on_release_error`` set an unlink failure must
+    propagate, but the OS lock must still be freed first.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.raise_on_release_error = True
+    lock.acquire()
+
+    _fail_unlink(monkeypatch)
     with pytest.raises(PermissionError):
         lock.release()
     monkeypatch.undo()
@@ -116,6 +154,119 @@ def test_temporaryfilelock_unlocks_even_when_unlink_fails(
     fresh.acquire()
     fresh.release()
     assert not os.path.isfile(tmpfile)
+
+
+@posix_release_only
+def test_temporaryfilelock_body_exception_wins_by_default(
+    tmpfile,
+    monkeypatch,
+):
+    """An exception from the ``with`` body must propagate unchanged even
+    when the unlink in `release` fails on the way out.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    body_error = ValueError('the actual bug in the body')
+
+    with pytest.raises(ValueError) as exc_info:  # noqa: PT012, SIM117
+        with lock:
+            _fail_unlink(monkeypatch)
+            raise body_error
+
+    assert exc_info.value is body_error
+
+
+@posix_release_only
+def test_temporaryfilelock_body_exception_wins_when_strict(
+    tmpfile,
+    monkeypatch,
+):
+    """With ``raise_on_release_error`` set the body exception still wins,
+    with the unlink failure chained on as its ``__context__``.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.raise_on_release_error = True
+    body_error = ValueError('the actual bug in the body')
+
+    with pytest.raises(ValueError) as exc_info:  # noqa: PT012, SIM117
+        with lock:
+            _fail_unlink(monkeypatch)
+            raise body_error
+
+    assert exc_info.value is body_error
+    assert isinstance(exc_info.value.__context__, PermissionError)
+
+
+@posix_release_only
+def test_temporaryfilelock_release_tolerates_vanished_file(tmpfile):
+    """A held lock file that a third party already unlinked must release
+    without complaint.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.acquire()
+    os.unlink(tmpfile)
+
+    lock.release()
+
+    assert lock.fh is None
+
+
+@posix_release_only
+def test_temporaryfilelock_strict_unlock_error_wins_over_unlink_error(
+    tmpfile,
+    monkeypatch,
+):
+    """With ``raise_on_release_error`` set and both the unlink and the
+    unlock failing, the unlock error propagates with the unlink error
+    chained on as its ``__cause__``.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.raise_on_release_error = True
+    lock.acquire()
+
+    unlock_error = OSError('unlock failed')
+
+    def failing_unlock(fh, *args, **kwargs):
+        raise unlock_error
+
+    _fail_unlink(monkeypatch)
+    monkeypatch.setattr(portalocker.portalocker, 'unlock', failing_unlock)
+
+    with pytest.raises(OSError) as exc_info:
+        lock.release()
+    monkeypatch.undo()
+
+    assert exc_info.value is unlock_error
+    assert isinstance(exc_info.value.__cause__, PermissionError)
+    assert lock.fh is None
+    os.unlink(tmpfile)
+
+
+@posix_release_only
+def test_temporaryfilelock_strict_unlock_error_propagates_alone(
+    tmpfile,
+    monkeypatch,
+):
+    """With ``raise_on_release_error`` set and only the unlock failing,
+    that error propagates without an artificial ``__cause__``.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.raise_on_release_error = True
+    lock.acquire()
+
+    unlock_error = OSError('unlock failed')
+
+    def failing_unlock(fh, *args, **kwargs):
+        raise unlock_error
+
+    monkeypatch.setattr(portalocker.portalocker, 'unlock', failing_unlock)
+
+    with pytest.raises(OSError) as exc_info:
+        lock.release()
+    monkeypatch.undo()
+
+    assert exc_info.value is unlock_error
+    assert exc_info.value.__cause__ is None
+    assert lock.fh is None
 
 
 @posix_inode_only
@@ -187,7 +338,7 @@ def test_temporaryfilelock_release_without_ownership_keeps_file(tmpfile):
         stale.release()
         assert os.path.isfile(tmpfile), 'stale release unlinked a held path'
 
-        # A never-acquired object (the __del__-after-failed-acquire path)
+        # A never-acquired object (a stale release after a failed acquire)
         # must be a no-op too.
         never_acquired = portalocker.TemporaryFileLock(tmpfile)
         never_acquired.release()
@@ -197,3 +348,44 @@ def test_temporaryfilelock_release_without_ownership_keeps_file(tmpfile):
     finally:
         holder.release()
     assert not os.path.isfile(tmpfile)
+
+
+@posix_release_only
+def test_temporaryfilelock_strict_context_chain_has_no_cycle(
+    tmpfile,
+    monkeypatch,
+):
+    """Strict mode with the body, the unlink and the unlock all failing
+    must build an exception chain that terminates instead of cycling.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.raise_on_release_error = True
+    body_error = ValueError('the actual bug in the body')
+    unlock_error = OSError('unlock failed')
+
+    def failing_unlock(fh, *args, **kwargs):
+        raise unlock_error
+
+    with pytest.raises(ValueError) as exc_info:  # noqa: PT012, SIM117
+        with lock:
+            _fail_unlink(monkeypatch)
+            monkeypatch.setattr(
+                portalocker.portalocker,
+                'unlock',
+                failing_unlock,
+            )
+            raise body_error
+
+    assert exc_info.value is body_error
+    assert exc_info.value.__context__ is unlock_error
+    assert isinstance(unlock_error.__cause__, PermissionError)
+
+    # Walk the chain with no visited set, bounded to ten hops. A cycle
+    # keeps the walker inside the chain, a healthy chain falls off the
+    # end well within the bound.
+    link: BaseException | None = exc_info.value
+    hops: int = 0
+    while link is not None and hops < 10:
+        link = link.__cause__ or link.__context__
+        hops += 1
+    assert link is None, 'exception chain does not terminate (cycle)'

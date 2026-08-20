@@ -178,8 +178,15 @@ class LockBase(  # pragma: no cover
     It contributes two things to its subclasses: the retry policy stored in
     the three attributes below, and the `LockBase._timeout_generator` that
     turns that policy into a sequence of attempts. Subclasses only have to
-    implement `acquire` and `release`; the context manager protocol, the
-    descriptor hook and the garbage collection fallback come for free.
+    implement `acquire` and `release`, and the context manager protocol
+    and the descriptor hook come for free.
+
+    Garbage collection of a lock object deliberately leaves the lock
+    alone. Portalocker 4.0.0 released held locks from a ``__del__``
+    finalizer, which tore down locks whose filehandle the caller was still
+    using (``fh = Lock(...).acquire()`` keeps the filehandle alive, not
+    the lock object). 4.1.1 removed that finalizer and restored the 3.2.0
+    behaviour.
 
     The class is generic over `AcquireReturnT`, the type `acquire` returns
     and therefore the type bound by ``with``. `Lock` and its descendants
@@ -350,8 +357,8 @@ class LockBase(  # pragma: no cover
         zero.
 
         Implementations are expected to tolerate being called on an
-        instance that holds nothing, because `__del__` calls this on every
-        lock that is garbage collected.
+        instance that holds nothing: double releases and the ``atexit``
+        fallback of `TemporaryFileLock` both do exactly that.
         """
 
     def __enter__(self) -> AcquireReturnT:
@@ -383,38 +390,20 @@ class LockBase(  # pragma: no cover
         self.release()
         return None
 
-    def __delete__(self, instance: LockBase[AcquireReturnT]) -> None:
-        """Release a lock that is deleted through the descriptor protocol.
+    def __delete__(self, instance: object) -> None:
+        """Release this lock when it is deleted from an owning object.
 
         Python routes ``del owner.attribute`` here when a lock instance is
         stored as a class attribute of ``owner``, which lets a lock be
-        released by deleting the attribute that holds it. The argument is
-        the object the attribute was deleted from, and it is that object's
-        `release` which gets called.
+        released by deleting the attribute that holds it. The lock itself
+        is the descriptor, so it is this lock's own `release` that runs.
+        The owning object is received as `instance` and is not touched.
 
         Args:
-            instance: The object the attribute was deleted from.
+            instance: The object the attribute was deleted from. Unused,
+                since the lock releases itself.
         """
-        instance.release()
-
-    # Ensure cleanup on garbage collection as tests rely on this behaviour
-    def __del__(self) -> None:  # pragma: no cover - best effort cleanup
-        """Release the lock when the object is garbage collected.
-
-        A safety net for locks that are dropped without ever being
-        released, and the mechanism behind `TemporaryFileLock` removing its
-        lock file once the last reference goes away. Every exception is
-        suppressed: raising from a finalizer only prints an ignored
-        traceback, and by this point there may not be much of an
-        interpreter left to clean up with.
-
-        Do not rely on it for correctness. It is best effort, it runs at an
-        unpredictable moment on implementations without reference counting
-        such as PyPy, and it may not run at all if the interpreter exits
-        abruptly.
-        """
-        with contextlib.suppress(Exception):
-            self.release()
+        self.release()
 
 
 class Lock(LockBase[typing.IO[typing.Any]]):
@@ -679,12 +668,17 @@ class Lock(LockBase[typing.IO[typing.Any]]):
     ) -> bool | None:
         """Release the lock, preserving an exception from the block.
 
-        Overrides `LockBase.__exit__` for one reason: when
-        ``raise_on_release_error`` is set and the block is already leaving
-        with an exception, a second failure during `release` must not
-        replace the first. The release error is chained onto the original
-        as its ``__context__`` and a note is attached, so both remain
-        visible in the traceback while the original is what propagates.
+        Overrides `LockBase.__exit__` for one reason: when the block is
+        already leaving with an exception, a failure during `release` must
+        not replace it. The release error is chained onto the original as
+        its ``__context__`` and a note is attached, so both remain visible
+        in the traceback while the original is what propagates. `release`
+        only raises when ``raise_on_release_error`` is set, but the
+        protection holds either way, so even a subclass whose `release`
+        fails unexpectedly cannot mask the block's own exception. The one
+        subclass that sidesteps it is `PidFileLock`, which overrides
+        ``__exit__`` with its own ownership check and does not yet route
+        through this protection.
 
         Args:
             exc_type: Type of the exception leaving the block, if any.
@@ -695,19 +689,31 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             `None`; exceptions from the block are never suppressed.
 
         Raises:
-            Exception: Whatever `release` raises, but only when
-                ``raise_on_release_error`` is set *and* the block itself
-                ended without an exception.
+            Exception: Whatever `release` raises, but only when the block
+                itself ended without an exception. With the default
+                ``raise_on_release_error=False`` that is nothing at all.
         """
-        if not self.raise_on_release_error or exc_value is None:
-            self.release()
-            return None
-
         try:
             self.release()
         except Exception as release_error:
+            if exc_value is None:
+                # Nothing to mask, the release error is the only failure.
+                raise
             previous_context: BaseException | None = exc_value.__context__
             release_error.__context__ = previous_context
+            # Errors raised while `exc_value` was in flight carry it as
+            # their implicit ``__context__``. Splicing the release error
+            # underneath `exc_value` would then close a reference cycle
+            # that loops naive chain walkers, so snip those back links
+            # first. The walk is bounded instead of tracked, because a
+            # release chain deeper than this is not worth preserving.
+            link: BaseException | None = release_error
+            depth: int = 0
+            while link is not None and depth < 10:
+                if link.__context__ is exc_value:
+                    link.__context__ = None
+                link = link.__cause__ or link.__context__
+                depth += 1
             exc_value.__context__ = release_error
             with contextlib.suppress(Exception):
                 exc_value.add_note(  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
@@ -718,16 +724,17 @@ class Lock(LockBase[typing.IO[typing.Any]]):
     def release(self) -> None:
         """Unlock and close the file handle, if this instance holds one.
 
-        Doing nothing when no lock is held is deliberate: `__del__` calls
-        this on every lock that is collected. Unlocking and closing are
-        both always attempted and the stored handle is always cleared, even
-        when one of the two fails.
+        Doing nothing when no lock is held is deliberate: double releases
+        and the ``atexit`` fallback of `TemporaryFileLock` rely on it.
+        Unlocking and closing are both always attempted and the stored
+        handle is always cleared, even when one of the two fails.
 
         Raises:
             Exception: Only when the lock was built with
                 ``raise_on_release_error=True``. The first failure of the
                 unlock and close pair is raised, chained from the second
-                if both failed. By default such failures are swallowed.
+                if both failed. By default such failures are suppressed
+                and logged at warning level instead.
         """
         fh = self.fh
         if fh:
@@ -747,11 +754,18 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                     release_errors.append(exception)
                 self.fh = None
 
-            if self.raise_on_release_error and release_errors:
-                primary_error: Exception = release_errors[0]
-                if len(release_errors) > 1:
-                    raise primary_error from release_errors[1]
-                raise primary_error
+            if release_errors:
+                if self.raise_on_release_error:
+                    primary_error: Exception = release_errors[0]
+                    if len(release_errors) > 1:
+                        raise primary_error from release_errors[1]
+                    raise primary_error
+                for release_error in release_errors:
+                    logger.warning(
+                        'suppressed error while releasing lock on %r: %r',
+                        self.filename,
+                        release_error,
+                    )
 
     def _get_fh(self) -> types.IO:
         """Open the file and return the new, still unlocked filehandle."""
@@ -941,14 +955,20 @@ class TemporaryFileLock(Lock):
     """A `Lock` whose lock file only exists while the lock is held.
 
     Use it when the file is purely a mutex and leaving it behind would be
-    litter. `release` unlinks the path, and so do the two fallbacks that
-    catch a program which forgets to: `LockBase.__del__` when the object is
-    collected, and an `atexit` handler registered by the constructor when
-    the interpreter shuts down while the lock is still held.
+    litter. `release` unlinks the path, and so does the one fallback that
+    catches a program which forgets to: an `atexit` handler registered by
+    the constructor for a lock still held when the interpreter shuts down.
+    Garbage collection of the lock object is deliberately not a trigger.
+    A finalizer that unlinked the path used to destroy locks whose
+    filehandle the caller was still using.
 
     That handler holds a `weakref.ref` rather than the lock itself, so
-    registering it does not keep the object alive; a lock that is collected
-    earlier simply leaves the handler with nothing to do.
+    registering it does not keep the object alive. The exit cleanup
+    therefore needs the wrapper to still be referenced: a wrapper
+    collected earlier leaves the handler with nothing to do, so a
+    still-locked, discarded wrapper leaves its file behind at exit. The
+    OS lock itself is released once the filehandle is closed or
+    collected, so the leftover is litter rather than a held lock.
 
     Releasing an instance that does not hold the lock is a no-op. Without
     that rule a stale object, released twice or finalized after a failed
@@ -1004,8 +1024,9 @@ class TemporaryFileLock(Lock):
             fail_when_locked=fail_when_locked,
             flags=flags,
         )
-        # Avoid keeping a strong reference to self, otherwise GC can't
-        # collect and tests expecting deletion won't pass.
+        # Avoid keeping a strong reference to self, otherwise the
+        # registration would pin every constructed lock in memory for the
+        # lifetime of the interpreter.
         wr = weakref.ref(self)
 
         def _finalize_release(
@@ -1091,35 +1112,97 @@ class TemporaryFileLock(Lock):
         remove with a short retry for AV/scanner share violations.
 
         Releasing an object that holds nothing is a no-op: a stale object
-        (double release, or garbage collection of a failed acquire calling
-        ``__del__``) must never unlink the path out from under the current
-        holder.
+        (a double release, or a release after a failed acquire) must never
+        unlink the path out from under the current holder.
+
+        Raises:
+            Exception: An unlink failure other than the file already being
+                gone, but only when ``raise_on_release_error`` is set, and
+                the lock itself is always released first. By default such
+                failures are suppressed and logged at warning level, like
+                the unlock and close failures in `Lock.release`.
         """
         if self.fh is None:
             # Not holding the lock; the path (if any) belongs to another
             # holder now.
             return
+        unlink_error: Exception | None
         if os.name == 'nt':  # pragma: no cover
-            Lock.release(self)
-            if os.path.isfile(self.filename):
-                for _ in range(5):
-                    try:
-                        os.unlink(self.filename)
-                        break
-                    except PermissionError:
-                        time.sleep(0.05)
-                    except FileNotFoundError:
-                        break
+            unlink_error = self._release_nt()
         else:  # pragma: not-posix
-            # Unlink first, while we still hold the lock, then unlock+close.
-            # The unlock must run even when the unlink fails (e.g. a
-            # PermissionError from a read-only directory), otherwise the
-            # error would leave the lock held forever.
+            unlink_error = self._release_posix()
+        if unlink_error is None:
+            return
+        if self.raise_on_release_error:
+            raise unlink_error
+        logger.warning(
+            'suppressed error while removing lock file %r: %r',
+            self.filename,
+            unlink_error,
+        )
+
+    def _release_nt(self) -> Exception | None:  # pragma: no cover
+        """Unlock and close first, then remove the file with a short retry.
+
+        A locked file cannot be unlinked on Windows, hence the ordering,
+        and an AV or indexing scanner can hold the freshly closed file
+        open for a moment, hence the retry.
+
+        Returns:
+            The last `PermissionError` when the file still refused to go
+            after the retries, or `None` when it was removed or was
+            already gone.
+        """
+        Lock.release(self)
+        if not os.path.isfile(self.filename):
+            return None
+        unlink_error: Exception | None = None
+        for _ in range(5):
             try:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(self.filename)
-            finally:
-                Lock.release(self)
+                os.unlink(self.filename)
+                unlink_error = None
+                break
+            except PermissionError as error:
+                unlink_error = error
+                time.sleep(0.05)
+            except FileNotFoundError:
+                unlink_error = None
+                break
+        return unlink_error
+
+    def _release_posix(self) -> Exception | None:  # pragma: not-posix
+        """Unlink while the lock is still held, then unlock and close.
+
+        The ordering closes the split-brain window: a competing acquirer
+        cannot grab the path between unlock and unlink when the unlink
+        comes first. The unlock must run even when the unlink fails (e.g.
+        a `PermissionError` from a read-only directory), otherwise the
+        error would leave the lock held forever.
+
+        Returns:
+            The unlink failure for the caller to report, or `None` when
+            the file was removed or was already gone.
+
+        Raises:
+            Exception: Whatever `Lock.release` raises, which it only does
+                with ``raise_on_release_error`` set. A failed unlink is
+                kept visible by chaining it onto that error.
+        """
+        unlink_error: Exception | None = None
+        try:
+            os.unlink(self.filename)
+        except FileNotFoundError:
+            # Already gone, nothing left to remove.
+            pass
+        except Exception as error:
+            unlink_error = error
+        try:
+            Lock.release(self)
+        except Exception as release_error:
+            if unlink_error is not None:
+                raise release_error from unlink_error
+            raise
+        return unlink_error
 
 
 class PidFileLock(TemporaryFileLock):
@@ -1469,9 +1552,9 @@ class PidFileLock(TemporaryFileLock):
         after.
 
         Releasing an object that does not hold the sidecar is a no-op: a
-        stale object (double release, or garbage collection of a failed
-        acquire calling ``__del__``) must never unlink the PID or sidecar
-        files out from under the current holder.
+        stale object (a double release, or a release after a failed
+        acquire) must never unlink the PID or sidecar files out from under
+        the current holder.
         """
         inner_lock = self._inner_lock
         if inner_lock is None:
@@ -1832,7 +1915,7 @@ class BoundedSemaphore(LockBase['Lock | None']):
 
         The lock file itself is left on disk; only the operating system
         lock is dropped, which is what makes the slot available again.
-        Doing nothing when no slot is held keeps `LockBase.__del__` safe.
+        Doing nothing when no slot is held keeps double releases safe.
         """
         if self.lock is not None:
             self.lock.release()

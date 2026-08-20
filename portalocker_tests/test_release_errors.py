@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import typing
 
 import pytest
@@ -256,3 +257,48 @@ def test_strict_context_retains_unlock_and_close_errors(
     assert exc_info.value.__context__ is unlock_error
     assert unlock_error.__cause__ is close_error
     assert events == ['unlock', 'close']
+
+
+def test_release_logs_suppressed_errors_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    events: list[str] = []
+    unlock_error: OSError = OSError('unlock failed')
+    close_error: OSError = OSError('close failed')
+    handle: ReleaseHandle = ReleaseHandle(events, close_error)
+    lock: utils.Lock = make_lock(handle)
+    set_unlock(monkeypatch, events, unlock_error)
+
+    with caplog.at_level(logging.WARNING, logger='portalocker.utils'):
+        lock.release()
+
+    messages: list[str] = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 2, 'expected one warning per suppressed error'
+    assert all('suppressed error' in message for message in messages)
+    assert events == ['unlock', 'close']
+    assert lock.fh is None
+
+
+def test_default_context_preserves_body_error_from_misbehaving_release() -> (
+    None
+):
+    """A subclass whose `release` raises despite the default
+    ``raise_on_release_error=False`` still cannot mask the body error.
+    """
+    release_error: OSError = OSError('release failed')
+
+    class MisbehavingLock(utils.Lock):
+        def release(self) -> None:
+            raise release_error
+
+    lock: MisbehavingLock = MisbehavingLock('unused.lock')
+    lock.fh = typing.cast(types.IO, ReleaseHandle([]))
+    body_error: ValueError = ValueError('body failed')
+
+    exc_info: pytest.ExceptionInfo[ValueError]
+    with pytest.raises(ValueError) as exc_info, lock:
+        raise body_error
+
+    assert exc_info.value is body_error
+    assert exc_info.value.__context__ is release_error

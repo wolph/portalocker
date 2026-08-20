@@ -225,10 +225,11 @@ keeping, and leaving it behind afterwards would just be litter.
 
 Guarantees:
 
-- `TemporaryFileLock.release` unlinks the lock file. Two fallbacks catch
-  a caller that forgets to release: `LockBase.__del__` on garbage
-  collection, and an `atexit` handler registered by the constructor for
-  a lock still held when the interpreter shuts down.
+- `TemporaryFileLock.release` unlinks the lock file. One fallback catches
+  a caller that forgets to release: an `atexit` handler registered by the
+  constructor for a lock still held when the interpreter shuts down.
+  Garbage collection of the lock object deliberately leaves a held lock
+  and its file alone, since the caller may still be using the filehandle.
 - Releasing an instance that does not hold the lock is a no-op, so a
   stale or double-released instance cannot unlink the file out from
   under whoever holds it at that moment.
