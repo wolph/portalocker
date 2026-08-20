@@ -126,3 +126,16 @@ def test_dispatch_class(set_locker, tmpfile):
         portalocker.lock(a, LockFlags.EXCLUSIVE)
         portalocker.unlock(a)
     assert isinstance(_locker_instances.get(FlockLocker), FlockLocker)
+
+
+def test_direct_posix_locker_rejects_nonblocking_alone(tmpfile):
+    """``PosixLocker.lock`` keeps its own NON_BLOCKING-alone guard.
+
+    The module-level ``portalocker.lock`` validates flags before
+    dispatching (since 4.1.1), but a ``PosixLocker`` can also be used
+    directly, and NON_BLOCKING without a lock type must still fail with
+    a clear ``RuntimeError`` there instead of an opaque ``fcntl`` error.
+    """
+    locker = PosixLocker()
+    with open(tmpfile, 'a+') as fh, pytest.raises(RuntimeError):
+        locker.lock(fh, LockFlags.NON_BLOCKING)

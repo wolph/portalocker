@@ -45,7 +45,8 @@ else-branch relies on. That includes the optional
 ``try: from .redis import RedisLock`` guard in ``__init__.py``:
 ``redis.py`` is inlined like any other sibling module, re-indented to
 stay inside the ``try``, so the combined file binds ``RedisLock`` the
-same way the package does -- to ``None`` if importing ``redis`` fails.
+same way the package does -- to the stub class that raises
+``ImportError`` on construction if importing ``redis`` fails.
 
 Qualified references left behind by inlining (``constants.LockFlags``
 becoming just ``LockFlags``, for instance) are cleaned up, and useless

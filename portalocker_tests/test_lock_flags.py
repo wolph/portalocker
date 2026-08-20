@@ -99,14 +99,87 @@ def test_blocking_timeout(tmpdir, locker):
         lock.acquire(timeout=5)
 
 
-@pytest.mark.skipif(
-    os.name == 'nt',
-    reason='Windows uses an entirely different lockmechanism, which does not '
-    'support NON_BLOCKING flag within a single process.',
-)
 @pytest.mark.parametrize('locker', LOCKERS, indirect=True)
 def test_nonblocking(tmpdir, locker):
     """Test that using NON_BLOCKING flag raises RuntimeError."""
     tmpfile = tmpdir.join('test_nonblocking.lock')
     with open(tmpfile, 'w') as fh, pytest.raises(RuntimeError):
         portalocker.lock(fh, LockFlags.NON_BLOCKING)
+
+
+# ``LockFlags.UNBLOCK`` is ``msvcrt.LK_UNLCK`` (0) on Windows, so an
+# UNBLOCK-bearing combination is indistinguishable from the same flags
+# without it there. The UNBLOCK-specific rejections only exist on POSIX.
+_unblock_is_distinct = pytest.mark.skipif(
+    os.name == 'nt',
+    reason='LockFlags.UNBLOCK is 0 on Windows, the combination is '
+    'indistinguishable from the plain lock flags',
+)
+
+
+@_unblock_is_distinct
+@pytest.mark.parametrize(
+    'flags',
+    [
+        LockFlags.UNBLOCK,
+        LockFlags.EXCLUSIVE | LockFlags.UNBLOCK,
+        LockFlags.SHARED | LockFlags.UNBLOCK,
+        LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING | LockFlags.UNBLOCK,
+    ],
+)
+def test_lock_rejects_unblock_flag(tmpdir, flags):
+    """``lock()`` must reject UNBLOCK-bearing flags, releasing is unlock()'s
+    job.
+    """
+    tmpfile = tmpdir.join('test_lock_rejects_unblock.lock')
+    with (
+        open(tmpfile, 'w') as fh,
+        pytest.raises(RuntimeError, match='unlock'),
+    ):
+        portalocker.lock(fh, flags)
+
+
+@_unblock_is_distinct
+def test_lock_with_unblock_does_not_release(tmpdir):
+    """A held lock must survive a rejected ``lock(fh, UNBLOCK)`` call.
+
+    Before 4.1.1 that call silently *released* the lock on POSIX, because
+    the UNBLOCK bit went straight through to ``fcntl.flock``.
+    """
+    tmpfile = tmpdir.join('test_unblock_no_release.lock')
+    with open(tmpfile, 'w') as fh:
+        portalocker.lock(fh, LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING)
+
+        with pytest.raises(RuntimeError):
+            portalocker.lock(fh, LockFlags.UNBLOCK)
+
+        # The lock must still be held: a second handle still contends.
+        with (
+            open(tmpfile, 'w') as fh2,
+            pytest.raises(portalocker.AlreadyLocked),
+        ):
+            portalocker.lock(fh2, LockFlags.EXCLUSIVE | LockFlags.NON_BLOCKING)
+
+        portalocker.unlock(fh)
+
+
+def test_lock_rejects_shared_and_exclusive(tmpdir):
+    """``lock()`` must reject SHARED|EXCLUSIVE, they contradict each other."""
+    tmpfile = tmpdir.join('test_shared_exclusive.lock')
+    with (
+        open(tmpfile, 'w') as fh,
+        pytest.raises(
+            RuntimeError, match=r'SHARED.*EXCLUSIVE|EXCLUSIVE.*SHARED'
+        ),
+    ):
+        portalocker.lock(fh, LockFlags.SHARED | LockFlags.EXCLUSIVE)
+
+
+def test_lock_rejects_zero_flags(tmpdir):
+    """``lock()`` with no flags at all must fail with a clear message."""
+    tmpfile = tmpdir.join('test_zero_flags.lock')
+    with (
+        open(tmpfile, 'w') as fh,
+        pytest.raises(RuntimeError, match=r'SHARED|EXCLUSIVE'),
+    ):
+        portalocker.lock(fh, LockFlags(0))

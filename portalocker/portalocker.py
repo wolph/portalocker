@@ -186,6 +186,92 @@ def _resolve_locker_pair(
     return None  # pragma: not-posix
 
 
+def _validate_lock_flags(flags: LockFlags) -> None:
+    """Reject flag combinations that cannot describe a lock request.
+
+    Called by the module-level `lock` on every platform, before any
+    system call, so nonsense flags fail loudly instead of doing something
+    silently wrong. Three combinations are rejected:
+
+    - Anything carrying `LockFlags.UNBLOCK`. Passing it to `lock` used to
+      silently *release* a held lock on POSIX, because the bit went
+      straight through to ``fcntl``. Releasing is `unlock`'s job.
+    - ``SHARED | EXCLUSIVE``. The two lock types contradict each other,
+      and what actually happened depended on the platform.
+    - A flag set naming no lock type at all, such as ``LockFlags(0)`` or
+      `LockFlags.NON_BLOCKING` on its own. `NON_BLOCKING` only says *how*
+      to wait, not *what* to take.
+
+    Note:
+        On Windows ``LockFlags.UNBLOCK`` is ``msvcrt.LK_UNLCK``, which is
+        0, so the UNBLOCK check cannot trigger there. A bare
+        ``LockFlags.UNBLOCK`` still fails on Windows, through the
+        no-lock-type check, since the flag adds no bits.
+
+    Args:
+        flags: The `LockFlags` combination passed to `lock`.
+
+    Raises:
+        RuntimeError: `flags` matches one of the rejected combinations
+            described above.
+    """
+    if flags & LockFlags.UNBLOCK:  # pragma: not-posix
+        raise RuntimeError(
+            'lock() cannot release locks: LockFlags.UNBLOCK is not a valid '
+            'flag for lock(). Call unlock() to release a lock.'
+        )
+    if flags & LockFlags.SHARED and flags & LockFlags.EXCLUSIVE:
+        raise RuntimeError(
+            'LockFlags.SHARED and LockFlags.EXCLUSIVE are mutually '
+            'exclusive. Pass exactly one of them.'
+        )
+    if not flags & (LockFlags.SHARED | LockFlags.EXCLUSIVE):
+        raise RuntimeError(
+            'lock() needs a lock type: combine the flags with '
+            'LockFlags.SHARED or LockFlags.EXCLUSIVE.'
+        )
+
+
+#: Fallback values for the ``msvcrt`` locking-mode constants, from the
+#: ``<sys/locking.h>`` header that ``msvcrt.locking`` forwards its mode
+#: argument to. Only consulted for constants the running interpreter's
+#: ``msvcrt`` module does not expose itself.
+_MSVCRT_LOCK_MODE_DEFAULTS: dict[str, int] = {
+    'LK_UNLCK': 0,
+    'LK_LOCK': 1,
+    'LK_NBLCK': 2,
+    'LK_RLCK': 3,
+    'LK_NBRLCK': 4,
+}
+
+
+def _resolve_msvcrt_lock_modes(msvcrt_module: object) -> dict[str, int]:
+    """Resolve the ``LK_*`` locking modes for an ``msvcrt``-like module.
+
+    Prefers the constants the module itself defines and falls back to
+    `_MSVCRT_LOCK_MODE_DEFAULTS` for any it lacks. The module is never
+    mutated: before 4.1.1 the fallbacks were ``setattr``'d onto the
+    shared stdlib ``msvcrt`` module, and the fallback table itself was
+    wrong (``LK_LOCK`` fell back to 0, which is ``LK_UNLCK``, so a
+    "blocking lock" through it would have issued an unlock).
+
+    Args:
+        msvcrt_module: The module to read ``LK_*`` constants from.
+            Typed ``object`` so tests can pass a stub. On Windows this is
+            the real ``msvcrt``, whose CPython builds have defined all
+            five constants for as long as the module has existed, so the
+            fallbacks are pure defence in depth.
+
+    Returns:
+        A mapping from constant name (``'LK_LOCK'`` etc.) to its integer
+        locking mode.
+    """
+    return {
+        name: cast('int', getattr(msvcrt_module, name, default))
+        for name, default in _MSVCRT_LOCK_MODE_DEFAULTS.items()
+    }
+
+
 if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
     # Windows-specific helper functions
     def _prepare_windows_file(
@@ -293,24 +379,30 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
             `MsvcrtLocker`: the dependency-free Windows default.
         """
 
-        _overlapped: Any  # pywintypes.OVERLAPPED
         _lock_bytes_low: int = -0x10000
 
         def __init__(self) -> None:
-            """Create the ``OVERLAPPED`` structure reused by every call.
+            """Verify that ``pywin32`` is importable.
+
+            Nothing is cached here. In particular the ``OVERLAPPED``
+            structure handed to ``LockFileEx``/``UnlockFileEx`` is
+            created fresh for every call (see `lock` / `unlock`): the
+            Win32 API forbids sharing one ``OVERLAPPED`` between
+            concurrent calls, which a cached instance would do the moment
+            two threads lock through the same locker.
 
             Raises:
                 ImportError: ``pywin32`` is not installed. The message
                     names the ``win32`` extra that provides it.
             """
             try:
-                import pywintypes
+                # Imported purely as an availability probe.
+                import pywintypes  # noqa: F401  # pyright: ignore[reportUnusedImport]
             except ImportError as e:
                 raise ImportError(
                     'Win32Locker requires the win32 extra (pywin32). '
                     'Install it with: pip install "portalocker[win32]"'
                 ) from e
-            self._overlapped = pywintypes.OVERLAPPED()
 
         def _get_os_handle(self, fd: int) -> int:
             """Translate a C runtime descriptor into a Win32 file handle.
@@ -359,8 +451,11 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                 ~portalocker.exceptions.AlreadyLocked: Windows reported
                     ``ERROR_LOCK_VIOLATION``, i.e. someone else holds a
                     conflicting lock on the range.
-                ~portalocker.exceptions.LockException: Any other Win32 error. A
-                    raw ``pywintypes.error`` never escapes this method.
+                ~portalocker.exceptions.LockException: Any other Win32 error,
+                    or an ``OSError`` such as ``msvcrt.get_osfhandle``
+                    rejecting a stale file descriptor. Neither a raw
+                    ``pywintypes.error`` nor a raw ``OSError`` escapes this
+                    method.
             """
             import pywintypes
             import win32con
@@ -368,7 +463,6 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
             import winerror
 
             fd, io_obj_ctx, pos_ctx = _prepare_windows_file(file_obj)
-            os_fh = self._get_os_handle(fd)
 
             mode = 0
             if flags & LockFlags.NON_BLOCKING:
@@ -377,8 +471,12 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                 mode |= win32con.LOCKFILE_EXCLUSIVE_LOCK
 
             try:
+                os_fh = self._get_os_handle(fd)
+                # A fresh OVERLAPPED per call: the Win32 API forbids
+                # sharing one instance between concurrent calls.
+                overlapped = pywintypes.OVERLAPPED()
                 win32file.LockFileEx(
-                    os_fh, mode, 0, self._lock_bytes_low, self._overlapped
+                    os_fh, mode, 0, self._lock_bytes_low, overlapped
                 )
             except pywintypes.error as exc_value:
                 if exc_value.winerror == winerror.ERROR_LOCK_VIOLATION:
@@ -396,6 +494,15 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                         exc_value.strerror,
                         fh=file_obj,  # Pass original file_obj
                     ) from exc_value
+            except OSError as exc_value:
+                # Mirror unlock(): a stale or invalid descriptor makes
+                # msvcrt.get_osfhandle raise OSError, which must not
+                # escape lock() raw while unlock() wraps it.
+                raise exceptions.LockException(
+                    exceptions.LockException.LOCK_FAILED,
+                    exc_value.strerror,
+                    fh=file_obj,  # Pass original file_obj
+                ) from exc_value
             finally:
                 _restore_windows_file_pos(fd, io_obj_ctx, pos_ctx)
 
@@ -420,11 +527,13 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
             import winerror
 
             fd, io_obj_ctx, pos_ctx = _prepare_windows_file(file_obj)
-            os_fh = self._get_os_handle(fd)
 
             try:
+                os_fh = self._get_os_handle(fd)
+                # A fresh OVERLAPPED per call, as in lock().
+                overlapped = pywintypes.OVERLAPPED()
                 win32file.UnlockFileEx(
-                    os_fh, 0, self._lock_bytes_low, self._overlapped
+                    os_fh, 0, self._lock_bytes_low, overlapped
                 )
             except pywintypes.error as exc:
                 if exc.winerror != winerror.ERROR_NOT_LOCKED:
@@ -452,6 +561,7 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
         """
 
         _win32_locker: Win32Locker | None
+        _lock_modes: dict[str, int]
         _msvcrt_lock_length: int = 0x10000
 
         def __init__(self) -> None:
@@ -463,10 +573,13 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
             is recorded as `None` here rather than raised, and is only
             reported if one of those two paths is actually taken.
 
-            Any ``LK_*`` constant the running interpreter's ``msvcrt``
-            module happens not to expose is set on that module with a
-            conventional value, so the lock modes can be referenced
-            unconditionally further down.
+            The ``LK_*`` locking modes are resolved once, via
+            `_resolve_msvcrt_lock_modes`, and stored on the instance.
+            Before 4.1.1 any missing constant was ``setattr``'d onto the
+            shared stdlib ``msvcrt`` module instead, with a fallback
+            table whose values were wrong: ``LK_LOCK`` fell back to 0,
+            which is ``LK_UNLCK``, so a "blocking lock" through the
+            fallback would have issued an unlock.
 
             Raises:
                 ImportError: The built-in ``msvcrt`` module is missing,
@@ -487,11 +600,7 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                     'msvcrt is required for MsvcrtLocker but not found.'
                 ) from e
 
-            attrs = ['LK_LOCK', 'LK_RLCK', 'LK_NBLCK', 'LK_UNLCK', 'LK_NBRLCK']
-            defaults = [0, 1, 2, 3, 2]  # LK_NBRLCK often same as LK_NBLCK (2)
-            for attr, default_val in zip(attrs, defaults, strict=True):
-                if not hasattr(msvcrt, attr):
-                    setattr(msvcrt, attr, default_val)
+            self._lock_modes = _resolve_msvcrt_lock_modes(msvcrt)
 
         def lock(self, file_obj: types.FileArgument, flags: LockFlags) -> None:
             """Lock `file_obj`, handing shared locks to `Win32Locker`.
@@ -557,9 +666,9 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
 
             fd, io_obj_ctx, pos_ctx = _prepare_windows_file(file_obj)
             mode = (
-                msvcrt.LK_NBLCK  # type: ignore[attr-defined]
+                self._lock_modes['LK_NBLCK']
                 if flags & LockFlags.NON_BLOCKING
-                else msvcrt.LK_LOCK  # type: ignore[attr-defined]
+                else self._lock_modes['LK_LOCK']
             )
 
             try:
@@ -611,7 +720,7 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
             try:
                 msvcrt.locking(  # type: ignore[attr-defined]
                     fd,
-                    msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+                    self._lock_modes['LK_UNLCK'],
                     self._msvcrt_lock_length,
                 )
             except OSError as exc:
@@ -679,6 +788,10 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                 `LockFlags.SHARED` needs ``pywin32``; see `MsvcrtLocker`.
 
         Raises:
+            RuntimeError: `flags` is a rejected combination - it carries
+                `LockFlags.UNBLOCK`, combines `LockFlags.SHARED` with
+                `LockFlags.EXCLUSIVE`, or names no lock type at all. See
+                `_validate_lock_flags`.
             TypeError: `LOCKER` holds none of the supported forms - most
                 likely a plain callable copied from POSIX code.
             ~portalocker.exceptions.AlreadyLocked: The lock is held by someone
@@ -695,6 +808,7 @@ if os.name == 'nt':  # pragma: no cover - Win32Locker unreachable w/o pywin32
                     portalocker.lock(fh, portalocker.LockFlags.EXCLUSIVE)
                     portalocker.unlock(fh)
         """
+        _validate_lock_flags(flags)
         pair = _resolve_locker_pair(LOCKER)
         if pair is None:
             # Windows has no ``fcntl``-style callable locker.
@@ -971,6 +1085,10 @@ else:  # pragma: not-posix
                 `LockFlags.SHARED` or `LockFlags.EXCLUSIVE`.
 
         Raises:
+            RuntimeError: `flags` is a rejected combination - it carries
+                `LockFlags.UNBLOCK`, combines `LockFlags.SHARED` with
+                `LockFlags.EXCLUSIVE`, or names no lock type at all. See
+                `_validate_lock_flags`.
             ~portalocker.exceptions.AlreadyLocked: The lock is held elsewhere
                 and `LockFlags.NON_BLOCKING` was set.
             ~portalocker.exceptions.LockException: The locking call failed for
@@ -982,6 +1100,7 @@ else:  # pragma: not-posix
             ...     portalocker.lock(fh, portalocker.LockFlags.EXCLUSIVE)
             ...     portalocker.unlock(fh)
         """
+        _validate_lock_flags(flags)
         pair = _resolve_locker_pair(LOCKER)
         if pair is None:
             _posix_locker_instance.lock(file, flags)

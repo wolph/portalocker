@@ -161,6 +161,34 @@ See :doc:`lock-types` for how both sit next to the other lock classes.
 Behavioural fixes worth knowing about
 --------------------------------------
 
+``LockfLocker`` really locks with ``lockf`` now
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+On 3.2.0, `LockfLocker` looked its syscall up through the module-level
+``LOCKER`` and therefore quietly called ``fcntl.flock``. Since 4.0.0 it
+binds ``fcntl.lockf`` at class level and actually uses it. If you
+selected `LockfLocker` on 3.x you were getting ``flock`` semantics all
+along, and the upgrade changes the kernel-level lock owner from the open
+file description to the process. Two differences are visible from
+Python:
+
+- Two locker instances on the same path *in the same process* no longer
+  contend. The second ``lockf`` call from the same process replaces the
+  first lock instead of conflicting with it, so in-process mutual
+  exclusion that 3.x provided by accident silently disappears.
+- Closing *any* descriptor for the file - not just the one that was
+  locked - drops all of the process's record locks on it. An unrelated
+  ``open()``/``close()`` of the same path elsewhere in the process now
+  releases the lock.
+
+There is also a mixed-fleet hazard during a rolling upgrade: on Linux,
+``flock`` and ``lockf`` locks do not conflict with each other, so a 3.x
+`LockfLocker` holder (really ``flock``) and a 4.x `LockfLocker` holder
+(really ``lockf``) on the same file do not exclude each other at all.
+Upgrade every process sharing the file together, or pin the old
+behaviour explicitly with `FlockLocker`. See :doc:`platforms` for the
+full ``flock``/``lockf`` comparison behind both consequences.
+
 ``Lock.release()`` no longer propagates cleanup errors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
