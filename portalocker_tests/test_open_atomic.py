@@ -518,3 +518,26 @@ def test_open_atomic_publishes_with_plain_open_permissions(
     atomic_mode: int = stat.S_IMODE(atomic_target.stat().st_mode)
     plain_mode: int = stat.S_IMODE(plain_target.stat().st_mode)
     assert atomic_mode == plain_mode
+
+
+def test_open_atomic_removes_temporary_file_on_keyboard_interrupt(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A ``KeyboardInterrupt`` in the body must clean up like any other
+    body failure: the temporary file is removed and nothing is published.
+    ``except Exception`` would miss it, so this pins the ``BaseException``
+    handling.
+    """
+    target: pathlib.Path = tmp_path / 'destination.bin'
+
+    with (
+        pytest.raises(KeyboardInterrupt),
+        portalocker.open_atomic(target) as file_handle,
+    ):
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'partial payload')
+        assert written == len(b'partial payload')
+        raise KeyboardInterrupt
+
+    assert not target.exists()
+    assert not any(tmp_path.iterdir()), 'the interrupt leaked a temp file'

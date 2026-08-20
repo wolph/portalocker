@@ -20,7 +20,7 @@ import typing
 import pytest
 
 import portalocker
-from portalocker import exceptions
+from portalocker import exceptions, utils
 
 
 def test_prepare_fh_failure_releases_lock(
@@ -180,3 +180,117 @@ def test_contention_still_retries(
 
     assert len(attempts) > 1, 'contention must still be retried'
     assert lock.fh is None
+
+
+def test_acquire_interrupt_in_retry_sleep_closes_fd(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``KeyboardInterrupt`` in the retry sleep (^C while waiting on a
+    contended lock) must close the descriptor the acquire opened, instead
+    of leaking it for as long as the traceback stays referenced.
+    """
+    holder = portalocker.Lock(tmpfile, timeout=0)
+    holder.acquire()
+
+    waiter = portalocker.Lock(tmpfile, timeout=10, check_interval=0.01)
+    opened: list[typing.IO[typing.Any]] = []
+    real_get_fh = portalocker.Lock._get_fh
+
+    def recording_get_fh(self: portalocker.Lock) -> typing.IO[typing.Any]:
+        fh = real_get_fh(self)
+        opened.append(fh)
+        return fh
+
+    def interrupting_sleep(seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(portalocker.Lock, '_get_fh', recording_get_fh)
+    monkeypatch.setattr(utils.time, 'sleep', interrupting_sleep)
+
+    with pytest.raises(KeyboardInterrupt):
+        waiter.acquire()
+
+    assert len(opened) == 1
+    assert opened[0].closed, 'the interrupted acquire leaked its descriptor'
+    assert waiter.fh is None
+    holder.release()
+
+
+def test_acquire_interrupt_in_prepare_unlocks_and_closes(
+    tmpfile: str,
+) -> None:
+    """A ``KeyboardInterrupt`` between a successful lock and the
+    publication on ``self.fh`` (staged inside ``_prepare_fh``) must give
+    the OS lock back and close the descriptor. It used to leave the lock
+    held by an untracked descriptor, with ``release`` a silent no-op.
+    """
+    opened: list[typing.IO[typing.Any]] = []
+
+    class InterruptedPrepare(portalocker.Lock):
+        def _prepare_fh(
+            self,
+            fh: typing.IO[typing.Any],
+        ) -> typing.IO[typing.Any]:
+            opened.append(fh)
+            raise KeyboardInterrupt
+
+    waiter = InterruptedPrepare(tmpfile, timeout=0)
+    with pytest.raises(KeyboardInterrupt):
+        waiter.acquire()
+
+    assert waiter.fh is None
+    assert len(opened) == 1
+    assert opened[0].closed, 'the interrupted acquire leaked its descriptor'
+
+    # The OS lock must be free again: an untracked holder would make this
+    # probe raise AlreadyLocked.
+    probe = portalocker.Lock(tmpfile, timeout=0, fail_when_locked=True)
+    probe.acquire()
+    probe.release()
+
+
+def test_pidfilelock_interrupt_after_sidecar_lock_rolls_back(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``KeyboardInterrupt`` landing inside the verified sidecar acquire
+    after the OS lock was taken must roll the sidecar back before the
+    interrupt propagates: a pinned traceback keeps the frame (and with it
+    the sidecar lock object) alive, so refcounting would never free the
+    lock and every contender would stay blocked.
+    """
+    pid_file = str(tmp_path / 'interrupted.pid')
+    real_verified = utils.TemporaryFileLock._acquire_verified
+
+    def interrupted_verified(
+        lock: utils.Lock,
+        filename: str,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> typing.IO[typing.Any]:
+        real_verified(lock, filename, *args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        utils.PidFileLock,
+        '_acquire_verified',
+        staticmethod(interrupted_verified),
+    )
+    lock = utils.PidFileLock(pid_file)
+    with pytest.raises(KeyboardInterrupt) as interrupt_info:
+        lock.acquire()
+
+    assert lock._inner_lock is None
+    assert lock._acquired_lock is False
+
+    # `interrupt_info` pins the traceback, and with it the acquire frame
+    # and the local sidecar lock object, exactly like an error handler
+    # that stores the exception. Refcounting therefore cannot free the
+    # sidecar behind our back: only an explicit rollback can.
+    assert interrupt_info.value.__traceback__ is not None
+    monkeypatch.undo()
+    successor = utils.PidFileLock(pid_file)
+    successor.acquire()
+    assert successor.read_pid() == os.getpid()
+    successor.release()

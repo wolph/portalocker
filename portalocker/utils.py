@@ -939,78 +939,77 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         # Get a new filehandler
         fh = self._get_fh()
 
-        def try_close() -> None:  # pragma: no cover
-            """Close the filehandle opened above, ignoring any failure.
-
-            Every path that leaves `acquire` without a lock runs this
-            first, so a failed acquire does not leak the descriptor it
-            opened. It deliberately stays quiet: the caller is already on
-            its way to raising something more interesting than whatever
-            `close` might complain about.
-            """
-            # Silently try to close the handle if possible, ignore all issues
-            if fh is not None:
-                with contextlib.suppress(Exception):
-                    fh.close()
-
-        exception = None
-        # Try till the timeout has passed
-        for _ in self._timeout_generator(timeout, check_interval):
+        try:
             exception = None
-            try:
-                # Try to lock
-                fh = self._get_lock(fh)
-                break
-            except exceptions.AlreadyLocked as exc:
-                # Somebody else holds the lock. Retrying can help here,
-                # so keep trying until the timeout expires. Python would
-                # remove the exception from memory once the handler ends
-                # unless it is saved in a different location.
-                exception = exc
+            # Try till the timeout has passed
+            for _ in self._timeout_generator(timeout, check_interval):
+                exception = None
+                try:
+                    # Try to lock
+                    fh = self._get_lock(fh)
+                    break
+                except exceptions.AlreadyLocked as exc:
+                    # Somebody else holds the lock. Retrying can help
+                    # here, so keep trying until the timeout expires.
+                    # Python would remove the exception from memory once
+                    # the handler ends unless it is saved in a different
+                    # location.
+                    exception = exc
 
-                # We already tried to get the lock
-                # If fail_when_locked is True, stop trying
-                if fail_when_locked:
-                    try_close()
-                    # Propagate the locker's own args (OSError plus
-                    # message on POSIX, code plus message on Windows) so
-                    # `strerror` is populated on the exception users
-                    # actually catch, and forward `fh` and `holder_pid`
-                    # so `fh_name` and the holder survive a pickle
-                    # across a multiprocessing boundary (pickling drops
-                    # `__cause__`, where the original exception stays
-                    # reachable in-process).
-                    raise exceptions.AlreadyLocked(
-                        *exc.args,
-                        fh=exc.fh,
-                        holder_pid=getattr(exc, 'holder_pid', None),
-                    ) from exc
-            except exceptions.LockException:
-                # The backend failed for a reason other than contention:
-                # a filesystem without locking support, no more locks
-                # available, refused flags. Retrying cannot change that,
-                # so fail fast with the backend's own exception instead
-                # of burning the timeout or claiming somebody holds the
-                # lock.
-                try_close()
-                raise
-            except Exception as exc:
-                # Something went wrong with the locking mechanism.
-                # Wrap in a LockException and re-raise:
-                try_close()
-                raise exceptions.LockException(exc) from exc
+                    # We already tried to get the lock
+                    # If fail_when_locked is True, stop trying
+                    if fail_when_locked:
+                        # Propagate the locker's own args (OSError plus
+                        # message on POSIX, code plus message on Windows)
+                        # so `strerror` is populated on the exception
+                        # users actually catch, and forward `fh` and
+                        # `holder_pid` so `fh_name` and the holder
+                        # survive a pickle across a multiprocessing
+                        # boundary (pickling drops `__cause__`, where the
+                        # original exception stays reachable in-process).
+                        raise exceptions.AlreadyLocked(
+                            *exc.args,
+                            fh=exc.fh,
+                            holder_pid=getattr(exc, 'holder_pid', None),
+                        ) from exc
+                except exceptions.LockException:
+                    # The backend failed for a reason other than
+                    # contention: a filesystem without locking support,
+                    # no more locks available, refused flags. Retrying
+                    # cannot change that, so fail fast with the backend's
+                    # own exception instead of burning the timeout or
+                    # claiming somebody holds the lock.
+                    raise
+                except Exception as exc:
+                    # Something went wrong with the locking mechanism.
+                    # Wrap in a LockException and re-raise:
+                    raise exceptions.LockException(exc) from exc
 
-            # Wait a bit
+                # Wait a bit
 
-        if exception:
-            try_close()
-            # We got a timeout... reraising
-            raise exception
+            if exception:
+                # We got a timeout... reraising
+                raise exception
 
-        # Prepare the filehandle (truncate if needed)
-        fh = self._prepare_locked_fh(fh)
+            # Prepare the filehandle (truncate if needed)
+            fh = self._prepare_locked_fh(fh)
+        except BaseException:
+            # Every failed exit runs through here, interrupts included: a
+            # `KeyboardInterrupt` in the retry sleep used to leak the
+            # opened descriptor for the traceback's lifetime, and one
+            # landing after a successful lock left the OS lock held by an
+            # untracked descriptor with `release` a silent no-op. The
+            # unlock is a harmless no-op on a descriptor that never got
+            # the lock, and both calls stay quiet so they cannot replace
+            # whatever is propagating.
+            with contextlib.suppress(Exception):
+                portalocker.unlock(fh)
+            with contextlib.suppress(Exception):
+                fh.close()
+            raise
 
-        self.fh = fh
+        with self._state_lock:
+            self.fh = fh
         return fh
 
     def _prepare_locked_fh(self, fh: types.IO) -> types.IO:
@@ -1022,7 +1021,11 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         indefinitely, and a close alone would leave the file locked for
         as long as the exception is referenced. The handle is therefore
         unlocked explicitly and closed before the original error
-        escapes, both best effort so they cannot mask that error.
+        escapes, both best effort so they cannot mask that error. The
+        rollback covers `BaseException`, not just `Exception`: a
+        ``KeyboardInterrupt`` delivered inside the preparation would
+        otherwise strand the OS lock on an untracked descriptor, with
+        `release` a silent no-op because ``self.fh`` was never set.
 
         Args:
             fh: The freshly locked filehandle.
@@ -1031,11 +1034,11 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             The prepared filehandle, on success.
 
         Raises:
-            Exception: Whatever `Lock._prepare_fh` raised, unchanged.
+            BaseException: Whatever `Lock._prepare_fh` raised, unchanged.
         """
         try:
             return self._prepare_fh(fh)
-        except Exception:
+        except BaseException:
             with contextlib.suppress(Exception):
                 portalocker.unlock(fh)
             with contextlib.suppress(Exception):
@@ -2049,6 +2052,13 @@ class PidFileLock(TemporaryFileLock):
                 fail_when_locked_,
             )
         except Exception as exc:
+            # Roll the sidecar back on every failed verified acquire. On
+            # plain contention the sidecar `Lock` already cleaned itself
+            # up and the rollback is a no-op, but an error raised *after*
+            # the sidecar lock was taken (an `OSError` from the inode
+            # verification, say) must not strand the OS lock on a
+            # traceback-pinned local.
+            self._rollback_failed_acquire(inner_lock)
             # `fail_when_locked=True` raises `AlreadyLocked` on the first
             # contention, while a timed-out `fail_when_locked=False` acquire
             # re-raises the last plain `LockException` - from contention or
@@ -2060,6 +2070,16 @@ class PidFileLock(TemporaryFileLock):
                 exceptions.AlreadyLocked,
             ):
                 raise exceptions.AlreadyLocked(*exc.args) from exc
+            raise
+        except BaseException:
+            # An interrupt (`KeyboardInterrupt`, `SystemExit`) landing
+            # after the sidecar lock was taken but before this method
+            # publishes it would otherwise strand the OS lock exactly
+            # like the publication interrupt handled below: the pinned
+            # traceback keeps the sidecar `Lock` alive and refcounting
+            # never frees it. Roll it back and let the interrupt
+            # propagate.
+            self._rollback_failed_acquire(inner_lock)
             raise
 
         try:
