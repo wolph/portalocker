@@ -3442,6 +3442,41 @@ def test_pubsub_worker_run_routes_escaped_error_to_handler(
     assert handled == [failure]
 
 
+def test_pubsub_worker_read_loop_reraises_without_handler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read failure with no registered handler escapes the loop itself.
+
+    The companion to the ``run``-level test below: the failure here is
+    raised by ``get_message`` inside the read loop, so the loop's own
+    no-handler arm re-raises it, and ``run``'s last-ditch layer then
+    re-raises it again. ``RedisLock`` always registers a handler; this
+    covers direct construction without one.
+    """
+    failure: RuntimeError = RuntimeError('connection dropped')
+    pubsub: client.PubSub = fakeredis.FakeStrictRedis(
+        decode_responses=True
+    ).pubsub()  # type: ignore[no-untyped-call]
+
+    def broken_get_message(
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> None:
+        raise failure
+
+    monkeypatch.setattr(pubsub, 'get_message', broken_get_message)
+    worker: redis.PubSubWorkerThread = redis.PubSubWorkerThread(
+        pubsub,
+        sleep_time=0.01,
+        daemon=True,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        worker.run()
+
+    assert exc_info.value is failure
+
+
 def test_pubsub_worker_run_reraises_without_handler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4666,6 +4701,7 @@ def test_redis_check_or_kill_lock_is_deprecated(
 )
 def test_redis_transient_probe_error_fails_attempt_cleanly(
     redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
     error_class: type[Exception],
 ) -> None:
     """A command-connection blip after the subscribe burns one attempt.
@@ -4691,7 +4727,7 @@ def test_redis_transient_probe_error_fails_attempt_cleanly(
     def broken_count(connection: client.Redis) -> int:
         raise error_class('command connection failed mid-probe')
 
-    lock._get_subscriber_count = broken_count  # type: ignore[method-assign]
+    monkeypatch.setattr(lock, '_get_subscriber_count', broken_count)
 
     with pytest.raises(portalocker.AlreadyLocked):
         lock.acquire(timeout=0)
@@ -4714,13 +4750,14 @@ def test_redis_transient_probe_error_fails_attempt_cleanly(
     other.release()
 
     # The failed instance itself recovered too.
-    del lock._get_subscriber_count
+    monkeypatch.undo()
     assert lock.acquire(timeout=5) is lock
     lock.release()
 
 
 def test_redis_transient_probe_error_retries_within_timeout(
     redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """One probe blip costs one attempt, exactly like a subscribe blip.
@@ -4751,7 +4788,7 @@ def test_redis_transient_probe_error_retries_within_timeout(
             raise exceptions.TimeoutError('NUMSUB timed out')
         return original_count(connection)
 
-    lock._get_subscriber_count = flaky_count  # type: ignore[method-assign]
+    monkeypatch.setattr(lock, '_get_subscriber_count', flaky_count)
 
     with caplog.at_level(logging.WARNING, logger='portalocker.redis'):
         assert lock.acquire() is lock
@@ -4773,6 +4810,7 @@ def test_redis_transient_probe_error_retries_within_timeout(
 )
 def test_redis_terminal_probe_error_releases_before_propagating(
     redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
     error_class: type[BaseException],
 ) -> None:
     """A terminal probe failure releases everything, then propagates.
@@ -4798,7 +4836,7 @@ def test_redis_terminal_probe_error_releases_before_propagating(
     def broken_count(connection: client.Redis) -> int:
         raise error_class('terminal probe failure')
 
-    lock._get_subscriber_count = broken_count  # type: ignore[method-assign]
+    monkeypatch.setattr(lock, '_get_subscriber_count', broken_count)
 
     with pytest.raises(error_class):
         lock.acquire()
@@ -4818,7 +4856,7 @@ def test_redis_terminal_probe_error_releases_before_propagating(
     other.acquire()
     other.release()
 
-    del lock._get_subscriber_count
+    monkeypatch.undo()
     assert lock.acquire(timeout=5) is lock
     lock.release()
 
