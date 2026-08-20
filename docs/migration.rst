@@ -66,17 +66,18 @@ of both arguments:
                        unavailable')"
         exc.strerror  '[Errno 11] Resource temporarily unavailable'
 
-The same shape, built by hand so it runs everywhere -- a real failure
-puts the ``OSError`` that ``fcntl`` raised in the first slot, which is
-why its ``[Errno N]`` prefix shows up in both halves above:
+The same shape, built by hand with the errno a Linux contention reports
+(macOS uses 35) so it runs everywhere -- a real failure puts the
+``OSError`` that ``fcntl`` raised in the first slot, which is why its
+``[Errno N]`` prefix shows up in both halves:
 
 >>> from portalocker import exceptions
->>> original = OSError('Resource temporarily unavailable')
+>>> original = BlockingIOError(11, 'Resource temporarily unavailable')
 >>> exc = exceptions.AlreadyLocked(original, str(original))
 >>> str(exc)
-"(OSError('Resource temporarily unavailable'), 'Resource temporarily unavailable')"
+"(BlockingIOError(11, 'Resource temporarily unavailable'), '[Errno 11] Resource temporarily unavailable')"
 >>> exc.strerror
-'Resource temporarily unavailable'
+'[Errno 11] Resource temporarily unavailable'
 
 **What to change:** if you parse ``str(exc)`` to recover the operating
 system's message, read ``exc.strerror`` instead. It holds that message on

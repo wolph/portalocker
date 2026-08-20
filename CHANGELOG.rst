@@ -7,19 +7,28 @@
    delivering ``AlreadyLocked`` to the parent. Pickling now drops the
    handle (an integer descriptor is kept) and the new ``fh_name``
    attribute preserves the file's name as a plain string, recursively
-   for wrapped lock exceptions
+   for wrapped lock exceptions. ``copy.deepcopy`` drops the handle the
+   same way, while ``copy.copy`` keeps ``fh`` shared with the original
+   via an explicit ``__copy__``, since a shallow copy never leaves the
+   process where the handle is valid. A handle whose ``name`` lookup
+   raises (a detached ``io.TextIOWrapper``) no longer breaks exception
+   construction
  * Fixed the ``AlreadyLocked`` raised by ``Lock.acquire`` with
    ``fail_when_locked=True`` having ``strerror=None`` with the OS message
    buried inside a wrapped inner exception. The wrap now propagates the
    locker's own arguments, so ``.strerror`` is populated at the ``Lock``
    level as the migration guide promises. ``args[0]`` is therefore now
    the original ``OSError`` (POSIX) or error code (Windows) instead of
-   the inner lock exception, which stays reachable as ``__cause__``
+   the inner lock exception, which stays reachable as ``__cause__``.
+   The wrap also forwards ``fh`` and ``holder_pid`` from the inner
+   exception, so ``fh_name`` and the holder PID survive a pickle across
+   a multiprocessing boundary, where ``__cause__`` does not
  * Behaviour change: a failing POSIX module-level ``unlock`` now raises
    ``portalocker.LockException`` instead of leaking the raw ``OSError``,
    matching what the Windows unlock has always done. The ``OSError``
    (and its ``errno``) stays reachable through ``args[0]`` and
-   ``__cause__``
+   ``__cause__``. The NFS-specific ``EOFError`` is wrapped as well,
+   matching what ``lock`` already did
  * Deprecated ``exceptions.FileToLarge``: no version of this package has
    ever raised it, so code catching it catches nothing. The class stays
    for backwards compatibility and now emits a ``DeprecationWarning`` on

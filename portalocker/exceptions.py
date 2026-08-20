@@ -12,6 +12,7 @@ catch `LockException` to handle any locking failure, or `AlreadyLocked`
 to handle contention specifically.
 """
 
+import contextlib
 import typing
 import warnings
 
@@ -39,6 +40,9 @@ class BaseLockException(Exception):  # noqa: N818
     during pickling; `fh_name` still identifies the file afterwards, and
     an integer file descriptor is kept as-is. This applies recursively
     when one lock exception wraps another in its ``args``.
+    `copy.deepcopy` behaves like pickling and drops the handle too,
+    while `copy.copy` keeps `fh` shared with the original, since a
+    shallow copy never leaves the process where the handle is valid.
 
     Example:
         >>> from portalocker import exceptions
@@ -96,7 +100,13 @@ class BaseLockException(Exception):  # noqa: N818
                 without this initialiser rejecting them.
         """
         self.fh = fh
-        name: typing.Any = getattr(fh, 'name', None)
+        # A broken handle may raise from its `name` property (a detached
+        # `io.TextIOWrapper` raises `ValueError`), which `getattr` with a
+        # default does not swallow. The name is a debugging nicety, so any
+        # failure to read it simply leaves `fh_name` as `None`.
+        name: typing.Any = None
+        with contextlib.suppress(Exception):
+            name = getattr(fh, 'name', None)
         self.fh_name = name if isinstance(name, str) else None
         self.strerror = (
             str(args[1])
@@ -136,6 +146,32 @@ class BaseLockException(Exception):  # noqa: N818
         if state.get('fh') is not None and not isinstance(state['fh'], int):
             state['fh'] = None
         return (self.__class__, self.args, state)
+
+    def __copy__(self) -> 'BaseLockException':
+        """Shallow-copy the exception, keeping the filehandle.
+
+        `copy.copy` falls back to ``__reduce_ex__`` when no ``__copy__``
+        is defined, and the pickle reduction above deliberately drops
+        `fh`. That is right for pickling and for `copy.deepcopy`, where
+        the handle would have to be serialised or duplicated, but a
+        shallow copy stays inside the process where the handle is still
+        perfectly usable, so dropping it there would lose information
+        for no safety gain. This override keeps `fh` shared between the
+        original and the copy, which is exactly what a shallow copy
+        means.
+
+        Returns:
+            A new instance of the same class with the same ``args`` and
+            a shallow copy of the instance attributes, `fh` included.
+            ``__init__`` is bypassed, so copying a deprecated subclass
+            does not re-emit its construction warning.
+        """
+        new_exception: BaseLockException = self.__class__.__new__(
+            self.__class__
+        )
+        new_exception.args = self.args
+        new_exception.__dict__.update(self.__dict__)
+        return new_exception
 
 
 class LockException(BaseLockException):

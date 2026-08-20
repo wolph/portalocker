@@ -629,9 +629,16 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                     # Propagate the locker's own args (OSError plus
                     # message on POSIX, code plus message on Windows) so
                     # `strerror` is populated on the exception users
-                    # actually catch. The original exception stays
-                    # reachable as `__cause__`.
-                    raise exceptions.AlreadyLocked(*exc.args) from exc
+                    # actually catch, and forward `fh` and `holder_pid`
+                    # so `fh_name` and the holder survive a pickle
+                    # across a multiprocessing boundary (pickling drops
+                    # `__cause__`, where the original exception stays
+                    # reachable in-process).
+                    raise exceptions.AlreadyLocked(
+                        *exc.args,
+                        fh=exc.fh,
+                        holder_pid=getattr(exc, 'holder_pid', None),
+                    ) from exc
             except Exception as exc:
                 # Something went wrong with the locking mechanism.
                 # Wrap in a LockException and re-raise:

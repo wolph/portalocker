@@ -127,21 +127,25 @@ str() of a lock exception changed after upgrading
 -------------------------------------------------
 
 **Cause:** before 4.0.0, ``str(exc)`` on POSIX was whatever the bare
-``OSError`` from ``fcntl`` reported. Since 4.0.0, every lock failure --
-POSIX and Windows alike -- carries two positional arguments and renders
-as a 2-tuple repr. The second argument is the OS message on both
-platforms. The first differs: Windows passes the ``LOCK_FAILED`` code
-(``1``), while POSIX passes the originating ``OSError`` itself. Built
-by hand with a plain ``OSError`` so the example runs everywhere, the
-POSIX shape looks like this:
+``OSError`` from ``fcntl`` reported. Since 4.0.0, a lock failure raised
+by the built-in lockers -- POSIX and Windows alike -- carries two
+positional arguments and renders as a 2-tuple repr. The second argument
+is the OS message on both platforms. The first differs: Windows passes
+the ``LOCK_FAILED`` code (``1``), while POSIX passes the originating
+``OSError`` itself. A few raises sit outside that convention:
+`BoundedSemaphore` raises a bare ``AlreadyLocked()`` with no arguments,
+and `Lock.acquire` wraps a non-locking failure as
+``LockException(original_exception)``. Built by hand with the errno a
+Linux contention reports (macOS uses 35) so the example runs
+everywhere, the POSIX shape looks like this:
 
 >>> from portalocker import exceptions
->>> original = OSError('Resource temporarily unavailable')
+>>> original = BlockingIOError(11, 'Resource temporarily unavailable')
 >>> exc = exceptions.LockException(original, str(original))
 >>> str(exc)
-"(OSError('Resource temporarily unavailable'), 'Resource temporarily unavailable')"
+"(BlockingIOError(11, 'Resource temporarily unavailable'), '[Errno 11] Resource temporarily unavailable')"
 >>> exc.strerror
-'Resource temporarily unavailable'
+'[Errno 11] Resource temporarily unavailable'
 
 **Fix:** read `BaseLockException.strerror` instead of parsing
 ``str(exc)``; it has held the message consistently on both platforms

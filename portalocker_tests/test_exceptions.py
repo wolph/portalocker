@@ -14,7 +14,9 @@ themselves, so loading them back is safe.
 
 from __future__ import annotations
 
+import copy
 import errno
+import io
 import multiprocessing
 import os
 import pickle
@@ -22,13 +24,15 @@ import pickle
 import pytest
 
 import portalocker
-from portalocker import exceptions
+from portalocker import exceptions, types
 
+# `FileToLarge` is deliberately absent: instantiating it emits a
+# `DeprecationWarning`, so it gets its own tests below with the warning
+# asserted instead of leaking into every parametrised run.
 _EXCEPTION_CLASSES: list[type[exceptions.BaseLockException]] = [
     exceptions.BaseLockException,
     exceptions.LockException,
     exceptions.AlreadyLocked,
-    exceptions.FileToLarge,
 ]
 
 
@@ -274,6 +278,151 @@ def test_posix_unlock_wraps_oserror(tmpfile: str) -> None:
     assert exception.args[0].errno == errno.EBADF
     assert isinstance(exception.strerror, str)
     assert exception.strerror
+
+
+def test_copy_preserves_file_handle(tmpfile: str) -> None:
+    """`copy.copy` keeps `fh`; `copy.deepcopy` drops it like pickling.
+
+    A shallow copy stays in the process where the handle is still
+    usable, so `__copy__` preserves it. A deep copy has to duplicate the
+    handle, which is as impossible as pickling it, so the pickle
+    reduction applies and `fh_name` carries the identification instead.
+    """
+    with open(tmpfile, 'w') as fh:
+        exception = exceptions.AlreadyLocked(1, 'lock failed', fh=fh)
+        exception.holder_pid = 4242
+
+        shallow = copy.copy(exception)
+        assert shallow is not exception
+        assert type(shallow) is exceptions.AlreadyLocked
+        assert shallow.fh is fh
+        assert shallow.args == exception.args
+        assert shallow.fh_name == tmpfile
+        assert shallow.strerror == 'lock failed'
+        assert shallow.holder_pid == 4242
+
+        deep = copy.deepcopy(exception)
+        assert deep.fh is None
+        assert deep.fh_name == tmpfile
+        assert deep.holder_pid == 4242
+
+
+def test_detached_wrapper_does_not_break_construction() -> None:
+    """A handle whose ``name`` lookup raises must not break `__init__`.
+
+    A detached `io.TextIOWrapper` raises `ValueError` from its ``name``
+    property, which `getattr` with a default does not swallow. The
+    constructor must survive that and fall back to `fh_name=None`.
+    """
+    wrapper = io.TextIOWrapper(io.BytesIO(), encoding='utf-8')
+    wrapper.detach()
+    exception = exceptions.LockException(1, 'lock failed', fh=wrapper)
+
+    assert exception.fh is wrapper
+    assert exception.fh_name is None
+
+
+class _HolderPidLock(portalocker.Lock):
+    """Lock whose locking step reports contention with a holder PID."""
+
+    def _get_lock(self, fh: types.IO) -> types.IO:
+        raise exceptions.AlreadyLocked(
+            1,
+            'held elsewhere',
+            fh=fh,
+            holder_pid=4242,
+        )
+
+
+def test_lock_surface_forwards_fh_name_and_holder_pid(tmpfile: str) -> None:
+    """The `Lock.acquire` wrap forwards `fh` and `holder_pid`.
+
+    Pickling drops both `fh` and `__cause__`, so without the forwarding
+    a multiprocessing user could not tell which file was contended or
+    who held it. `fh_name` and `holder_pid` must survive the pool
+    boundary on the Lock-surface exception itself.
+    """
+    lock = _HolderPidLock(tmpfile, timeout=0, fail_when_locked=True)
+    with pytest.raises(portalocker.AlreadyLocked) as exception_info:
+        lock.acquire()
+
+    exception = exception_info.value
+    assert exception.fh_name == tmpfile
+    assert exception.holder_pid == 4242
+
+    restored: exceptions.AlreadyLocked = pickle.loads(pickle.dumps(exception))
+    assert restored.fh is None
+    assert restored.fh_name == tmpfile
+    assert restored.holder_pid == 4242
+    assert restored.strerror == 'held elsewhere'
+
+
+def test_real_contention_fh_name_survives_pickle(tmpfile: str) -> None:
+    """Real contention: the contended file's name survives the pickle."""
+    holder = portalocker.Lock(tmpfile, timeout=0, fail_when_locked=True)
+    holder.acquire()
+    try:
+        contender = portalocker.Lock(tmpfile, timeout=0, fail_when_locked=True)
+        with pytest.raises(portalocker.AlreadyLocked) as exception_info:
+            contender.acquire()
+    finally:
+        holder.release()
+
+    restored: exceptions.AlreadyLocked = pickle.loads(
+        pickle.dumps(exception_info.value)
+    )
+    assert restored.fh_name == tmpfile
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='POSIX unlock wrapping')
+def test_posix_unlock_wraps_eoferror(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`unlock` wraps `EOFError` in `LockException`, matching `lock`.
+
+    ``fcntl.lockf`` can raise `EOFError` on some NFS setups. The lock
+    side has always translated it; the unlock side must too.
+    """
+
+    def _raise_eof(fd: int | types.HasFileno, flags: int) -> None:
+        raise EOFError('lockf gave up on NFS')
+
+    monkeypatch.setattr(portalocker.portalocker, 'LOCKER', _raise_eof)
+    fd: int = os.open(tmpfile, os.O_WRONLY | os.O_CREAT)
+    try:
+        with pytest.raises(portalocker.LockException) as exception_info:
+            portalocker.unlock(fd)
+    finally:
+        os.close(fd)
+
+    exception = exception_info.value
+    assert isinstance(exception.__cause__, EOFError)
+    assert isinstance(exception.args[0], EOFError)
+    assert isinstance(exception.strerror, str)
+    assert exception.strerror
+
+
+def test_file_to_large_pickle(tmpfile: str) -> None:
+    """`FileToLarge` pickles like the rest, warning on each construction.
+
+    Unpickling reconstructs the exception through `__init__`, so both
+    the original construction and the round trip emit the deprecation
+    warning.
+    """
+    with open(tmpfile, 'w') as fh:
+        with pytest.warns(DeprecationWarning, match='FileToLarge'):
+            exception = exceptions.FileToLarge(1, 'lock failed', fh=fh)
+        with pytest.warns(DeprecationWarning, match='FileToLarge'):
+            restored: exceptions.FileToLarge = pickle.loads(
+                pickle.dumps(exception)
+            )
+
+    assert type(restored) is exceptions.FileToLarge
+    assert restored.args == (1, 'lock failed')
+    assert restored.strerror == 'lock failed'
+    assert restored.fh is None
+    assert restored.fh_name == tmpfile
 
 
 def test_file_to_large_deprecation_warning() -> None:

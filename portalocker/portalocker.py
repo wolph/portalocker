@@ -920,7 +920,8 @@ else:  # pragma: not-posix
                 ~portalocker.exceptions.LockException: The unlock call
                     failed, for example with ``EBADF`` when the
                     descriptor was already closed. Wraps the ``OSError``
-                    that ``fcntl`` raised.
+                    that ``fcntl`` raised, or the ``EOFError`` some NFS
+                    setups produce, just like `lock` does.
 
             .. versionchanged:: 4.1.1
                 Previously the raw ``OSError`` propagated unchanged,
@@ -931,6 +932,12 @@ else:  # pragma: not-posix
             try:
                 self.locker(fd, LockFlags.UNBLOCK)
             except OSError as exc_value:
+                raise exceptions.LockException(
+                    exc_value,
+                    str(exc_value),
+                    fh=file_obj,  # Pass original file_obj
+                ) from exc_value
+            except EOFError as exc_value:
                 raise exceptions.LockException(
                     exc_value,
                     str(exc_value),
