@@ -4,6 +4,7 @@ import pathlib
 import random
 import subprocess
 import sys
+import threading
 import textwrap
 import time
 
@@ -193,3 +194,138 @@ def test_bounded_semaphore_deprecation_warning_names_the_caller() -> None:
 
     assert len(records) == 1
     assert records[0].filename == __file__
+
+
+def test_bounded_semaphore_concurrent_acquire_takes_one_slot(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two threads sharing one instance must end up with exactly one slot.
+
+    The first thread is parked between locking its slot file and
+    publishing it on ``self.lock``, which is the historical lost-update
+    window: the second thread's sweep then took a second slot and its
+    publication was overwritten, leaking the slot until garbage
+    collection. Now the whole sweep runs under the instance state lock,
+    so the second thread waits and then trips over the already-taken
+    guard instead.
+    """
+    semaphore = portalocker.NamedBoundedSemaphore(
+        2,
+        name='concurrent-acquire',
+        directory=str(tmp_path),
+        timeout=0,
+        fail_when_locked=False,
+    )
+
+    real_acquire = utils.Lock.acquire
+    calls: list[int] = []
+    parked = threading.Event()
+    resume = threading.Event()
+
+    def gated_acquire(
+        self: utils.Lock,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        calls.append(threading.get_ident())
+        result = real_acquire(self, *args, **kwargs)
+        if len(calls) == 1:
+            parked.set()
+            assert resume.wait(timeout=5), 'the sweep was never resumed'
+        return result
+
+    monkeypatch.setattr(utils.Lock, 'acquire', gated_acquire)
+
+    outcomes: dict[str, object] = {}
+
+    def first_acquire() -> None:
+        outcomes['first'] = semaphore.acquire()
+
+    def second_acquire() -> None:
+        try:
+            outcomes['second'] = semaphore.acquire()
+        except portalocker.LockException as error:
+            outcomes['second'] = error
+
+    first_thread = threading.Thread(target=first_acquire)
+    first_thread.start()
+    assert parked.wait(timeout=5), 'the first sweep never locked a slot'
+
+    second_thread = threading.Thread(target=second_acquire)
+    second_thread.start()
+    # With the fix the second thread blocks on the state lock; without it
+    # this join gives its full sweep ample time to take a second slot.
+    second_thread.join(timeout=0.5)
+
+    resume.set()
+    first_thread.join(timeout=5)
+    second_thread.join(timeout=5)
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+
+    assert isinstance(outcomes['first'], utils.Lock), outcomes
+    assert isinstance(outcomes['second'], portalocker.LockException), (
+        'the second thread took a slot instead of hitting the guard: '
+        f'{outcomes}'
+    )
+    assert semaphore.lock is outcomes['first']
+
+    monkeypatch.undo()
+    semaphore.release()
+    assert semaphore.lock is None
+    for filename in semaphore.get_filenames():
+        probe = portalocker.Lock(
+            str(filename),
+            timeout=0,
+            fail_when_locked=True,
+        )
+        probe.acquire()
+        probe.release()
+
+
+def test_bounded_semaphore_concurrent_release_releases_once(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two concurrent ``release()`` calls must give the slot back once.
+
+    The first releaser is parked inside the slot lock's release. The
+    second call must find the slot already claimed and return without
+    touching the slot lock again, instead of running a second teardown
+    against a filehandle the winner is still tearing down.
+    """
+    semaphore = portalocker.NamedBoundedSemaphore(
+        1,
+        name='concurrent-release',
+        directory=str(tmp_path),
+        timeout=0,
+    )
+    semaphore.acquire()
+
+    real_release = utils.Lock.release
+    calls: list[int] = []
+    parked = threading.Event()
+    resume = threading.Event()
+
+    def gated_release(self: utils.Lock) -> None:
+        calls.append(threading.get_ident())
+        if len(calls) == 1:
+            parked.set()
+            assert resume.wait(timeout=5), 'the release was never resumed'
+        real_release(self)
+
+    monkeypatch.setattr(utils.Lock, 'release', gated_release)
+
+    releaser = threading.Thread(target=semaphore.release)
+    releaser.start()
+    assert parked.wait(timeout=5), 'the release never reached the slot lock'
+
+    semaphore.release()
+    assert len(calls) == 1, 'the losing release touched the slot lock'
+    assert semaphore.lock is None
+
+    resume.set()
+    releaser.join(timeout=5)
+    assert not releaser.is_alive()
+    assert len(calls) == 1

@@ -2426,6 +2426,12 @@ class BoundedSemaphore(LockBase['Lock | None']):
     `filename_pattern`, and acquiring means locking whichever one is still
     free. Releasing does not delete the files, it only unlocks them.
 
+    One instance holds at most one slot, atomically: threads sharing an
+    instance cannot corrupt its bookkeeping, but only one of them gets
+    the slot and the others see `~portalocker.exceptions.LockException`
+    from the already-taken guard. Give each thread its own instance when
+    every thread needs a slot of its own.
+
     The `fail_when_locked` handling diverges from every other lock in
     this module and is kept as it has behaved since 3.2.0. The flag is
     consulted only once the ``timeout`` has expired: a full semaphore
@@ -2623,7 +2629,13 @@ class BoundedSemaphore(LockBase['Lock | None']):
                 holds a slot. Release it before acquiring again. Changed in
                 4.1.1: this guard used to be an ``assert``, which
                 ``python -O`` strips, and a second acquire then silently
-                took a second slot and leaked the first.
+                took a second slot and leaked the first. The guard is also
+                enforced atomically inside `try_lock` since 4.1.1: two
+                threads racing this method on one instance used to both
+                take a slot, with the second publication overwriting the
+                first and leaking that slot until garbage collection. Now
+                exactly one thread wins and the other raises this
+                exception.
             OSError: Raised straight through from `try_lock`, for instance
                 `FileNotFoundError` when `directory` does not exist. The
                 instance stays usable, so a later call can succeed once the
@@ -2649,7 +2661,14 @@ class BoundedSemaphore(LockBase['Lock | None']):
 
         A single sweep with no waiting: every candidate is locked with
         ``fail_when_locked=True``, so a busy slot is skipped immediately
-        rather than waited on.
+        rather than waited on. The whole sweep, including the
+        already-taken guard and the publication on the `lock` attribute,
+        runs under the instance state lock. Each slot attempt is a single
+        non-blocking try, so nothing inside the sweep waits on another
+        holder, and two threads sweeping one instance cannot interleave:
+        the second sweep starts only after the first published its slot,
+        and then trips over the guard instead of taking (and leaking) a
+        second slot.
 
         Args:
             filenames: The candidate slot files, tried in the given order.
@@ -2660,48 +2679,55 @@ class BoundedSemaphore(LockBase['Lock | None']):
             was already taken; the `lock` attribute is then left alone.
 
         Raises:
+            ~portalocker.exceptions.LockException: This instance already
+                holds a slot, checked atomically with the sweep. Before
+                4.1.1 a concurrent sweep took a second slot instead and
+                the overwritten one leaked until garbage collection.
             Exception: Anything other than `AlreadyLocked` coming out of
                 `Lock.acquire`, such as `FileNotFoundError` for a missing
-                `directory`. The `lock` attribute is reset to `None`
-                first, so the failure cannot brick the instance for later
-                calls.
+                `directory`. The `lock` attribute is untouched (the guard
+                above proves it held nothing when the sweep started), so
+                the failure cannot brick the instance for later calls.
         """
         filename: Filename
-        for filename in filenames:
-            logger.debug('trying lock for %r', filename)
-            lock = Lock(filename, fail_when_locked=True)
-            try:
-                lock.acquire()
-            except exceptions.AlreadyLocked:
-                # Taken by someone else; try the next candidate file.
-                continue
-            except Exception:
-                # Any other failure (e.g. a missing directory raising
-                # `FileNotFoundError` from the underlying `open`) must not
-                # leave a half-set lock behind, otherwise the
-                # already-locked guard in `acquire` would brick the
-                # instance on the next call. Reset and propagate.
-                self.lock = None
-                raise
-            else:
-                # Only record the lock once it is actually held.
+        with self._state_lock:
+            if self.lock is not None:
+                raise exceptions.LockException('Already locked')
+            for filename in filenames:
+                logger.debug('trying lock for %r', filename)
+                lock = Lock(filename, fail_when_locked=True)
+                try:
+                    lock.acquire()
+                except exceptions.AlreadyLocked:
+                    # Taken by someone else; try the next candidate file.
+                    continue
+                # Only record the lock once it is actually held. Any
+                # non-contention failure (e.g. a missing directory raising
+                # `FileNotFoundError` from the underlying `open`)
+                # propagates with `lock` still unset, so the instance
+                # stays usable.
                 self.lock = lock
                 logger.debug('locked %r', filename)
                 return True
 
-        return False
+            return False
 
-    def release(self) -> None:  # pragma: no cover
+    def release(self) -> None:
         """Give the slot back, if this instance holds one.
 
         The lock file itself is left on disk. Only the operating system
         lock is dropped, which is what makes the slot available again.
         Doing nothing when no slot is held keeps release safe to call
-        any number of times, including from finalizers.
+        any number of times, including from finalizers. The slot is
+        claimed atomically under the instance state lock, so of several
+        concurrent releases exactly one tears the slot lock down and the
+        rest are no-ops.
         """
-        if self.lock is not None:
-            self.lock.release()
-            self.lock = None
+        lock: Lock | None
+        with self._state_lock:
+            lock, self.lock = self.lock, None
+        if lock is not None:
+            lock.release()
 
 
 class NamedBoundedSemaphore(BoundedSemaphore):
