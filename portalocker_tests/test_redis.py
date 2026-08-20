@@ -675,7 +675,9 @@ def test_redis_incumbent_keeps_election_against_new_format_newcomer() -> None:
     """An incumbent is not usurped by a lower-id 4.2 newcomer.
 
     The newcomer advertises ``elected: false``, so it defers and the
-    incumbent keeps waiting for the reader to drain, then promotes.
+    incumbent keeps its election through the reader drain and through
+    the hold-off round the undecided newcomer costs, then promotes once
+    the channel is clear of both.
     """
     lock: redis.RedisLock = redis.RedisLock(str(random.random()))
     lock.holder_id = 'z-incumbent'
@@ -701,10 +703,153 @@ def test_redis_incumbent_keeps_election_against_new_format_newcomer() -> None:
     assert lock.writer_elected
     assert lock.mode is redis.RedisLockMode.PENDING
 
-    # The same probe without the reader promotes the incumbent.
-    assert lock._resolve_lock_holders(holders[:2], fail_when_locked=False)
+    # Without the reader the incumbent still holds off: the newcomer's
+    # elected false reply cannot show whether it saw this election, so
+    # promoting past it could overlap with a promotion the newcomer
+    # made on its own stale view. The election itself is kept.
+    assert not lock._resolve_lock_holders(holders[:2], fail_when_locked=False)
+    assert lock.writer_elected
+    assert lock.mode is redis.RedisLockMode.PENDING
+
+    # A deferring newcomer unsubscribes right after its probe, so the
+    # next conclusive probe is clear of it and the incumbent promotes.
+    assert lock._resolve_lock_holders(holders[:1], fail_when_locked=False)
     promoted_mode: redis.RedisLockMode = lock.mode
     assert promoted_mode is redis.RedisLockMode.EXCLUSIVE
+    assert lock.writer_elected
+
+
+def test_redis_incumbent_holds_off_for_stale_lower_id_newcomer() -> None:
+    """The reviewed double-EXCLUSIVE interleaving stays single-holder.
+
+    Staged replay of the #143 review trace: the reader releases while
+    the incumbent's probe is mid-drain, and a lower-id newcomer probes
+    before the incumbent's election flag reaches the wire. Every probe
+    below is exactly what each side saw in that trace, so this replay
+    is deterministic where the live reproduction needed timing.
+    """
+    incumbent: redis.RedisLock = redis.RedisLock(str(random.random()))
+    incumbent.holder_id = 'm-incumbent'
+    newcomer: redis.RedisLock = redis.RedisLock(str(random.random()))
+    newcomer.holder_id = 'a-newcomer'
+
+    # The incumbent's first conclusive probe still shows the reader and
+    # its own pre-election record. It elects itself and waits.
+    assert not incumbent._resolve_lock_holders(
+        [
+            redis.RedisLockHolder(
+                holder_id='m-incumbent',
+                mode=redis.RedisLockMode.PENDING,
+                elected=False,
+            ),
+            redis.RedisLockHolder(
+                holder_id='reader',
+                mode=redis.RedisLockMode.SHARED,
+            ),
+        ],
+        fail_when_locked=False,
+    )
+    elected_after_first_probe: bool = incumbent.writer_elected
+    assert elected_after_first_probe
+
+    # The newcomer's probe raced that election: the reader is gone and
+    # the incumbent's reply was snapshotted before its flag was set. On
+    # that view the newcomer legitimately wins the sort and promotes.
+    assert newcomer._resolve_lock_holders(
+        [
+            redis.RedisLockHolder(
+                holder_id='m-incumbent',
+                mode=redis.RedisLockMode.PENDING,
+                elected=False,
+            ),
+            redis.RedisLockHolder(
+                holder_id='a-newcomer',
+                mode=redis.RedisLockMode.PENDING,
+                elected=False,
+            ),
+        ],
+        fail_when_locked=False,
+    )
+    assert newcomer.mode is redis.RedisLockMode.EXCLUSIVE
+
+    # The incumbent's next probe carries the newcomer's equally stale
+    # elected false reply. Promoting here is the double-EXCLUSIVE bug,
+    # so the incumbent must hold off and keep its election instead.
+    assert not incumbent._resolve_lock_holders(
+        [
+            redis.RedisLockHolder(
+                holder_id='m-incumbent',
+                mode=redis.RedisLockMode.PENDING,
+                elected=True,
+            ),
+            redis.RedisLockHolder(
+                holder_id='a-newcomer',
+                mode=redis.RedisLockMode.PENDING,
+                elected=False,
+            ),
+        ],
+        fail_when_locked=False,
+    )
+    held_mode: redis.RedisLockMode = incumbent.mode
+    assert held_mode is redis.RedisLockMode.PENDING
+    elected_during_hold_off: bool = incumbent.writer_elected
+    assert elected_during_hold_off
+    incumbent_mode: redis.RedisLockMode = incumbent.mode
+    newcomer_mode: redis.RedisLockMode = newcomer.mode
+    assert not (
+        incumbent_mode is redis.RedisLockMode.EXCLUSIVE
+        and newcomer_mode is redis.RedisLockMode.EXCLUSIVE
+    )
+
+    # One round later the newcomer is visible as exclusive and the
+    # forfeit rules take over: the incumbent backs off cleanly.
+    incumbent.pubsub = _idle_pubsub()
+    assert not incumbent._resolve_lock_holders(
+        [
+            redis.RedisLockHolder(
+                holder_id='m-incumbent',
+                mode=redis.RedisLockMode.PENDING,
+                elected=True,
+            ),
+            redis.RedisLockHolder(
+                holder_id='a-newcomer',
+                mode=redis.RedisLockMode.EXCLUSIVE,
+                elected=True,
+            ),
+        ],
+        fail_when_locked=False,
+    )
+    assert not incumbent.writer_elected
+    remaining_pubsub: client.PubSub | None = incumbent.pubsub
+    assert remaining_pubsub is None
+
+
+def test_redis_incumbent_promotes_past_higher_id_newcomer() -> None:
+    """A higher-id undecided newcomer does not delay the promotion.
+
+    Even on a stale view a higher id can never win the sort against
+    this incumbent, so there is nothing to wait out.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.holder_id = 'a-incumbent'
+    lock.writer_elected = True
+
+    assert lock._resolve_lock_holders(
+        [
+            redis.RedisLockHolder(
+                holder_id='a-incumbent',
+                mode=redis.RedisLockMode.PENDING,
+                elected=True,
+            ),
+            redis.RedisLockHolder(
+                holder_id='z-newcomer',
+                mode=redis.RedisLockMode.PENDING,
+                elected=False,
+            ),
+        ],
+        fail_when_locked=False,
+    )
+    assert lock.mode is redis.RedisLockMode.EXCLUSIVE
     assert lock.writer_elected
 
 
@@ -1183,6 +1328,127 @@ def test_redis_elected_writer_survives_lower_id_newcomer(
     assert not incumbent_thread.is_alive()
     assert not newcomer_thread.is_alive()
     assert not errors
+
+
+def _watch_for_exclusive_overlap(
+    incumbent: redis.RedisLock,
+    newcomer: redis.RedisLock,
+    seconds: float,
+) -> None:
+    """Assert the two writers are never exclusive at the same time.
+
+    Samples both locks for ``seconds``: a subscribed lock in
+    `RedisLockMode.EXCLUSIVE` holds the channel, and two of those at
+    once is the mutual exclusion break this soak hunts.
+    """
+    deadline: float = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        both_exclusive: bool = (
+            incumbent.mode is redis.RedisLockMode.EXCLUSIVE
+            and incumbent.pubsub is not None
+            and newcomer.mode is redis.RedisLockMode.EXCLUSIVE
+            and newcomer.pubsub is not None
+        )
+        assert not both_exclusive, 'two exclusive holders on one channel'
+        time.sleep(0.0005)
+
+
+def _drain_writer_threads(
+    threads: list[threading.Thread],
+    acquired: list[redis.RedisLock],
+) -> None:
+    """Release finished writers until every acquire thread has ended."""
+    deadline: float = time.monotonic() + 60
+    while time.monotonic() < deadline and any(
+        thread.is_alive() for thread in threads
+    ):
+        while acquired:
+            acquired.pop().release()
+        time.sleep(0.002)
+    while acquired:
+        acquired.pop().release()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+def _stage_stale_newcomer_round(connect: ConnectionFactory) -> None:
+    """Run one round of the #143 stale-newcomer schedule.
+
+    The reader releases while the incumbent's first probe is mid-drain
+    and a lower-id newcomer starts immediately, at a check interval
+    short enough to expose the reply-staleness window. This is the
+    schedule that reproduced a double-EXCLUSIVE before the hold-off in
+    ``_resolve_exclusive_writer`` existed.
+    """
+    channel: str = str(random.random())
+    kwargs: dict[str, typing.Any] = dict(
+        timeout=20,
+        check_interval=0.02,
+        unavailable_timeout=1,
+        thread_sleep_time=0.1,
+    )
+    reader: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=connect(),
+        flags=portalocker.LockFlags.SHARED,
+        **kwargs,
+    )
+    incumbent: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=connect(),
+        **kwargs,
+    )
+    newcomer: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=connect(),
+        **kwargs,
+    )
+    incumbent.holder_id = 'm-incumbent'
+    newcomer.holder_id = 'a-newcomer'
+    acquired: list[redis.RedisLock] = []
+    errors: list[BaseException] = []
+
+    def attempt(lock: redis.RedisLock) -> None:
+        try:
+            lock.acquire()
+        except BaseException as exception:  # pragma: no cover
+            errors.append(exception)
+        else:
+            acquired.append(lock)
+
+    reader.acquire()
+    threads: list[threading.Thread] = [
+        threading.Thread(target=attempt, args=(lock,), daemon=True)
+        for lock in (incumbent, newcomer)
+    ]
+    threads[0].start()
+    _wait_for_subscribers(reader, 2)
+    time.sleep(0.008)
+    reader.release()
+    threads[1].start()
+
+    _watch_for_exclusive_overlap(incumbent, newcomer, seconds=0.7)
+    _drain_writer_threads(threads, acquired)
+    assert not errors
+    for lock in (reader, incumbent, newcomer):
+        if lock.connection is not None:
+            lock.connection.close()
+
+
+@pytest.mark.timeout(180)
+def test_redis_stale_newcomer_soak_never_two_exclusive() -> None:
+    """Live-redis timing soak of the #143 hold-off, ten rounds.
+
+    The deterministic staged replay lives in
+    `test_redis_incumbent_holds_off_for_stale_lower_id_newcomer`. This
+    soak lets real probe timing roll the same dice against a live
+    server, where the pre-fix code produced roughly one double per four
+    rounds at this check interval.
+    """
+    _ensure_live_redis_available(_LIVE_REDIS)
+    for _ in range(10):
+        _stage_stale_newcomer_round(_live_redis_connection)
 
 
 @pytest.mark.parametrize('timeout', [None, 0, 0.001])
@@ -2671,7 +2937,11 @@ def test_redis_resolve_promotion_takes_mode_lock() -> None:
 def test_redis_fast_path_promotion_takes_mode_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The uncontended fast-path promotion runs under ``_mode_lock``."""
+    """The uncontended fast-path promotion runs under ``_mode_lock``.
+
+    Two entries are expected: the pre-loop reset of ``(mode,
+    writer_elected)`` and the fast-path promotion itself.
+    """
     connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
         server=fakeredis.FakeServer(),
         decode_responses=True,
@@ -2695,7 +2965,7 @@ def test_redis_fast_path_promotion_takes_mode_lock(
     assert lock.acquire() is lock
 
     assert lock.mode is redis.RedisLockMode.EXCLUSIVE
-    assert recording.entries == 1
+    assert recording.entries == 2
     lock.pubsub = None
     connection.close()
 

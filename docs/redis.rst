@@ -43,11 +43,16 @@ Since 4.2.0 every reply also carries an ``elected`` boolean, so a writer
 that has already won the election stays visible while it waits for the
 readers to drain: later writers defer to an advertised incumbent instead
 of rerunning the sort against it, which used to let a lower-id newcomer
-usurp a waiting writer. The field is optional on the wire and the record
-keeps protocol version 1, so portalocker 4.0 and 4.1 holders parse it
-unchanged, simply ignore the field, and keep the old id election on
-mixed channels. Full incumbency protection holds once every writer on a
-channel runs 4.2 or later.
+usurp a waiting writer. Because a reply is a snapshot that can predate
+the election it should have reported, the incumbent also waits one extra
+probe round rather than promote while a lower-id newcomer that has not
+yet advertised seeing the election is still on the channel. The field is
+optional on the wire and the record keeps protocol version 1, so
+portalocker 4.0 and 4.1 holders parse it unchanged, simply ignore the
+field, and keep the old id election on mixed channels. Full incumbency
+protection holds once every writer on a channel runs 4.2 or later, with
+handover delayed by that one probe round when a newcomer's reply raced
+the incumbent's election.
 
 Installation
 -------------
