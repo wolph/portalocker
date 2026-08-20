@@ -665,7 +665,11 @@ class RedisLock(utils.LockBase['RedisLock']):
     #: The handler runs on the worker thread while `acquire` promotes on
     #: the main thread. Without this lock a probe could read ``pending``
     #: from a writer already committed to promoting itself, or a torn
-    #: ``(mode, elected)`` pair from the middle of a transition.
+    #: ``(mode, elected)`` pair from the middle of a transition. Like
+    #: the state lock it is reinitialized in forked children (reported
+    #: through `_fork_reinit_locks`): the worker holds it for every ping
+    #: answer, so a child forked inside that snapshot would otherwise
+    #: hang forever on its first `release`.
     _mode_lock: threading.Lock
 
     DEFAULT_REDIS_KWARGS: typing.ClassVar[dict[str, typing.Any]] = dict(
@@ -796,6 +800,25 @@ class RedisLock(utils.LockBase['RedisLock']):
             'redis.client.PubSub',
             connection.pubsub(),  # type: ignore[no-untyped-call]
         )
+
+    def _fork_reinit_locks(
+        self,
+    ) -> tuple[threading.Lock | threading.RLock, ...]:
+        """Report the Python locks a forked child must reinitialize.
+
+        Adds `_mode_lock` to the base class's state lock: the worker
+        thread takes it for every ping snapshot and `acquire` for every
+        promotion, so a fork landing inside either scope hands the
+        child a lock owned by a thread that does not exist there, and
+        the child's `release` (or garbage collection) would block on it
+        forever. The after-fork hook resets each lock separately and
+        never acquires them, so the no-path-holds-both-locks invariant
+        between the state lock and the mode lock is untouched.
+
+        Returns:
+            The state lock and the mode lock.
+        """
+        return (*super()._fork_reinit_locks(), self._mode_lock)
 
     def _get_subscriber_count(self, connection: redis.client.Redis) -> int:
         """Get the subscriber count for our channel."""

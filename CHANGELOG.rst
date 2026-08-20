@@ -51,8 +51,13 @@
    held lock now only drops its local references on ``release()`` or
    garbage collection, instead of sending UNSUBSCRIBE over the
    inherited socket and silently releasing the parent's lock while the
-   parent's own connection stayed healthy and nothing ever told it. A
-   child that needs the lock must build its own instance (#137)
+   parent's own connection stayed healthy and nothing ever told it. The
+   per-instance mode lock, which the worker thread takes for every ping
+   answer, is also reinitialized in forked children alongside the state
+   lock now, so a fork landing inside a ping snapshot no longer hands
+   the child a permanently locked lock that would hang its first
+   ``release()`` forever. A child that needs the lock must build its
+   own instance (#137)
  * Deprecated ``RedisLock.check_or_kill_lock`` (removal in 5.0.0): its
    reap arm kills connections on a caller-chosen timeout without the
    protocol discipline that protects live-but-slow holders inside

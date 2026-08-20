@@ -386,7 +386,7 @@ _live_locks: weakref.WeakSet[LockBase[typing.Any]] = weakref.WeakSet()
 
 
 def _reinit_state_locks_after_fork() -> None:
-    """Reset every live instance's state lock in a freshly forked child.
+    """Reset every live instance's Python locks in a freshly forked child.
 
     A child forked while any thread holds an instance state lock inherits
     that lock in its locked state, owned by a thread that does not exist
@@ -396,11 +396,15 @@ def _reinit_state_locks_after_fork() -> None:
     the GIL, so an unlucky ``os.fork`` from another thread lands inside
     it. This is the same problem the standard library's ``logging``
     module has with its handler locks, solved the same way: registered
-    with ``os.register_at_fork`` below, the child gets every state lock
-    reinitialized to a fresh unlocked one before it runs any Python code
-    of its own. Only the state locks are reset; which OS locks the child
-    actually holds is unchanged, since those live on file descriptors,
-    not on Python locks.
+    with ``os.register_at_fork`` below, the child gets every registered
+    lock reinitialized to a fresh unlocked one before it runs any Python
+    code of its own. Each instance reports its locks through
+    `LockBase._fork_reinit_locks` - the state lock for every lock kind,
+    plus whatever else a subclass guards with its own Python lock (the
+    mode lock of `~portalocker.redis.RedisLock`, held by its worker
+    thread for every ping answer). Only Python locks are reset; which OS
+    locks the child actually holds is unchanged, since those live on
+    file descriptors, not on Python locks.
 
     On Windows this function is a quiet no-op. CPython only compiles
     ``_at_fork_reinit`` into its lock types on platforms with ``fork``
@@ -411,16 +415,21 @@ def _reinit_state_locks_after_fork() -> None:
     running platform-neutral cleanup) must not explode either.
     """
     for lock in list(_live_locks):
-        # `_at_fork_reinit` has existed on every lock type since CPython
-        # 3.9, but only on builds with `fork`, and it is missing from
-        # typeshed everywhere. The `getattr` covers both.
-        reinit: typing.Callable[[], None] | None = getattr(
-            lock._state_lock,  # pyright: ignore[reportPrivateUsage]
-            '_at_fork_reinit',
-            None,
+        instance_locks: tuple[threading.Lock | threading.RLock, ...] = (
+            lock._fork_reinit_locks()  # pyright: ignore[reportPrivateUsage]
         )
-        if reinit is not None:
-            reinit()  # pragma: not-posix
+        for instance_lock in instance_locks:
+            # `_at_fork_reinit` has existed on every lock type since
+            # CPython 3.9, but only on builds with `fork`, and it is
+            # missing from typeshed everywhere. The `getattr` covers
+            # both.
+            reinit: typing.Callable[[], None] | None = getattr(
+                instance_lock,
+                '_at_fork_reinit',
+                None,
+            )
+            if reinit is not None:
+                reinit()  # pragma: not-posix
 
 
 # Windows has no fork, and no `os.register_at_fork` to register with. The
@@ -557,9 +566,30 @@ class LockBase(
             DEFAULT_FAIL_WHEN_LOCKED,
         )
         self._state_lock = threading.RLock()
-        # Registered so a forked child can reinitialize the state lock,
-        # see `_reinit_state_locks_after_fork`.
+        # Registered so a forked child can reinitialize this instance's
+        # Python locks (`_fork_reinit_locks`), see
+        # `_reinit_state_locks_after_fork`.
         _live_locks.add(self)
+
+    def _fork_reinit_locks(
+        self,
+    ) -> tuple[threading.Lock | threading.RLock, ...]:
+        """Report the Python locks a forked child must reinitialize.
+
+        Consumed by `_reinit_state_locks_after_fork`: everything listed
+        here is reset to a fresh unlocked lock in a freshly forked
+        child, because the child may have inherited it locked by a
+        thread that does not exist there. A subclass that guards state
+        with an extra per-instance Python lock extends the tuple
+        (`~portalocker.redis.RedisLock` adds the mode lock its worker
+        thread takes for every ping answer). The hook resets each lock
+        independently and acquires none of them, so listing several
+        locks creates no ordering between them.
+
+        Returns:
+            The locks to reinitialize; the state lock alone here.
+        """
+        return (self._state_lock,)
 
     @abc.abstractmethod
     def acquire(

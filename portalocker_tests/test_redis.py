@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import random
+import signal
 import threading
 import time
 import typing
@@ -4775,6 +4776,80 @@ def test_redis_interrupt_survives_escalated_deprecation_warning(
         assert lock.lost
     finally:
         lock.release()
+
+
+def test_redis_fork_reinit_covers_mode_lock() -> None:
+    """`RedisLock` registers its mode lock for the after-fork reinit.
+
+    The fork hook resets every lock an instance reports through
+    ``_fork_reinit_locks``. The base class reports the state lock; a
+    `RedisLock` must add ``_mode_lock``, because the worker thread
+    holds it for every ping snapshot, so a child forked inside such a
+    snapshot inherits it locked and its first ``release()`` (the
+    documented child action) or garbage collection hangs on it forever.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    fork_locks: list[object] = list(lock._fork_reinit_locks())
+
+    assert lock._state_lock in fork_locks
+    assert lock._mode_lock in fork_locks
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='os.fork is POSIX-only')
+def test_redis_forked_child_survives_inherited_held_mode_lock() -> None:
+    """A child forked during a ping snapshot must not hang on release.
+
+    ``channel_handler`` takes ``_mode_lock`` for every ping answer, so
+    an ``os.fork`` from another thread can capture it locked, owned by
+    a worker thread that does not exist in the child. The window is
+    held open deterministically by a thread parked inside the mode
+    lock across the fork; the child's ``release()`` must return
+    promptly instead of deadlocking on the inherited lock, exactly as
+    the state lock has been guaranteed since 4.1.1.
+    """
+    server: fakeredis.FakeServer = fakeredis.FakeServer()
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=fakeredis.FakeStrictRedis(
+            server=server,
+            decode_responses=True,
+        ),
+        interrupt_on_lost=False,
+    )
+    lock.acquire()
+    inside = threading.Event()
+    gate = threading.Event()
+
+    def hold_mode_lock() -> None:
+        with lock._mode_lock:
+            inside.set()
+            gate.wait(timeout=10)
+
+    holder = threading.Thread(target=hold_mode_lock, daemon=True)
+    holder.start()
+    assert inside.wait(timeout=5), 'the holder never took the mode lock'
+
+    pid: int = os.fork()
+    if pid == 0:  # pragma: no cover - child process, exits via os._exit
+        lock.release()
+        os._exit(0)
+
+    deadline: float = time.monotonic() + 5
+    status: int | None = None
+    while time.monotonic() < deadline:
+        waited, waitstatus = os.waitpid(pid, os.WNOHANG)
+        if waited:
+            status = os.waitstatus_to_exitcode(waitstatus)
+            break
+        time.sleep(0.01)
+    gate.set()
+    holder.join(timeout=5)
+    if status is None:  # pragma: no cover - only reached when the bug is back
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        pytest.fail('the forked child hung on the inherited mode lock')
+    assert status == 0
+    lock.release()
 
 
 def test_redis_release_in_forked_child_leaves_parent_lock_alone(
