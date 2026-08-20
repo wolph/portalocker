@@ -1675,7 +1675,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         exits, the daemon reader thread goes with it, the socket closes
         and Redis releases the lock.
 
-        Like `utils.LockBase.__del__` every error is suppressed. A
+        Every error is suppressed here, deliberately. A
         finalizer often runs during interpreter shutdown, where even the
         import a reconnect attempt triggers can fail (``ImportError:
         sys.meta_path is None``), and raising from here only produces an

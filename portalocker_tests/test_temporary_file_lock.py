@@ -338,7 +338,7 @@ def test_temporaryfilelock_release_without_ownership_keeps_file(tmpfile):
         stale.release()
         assert os.path.isfile(tmpfile), 'stale release unlinked a held path'
 
-        # A never-acquired object (the __del__-after-failed-acquire path)
+        # A never-acquired object (a stale release after a failed acquire)
         # must be a no-op too.
         never_acquired = portalocker.TemporaryFileLock(tmpfile)
         never_acquired.release()
@@ -348,3 +348,44 @@ def test_temporaryfilelock_release_without_ownership_keeps_file(tmpfile):
     finally:
         holder.release()
     assert not os.path.isfile(tmpfile)
+
+
+@posix_release_only
+def test_temporaryfilelock_strict_context_chain_has_no_cycle(
+    tmpfile,
+    monkeypatch,
+):
+    """Strict mode with the body, the unlink and the unlock all failing
+    must build an exception chain that terminates instead of cycling.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.raise_on_release_error = True
+    body_error = ValueError('the actual bug in the body')
+    unlock_error = OSError('unlock failed')
+
+    def failing_unlock(fh, *args, **kwargs):
+        raise unlock_error
+
+    with pytest.raises(ValueError) as exc_info:  # noqa: PT012, SIM117
+        with lock:
+            _fail_unlink(monkeypatch)
+            monkeypatch.setattr(
+                portalocker.portalocker,
+                'unlock',
+                failing_unlock,
+            )
+            raise body_error
+
+    assert exc_info.value is body_error
+    assert exc_info.value.__context__ is unlock_error
+    assert isinstance(unlock_error.__cause__, PermissionError)
+
+    # Walk the chain with no visited set, bounded to ten hops. A cycle
+    # keeps the walker inside the chain, a healthy chain falls off the
+    # end well within the bound.
+    link: BaseException | None = exc_info.value
+    hops: int = 0
+    while link is not None and hops < 10:
+        link = link.__cause__ or link.__context__
+        hops += 1
+    assert link is None, 'exception chain does not terminate (cycle)'

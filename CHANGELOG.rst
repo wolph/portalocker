@@ -40,10 +40,9 @@
    thread already discarded when it stopped. The unsubscribe now only runs
    when the pubsub still owns a connection, which is also what made
    ``RedisLock.__del__`` fail loudly at interpreter shutdown (#140)
- * ``RedisLock.__del__`` is now best effort like ``LockBase.__del__`` and
-   suppresses all errors instead of surfacing them as interpreter-level
-   "Exception ignored in" messages during garbage collection or shutdown
-   (#140)
+ * ``RedisLock.__del__`` is now best effort and suppresses all errors
+   instead of surfacing them as interpreter-level "Exception ignored in"
+   messages during garbage collection or shutdown (#140)
  * Fixed a contended ``RedisLock`` with a self-created connection (no
    ``connection=`` argument) killing its own worker thread and delivering a
    ``KeyboardInterrupt`` to the main thread. The release between retries
@@ -80,16 +79,28 @@
    ``fh = Lock(path).acquire()`` therefore lost mutual exclusion instantly,
    since only the filehandle stays referenced. The finalizer is removed,
    restoring the 3.2.0 semantics, and ``TemporaryFileLock`` still cleans
-   up a lock held at interpreter exit through its ``atexit`` handler
- * ``release()`` now honours ``raise_on_release_error=False`` on every
-   teardown path: ``TemporaryFileLock.release()`` suppressed only
-   ``FileNotFoundError`` from the unlink, so for example a
-   ``PermissionError`` from a read-only directory escaped despite the
-   default and could replace an exception already leaving a ``with``
-   block. Suppressed release errors are now logged at warning level
-   instead of disappearing, and ``Lock.__exit__`` guarantees the block's
-   own exception wins whether or not ``raise_on_release_error`` is set,
-   with the release error chained on as its ``__context__``
+   up a lock held at interpreter exit through its ``atexit`` handler.
+   That handler resolves a weak reference, so the exit cleanup needs the
+   wrapper to still be referenced. A wrapper discarded mid-run leaves
+   the lock file behind at exit, with the lock itself released once the
+   filehandle is closed or collected
+ * ``release()`` now honours ``raise_on_release_error=False`` on the
+   ``Lock`` and ``TemporaryFileLock`` teardown paths:
+   ``TemporaryFileLock.release()`` suppressed only ``FileNotFoundError``
+   from the unlink, so for example a ``PermissionError`` from a read-only
+   directory escaped despite the default and could replace an exception
+   already leaving a ``with`` block. Suppressed release errors are now
+   logged at warning level instead of disappearing, which also means
+   that with no logging configured they print to stderr through Python's
+   last-resort handler. That is intentional visibility for previously
+   silent failures, not a new bug. ``Lock.__exit__`` guarantees the
+   block's own exception wins whether or not ``raise_on_release_error``
+   is set, with the release error chained on as its ``__context__``, and
+   the chain is kept free of the reference cycle that a release error
+   raised while the body exception was in flight used to create.
+   ``PidFileLock`` overrides ``__exit__`` and its release does not yet
+   honour the flag, so its unlink errors can still escape and mask a
+   body exception. That fix is tracked separately
  * Fixed ``LockBase.__delete__`` releasing the wrong object: deleting a
    lock stored as a class attribute (``del owner.attribute``) called
    ``release()`` on the owner instead of the lock, raising

@@ -663,7 +663,10 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         in the traceback while the original is what propagates. `release`
         only raises when ``raise_on_release_error`` is set, but the
         protection holds either way, so even a subclass whose `release`
-        fails unexpectedly cannot mask the block's own exception.
+        fails unexpectedly cannot mask the block's own exception. The one
+        subclass that sidesteps it is `PidFileLock`, which overrides
+        ``__exit__`` with its own ownership check and does not yet route
+        through this protection.
 
         Args:
             exc_type: Type of the exception leaving the block, if any.
@@ -686,6 +689,19 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                 raise
             previous_context: BaseException | None = exc_value.__context__
             release_error.__context__ = previous_context
+            # Errors raised while `exc_value` was in flight carry it as
+            # their implicit ``__context__``. Splicing the release error
+            # underneath `exc_value` would then close a reference cycle
+            # that loops naive chain walkers, so snip those back links
+            # first. The walk is bounded instead of tracked, because a
+            # release chain deeper than this is not worth preserving.
+            link: BaseException | None = release_error
+            depth: int = 0
+            while link is not None and depth < 10:
+                if link.__context__ is exc_value:
+                    link.__context__ = None
+                link = link.__cause__ or link.__context__
+                depth += 1
             exc_value.__context__ = release_error
             with contextlib.suppress(Exception):
                 exc_value.add_note(  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
@@ -935,8 +951,12 @@ class TemporaryFileLock(Lock):
     filehandle the caller was still using.
 
     That handler holds a `weakref.ref` rather than the lock itself, so
-    registering it does not keep the object alive; a lock that is collected
-    earlier simply leaves the handler with nothing to do.
+    registering it does not keep the object alive. The exit cleanup
+    therefore needs the wrapper to still be referenced: a wrapper
+    collected earlier leaves the handler with nothing to do, so a
+    still-locked, discarded wrapper leaves its file behind at exit. The
+    OS lock itself is released once the filehandle is closed or
+    collected, so the leftover is litter rather than a held lock.
 
     Releasing an instance that does not hold the lock is a no-op. Without
     that rule a stale object, released twice or finalized after a failed
