@@ -73,6 +73,74 @@
    losing waiters retry. Also documented that ``RedisLock`` requires a
    single standalone Redis endpoint, since ``PUBSUB NUMSUB`` is node-local
    in cluster and replica setups (#139)
+ * Behaviour change: fixed ``TemporaryFileLock.acquire`` destroying a held
+   lock when a third party unlinked or replaced the lock file (a tmp
+   cleaner sweeping ``/tmp`` is enough). The inode re-check introduced with
+   the 4.0.0 split-brain fix released and closed the caller's live
+   filehandle on the mismatch. With the default timeout it then silently
+   re-acquired a new inode (an unlocked window a competitor could win,
+   with the caller's original handle left closed), and with ``timeout=0``
+   it raised ``AlreadyLocked`` after having dropped the lock it actually
+   held. Re-acquiring while holding a still-valid lock file is now an
+   idempotent no-op returning the held filehandle, and a held lock whose
+   path was unlinked or replaced externally now raises ``LockException``
+   and leaves the held filehandle untouched instead of closing it
+ * Fixed the ``TemporaryFileLock.acquire`` verification retry restarting
+   the full timeout for every attempt, which compounded the worst-case
+   wall time to roughly ``timeout**2 / check_interval``. The retries now
+   share a single deadline and every retry is only handed the remaining
+   budget
+ * Fixed ``PidFileLock.acquire`` on an instance that already holds the
+   lock dropping the held OS lock mid-call: the old sidecar ``Lock`` was
+   overwritten, and the discarded object's teardown released the lock
+   before the replacement re-acquired it, a window another process could
+   win. A second acquire on a holding instance is now an idempotent no-op
+   that touches neither the sidecar lock nor the PID file
+ * Fixed ``PidFileLock`` ignoring its instance-level ``timeout`` and
+   ``check_interval`` when acquiring with ``fail_when_locked=False``: the
+   sidecar ``Lock`` was built from the per-call arguments only, so a
+   ``None`` argument silently selected the five second module default
+   instead of the instance attribute, making
+   ``PidFileLock(path, timeout=0.4).acquire()`` block for five seconds
+   while ``acquire(timeout=0.4)`` behaved. The call arguments are now
+   coalesced with the instance attributes first, per the documented
+   ``LockBase`` contract
+ * Fixed a contender interrupted while waiting for a ``PidFileLock``
+   destroying the live holder's lock on its own exit. ``acquire`` stored
+   the sidecar ``Lock`` before taking it and only ``except Exception``
+   cleared it, so a ``KeyboardInterrupt`` or ``SystemExit`` (a SIGTERM
+   handler calling ``sys.exit`` is the usual daemon idiom) left the
+   instance claiming a lock it never took, and its release, explicit or
+   via the exit handler, unlinked the PID and sidecar files belonging to
+   the actual holder, letting the next acquirer create a second holder.
+   The sidecar reference is now only published after a fully successful
+   acquire, and ``release`` additionally refuses to unlink anything when
+   the sidecar ``Lock`` no longer holds a filehandle
+ * Behaviour change: ``PidFileLock`` used as a context manager now raises
+   ``AlreadyLocked`` on entry when another process holds the lock but its
+   PID cannot be read (missing, unreadable or invalid PID file). It used
+   to return ``None`` in that case, which the documented contract defines
+   as "this process is the holder", so a chmod'ed or deleted PID file made
+   callers run their exclusive block next to a live holder
+ * ``PidFileLock.read_pid`` now only accepts a plain positive ASCII
+   decimal and reports anything else as unreadable (``None``). It used to
+   parse everything ``int`` accepts, including ``-1``, ``0``, ``+7``,
+   ``1_000`` and non-ASCII digits, and the obvious consumer feeds the
+   result to ``os.kill``, where ``-1`` signals every process the user owns
+ * Fixed ``PidFileLock`` publishing the PID by truncating the PID file in
+   place, which let a concurrent reader observe the previous (possibly
+   dead) holder's PID or an empty file mid-write. The PID is now written
+   to a temporary file next to the PID file and moved over it with
+   ``os.replace``, so readers see either the old complete PID or the new
+   complete PID
+ * Fixed the Windows ``PidFileLock.release`` path unlinking the PID file
+   after releasing the sidecar lock, which could delete the PID a fast
+   successor had already published. The PID file, which carries no OS lock
+   on any platform, is now unlinked before the sidecar release, mirroring
+   the POSIX ordering
+ * ``TemporaryFileLock`` and ``PidFileLock`` now annotate ``filename`` as
+   ``types.Filename`` like ``Lock`` does, so passing a ``pathlib.Path``,
+   which always worked at runtime, no longer fails static type checking
 
 4.1.0:
 

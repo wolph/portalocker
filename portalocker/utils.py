@@ -962,7 +962,7 @@ class TemporaryFileLock(Lock):
 
     def __init__(
         self,
-        filename: str = '.lock',
+        filename: Filename = '.lock',
         timeout: float = DEFAULT_TIMEOUT,
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = True,
@@ -971,7 +971,8 @@ class TemporaryFileLock(Lock):
         """Configure the lock and arm the interpreter exit cleanup.
 
         Args:
-            filename: Path of the lock file, ``'.lock'`` by default. It is
+            filename: Path of the lock file, ``'.lock'`` by default.
+                Anything `str` accepts, including `pathlib.Path`. It is
                 created on acquire and removed on release.
             timeout: See `LockBase`.
             check_interval: See `LockBase`.
@@ -1026,7 +1027,16 @@ class TemporaryFileLock(Lock):
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
     ) -> typing.IO[typing.Any]:
-        """Acquire the lock, guarding against split-brain path swaps."""
+        """Acquire the lock, guarding against split-brain path swaps.
+
+        Re-acquiring while already holding the lock is an idempotent no-op
+        that returns the held filehandle and ignores the arguments, like
+        `RLock`. When a third party unlinked or replaced the lock file in
+        the meantime the re-acquire raises
+        `~portalocker.exceptions.LockException` instead and leaves the held
+        filehandle untouched. See `TemporaryFileLock._acquire_verified` for
+        the full contract.
+        """
         return self._acquire_verified(
             self,
             self.filename,
@@ -1046,24 +1056,80 @@ class TemporaryFileLock(Lock):
         """Acquire ``lock`` and confirm the handle still names ``filename``.
 
         A competing releaser can unlink (and a third party recreate)
-        ``filename`` between our ``open`` and our lock, so two processes could
-        each hold a lock on a different inode for the same name. After locking
-        we verify the handle still points at the current path; on a mismatch we
-        drop the stale handle and re-acquire, bounded by the timeout (no
-        unbounded spin). No-op on Windows, where a locked file cannot be
-        swapped.
+        ``filename`` between our ``open`` and our lock, so two processes
+        could each hold a lock on a different inode for the same name.
+        After locking we verify the handle still points at the current
+        path. No-op on Windows, where a locked file cannot be swapped.
+
+        The contract, in three parts:
+
+        * Already held and still valid: when ``lock`` holds a filehandle
+          whose inode still matches ``filename``, the call is an idempotent
+          no-op returning that same filehandle. The held lock is never
+          released and re-acquired, since the gap between the two is a
+          window a competitor can win.
+        * Already held but compromised: when the held filehandle no longer
+          matches ``filename``, a third party unlinked or replaced the path
+          (tmpwatch cleaning ``/tmp`` is enough) and mutual exclusion is
+          already lost. The call raises
+          `~portalocker.exceptions.LockException` naming the external
+          unlink and leaves the held filehandle untouched: it is not closed
+          and the lock is not silently swapped to the new inode, because
+          only the caller knows whether its pending writes still matter.
+        * Fresh acquire: the verify-and-retry loop runs against one shared
+          deadline. The first attempt passes the caller's ``timeout``
+          through unchanged and every retry is handed only the remaining
+          budget, so the total wall time respects the single timeout
+          instead of compounding per retry. An iteration that finds a stale
+          handle releases it and then either retries or raises. The loop
+          never ends on a bare release.
 
         Shared by ``TemporaryFileLock`` and the ``PidFileLock`` sidecar lock so
         both surfaces get the same guarantee.
+
+        Raises:
+            ~portalocker.exceptions.LockException: The lock was already
+                held, but ``filename`` was unlinked or replaced externally
+                in the meantime.
+            ~portalocker.exceptions.AlreadyLocked: A fresh acquire kept
+                finding the path replaced until the timeout budget ran out,
+                or the underlying `Lock.acquire` gave up on contention.
         """
+        held_fh: types.IO | None = lock.fh
+        if held_fh is not None:
+            if os.name == 'nt':  # Windows: a locked file can't be swapped.
+                return held_fh  # pragma: not-nt
+            if _fh_matches_path(held_fh, filename):  # pragma: not-posix
+                return held_fh  # pragma: not-posix
+            raise exceptions.LockException(  # pragma: not-posix
+                f'{filename!r} was unlinked or replaced externally while '
+                f'the lock was held: the lock is compromised, the held '
+                f'filehandle is untouched',
+            )
+
+        f_timeout: float = coalesce(timeout, lock.timeout, 0.0)
+        deadline: float = time.perf_counter() + f_timeout
+        # The first attempt passes the caller's timeout through unchanged.
+        # Every retry only gets what remains of the shared deadline.
+        attempt_timeout: float | None = timeout
+        fh: types.IO
         for _ in lock._timeout_generator(timeout, check_interval):
-            fh = Lock.acquire(lock, timeout, check_interval, fail_when_locked)
+            fh = Lock.acquire(
+                lock,
+                attempt_timeout,
+                check_interval,
+                fail_when_locked,
+            )
             if os.name == 'nt':  # Windows: a locked file can't be swapped.
                 return fh  # pragma: not-nt
             if _fh_matches_path(fh, filename):  # pragma: not-posix
                 return fh  # pragma: not-posix
             # Stale handle: the path was unlinked+recreated behind our back.
             Lock.release(lock)  # pragma: not-posix
+            attempt_timeout = max(  # pragma: not-posix
+                0.0,
+                deadline - time.perf_counter(),
+            )
         raise exceptions.AlreadyLocked(  # pragma: not-posix
             exceptions.LockException.LOCK_FAILED,
             f'{filename!r} kept being replaced while locking (split-brain)',
@@ -1118,6 +1184,9 @@ class PidFileLock(TemporaryFileLock):
     When used as a context manager:
     - Returns None if we successfully acquired the lock
     - Returns the PID (int) if another process holds the lock
+    - Raises AlreadyLocked if another process holds the lock but its PID
+      cannot be read, so a missing or corrupt PID file can never make a
+      bystander believe it is the holder
 
     The classic "only one instance of this daemon" lock. Two files are
     involved: `filename` holds the readable PID, and a sidecar
@@ -1139,7 +1208,7 @@ class PidFileLock(TemporaryFileLock):
 
     def __init__(
         self,
-        filename: str = '.pid',
+        filename: Filename = '.pid',
         timeout: float = DEFAULT_TIMEOUT,
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = True,
@@ -1148,7 +1217,8 @@ class PidFileLock(TemporaryFileLock):
         """Configure the lock and derive the sidecar lock file name.
 
         Args:
-            filename: Path of the PID file, ``'.pid'`` by default. The
+            filename: Path of the PID file, ``'.pid'`` by default.
+                Anything `str` accepts, including `pathlib.Path`. The
                 sidecar lock file is this path with ``.lock`` appended.
             timeout: See `LockBase`. Only has an effect together with
                 ``fail_when_locked=False``.
@@ -1175,29 +1245,44 @@ class PidFileLock(TemporaryFileLock):
         self._inner_lock: Lock | None = None
 
     def _write_pid(self) -> None:
-        """Publish the current PID and preserve operation errors on close."""
+        """Atomically publish the current PID, preserving close errors.
+
+        The PID is written to a temporary file next to `filename` and then
+        moved over it with `os.replace`, so a concurrent `read_pid` sees
+        either the previous holder's complete PID or ours, never a
+        truncated or empty file. The old truncate-in-place approach
+        exposed both windows between taking the sidecar lock and finishing
+        the write. The temporary file is removed again on any failure, and
+        a close failure after a write failure is chained onto the original
+        error instead of replacing it.
+        """
+        temp_path: str = f'{self.filename}.{os.getpid()}.tmp'
         pid_file: typing.TextIO = open(  # noqa: SIM115
-            self.filename,
-            'a+',
+            temp_path,
+            'w',
             encoding='ascii',
         )
         try:
-            pid_file.seek(0)
-            pid_file.truncate()
-            pid_file.write(str(os.getpid()))
-            pid_file.flush()
             try:
-                os.fsync(pid_file.fileno())
-            except OSError as error:
-                if error.errno not in (errno.EINVAL, errno.ENOTSUP):
-                    raise
-        except Exception as error:
-            try:
-                pid_file.close()
-            except Exception as close_error:
-                raise error from close_error
+                pid_file.write(str(os.getpid()))
+                pid_file.flush()
+                try:
+                    os.fsync(pid_file.fileno())
+                except OSError as error:
+                    if error.errno not in (errno.EINVAL, errno.ENOTSUP):
+                        raise
+            except Exception as error:
+                try:
+                    pid_file.close()
+                except Exception as close_error:
+                    raise error from close_error
+                raise
+            pid_file.close()
+            os.replace(temp_path, self.filename)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_path)
             raise
-        pid_file.close()
 
     def _rollback_failed_acquire(
         self,
@@ -1239,11 +1324,19 @@ class PidFileLock(TemporaryFileLock):
     ) -> typing.IO[typing.Any]:
         """Lock the sidecar file and publish the current PID.
 
+        Calling this on an instance that already holds the lock is an
+        idempotent no-op: the held sidecar filehandle is returned as-is,
+        the arguments are ignored and neither the sidecar lock nor the PID
+        file is touched. Re-acquiring while held is therefore cheap and
+        safe, it can never drop the lock, not even for an instant.
+
         Args:
-            timeout: Overrides `timeout` for this call. See `LockBase`.
-                Only used when `fail_when_locked` resolves to `False`.
+            timeout: Overrides `timeout` for this call. See `LockBase`: the
+                argument wins when it is not `None`, otherwise the instance
+                attribute applies. Only used when `fail_when_locked`
+                resolves to `False`.
             check_interval: Overrides `check_interval` for this call, under
-                the same condition.
+                the same rules.
             fail_when_locked: Overrides `fail_when_locked` for this call.
 
         Returns:
@@ -1264,34 +1357,57 @@ class PidFileLock(TemporaryFileLock):
                 so that failure never leaves the lock held, and a rollback
                 error of its own is chained onto the original.
         """
-        fail_when_locked = coalesce(fail_when_locked, self.fail_when_locked)
+        held_lock: Lock | None = self._inner_lock
+        if held_lock is not None and held_lock.fh is not None:
+            # Already holding: the documented idempotent re-acquire.
+            # Return the held filehandle without touching `_inner_lock` or
+            # the PID file. Building a replacement sidecar Lock here would
+            # discard the held one, and the discarded object's garbage
+            # collected teardown used to release the held OS lock mid-call,
+            # a window a competitor could win.
+            return held_lock.fh
+
+        # Resolve the call arguments against the instance attributes first
+        # (the argument wins when it is not None, see `LockBase`), so the
+        # sidecar Lock below inherits this instance's retry policy instead
+        # of falling back to the module defaults.
+        timeout_: float = coalesce(timeout, self.timeout)
+        check_interval_: float = coalesce(check_interval, self.check_interval)
+        fail_when_locked_: bool = coalesce(
+            fail_when_locked,
+            self.fail_when_locked,
+        )
 
         # Acquire the sidecar lock file using a normal Lock instance.
         inner_lock = Lock(
             self._lockfile,
             mode='a',
-            timeout=timeout if fail_when_locked is False else 0,
-            check_interval=coalesce(
-                check_interval if fail_when_locked is False else 0.0,
-                DEFAULT_CHECK_INTERVAL,
+            timeout=timeout_ if fail_when_locked_ is False else 0,
+            check_interval=(
+                check_interval_ if fail_when_locked_ is False else 0.0
             ),
             fail_when_locked=True,
             flags=LOCK_METHOD,
         )
-        self._inner_lock = inner_lock
+        # `_inner_lock` is only published once the sidecar lock is held
+        # *and* the PID is written, at the very end. Publishing it earlier
+        # would let an acquire interrupted by `KeyboardInterrupt` or
+        # `SystemExit` while waiting (a SIGTERM handler calling `sys.exit`
+        # is the usual daemon idiom, and `except Exception` catches
+        # neither) leave the instance claiming a lock it never took, and
+        # its release would then unlink files that belong to the actual
+        # holder.
         try:
             # Reuse the split-brain guard so the sidecar lock gets the same
             # inode-verification as a direct `TemporaryFileLock`.
             self._acquire_verified(
                 inner_lock,
                 self._lockfile,
-                timeout,
-                check_interval,
-                fail_when_locked,
+                timeout_,
+                check_interval_,
+                fail_when_locked_,
             )
         except Exception as exc:
-            # Don't leak the (failed) sidecar reference on any error.
-            self._inner_lock = None
             # `fail_when_locked=True` raises `AlreadyLocked` on the first
             # contention, while a timed-out `fail_when_locked=False` acquire
             # re-raises the last plain `LockException` - from contention or
@@ -1321,6 +1437,7 @@ class PidFileLock(TemporaryFileLock):
                 raise error from cleanup_error
             raise
 
+        self._inner_lock = inner_lock
         self._acquired_lock = True
         # No need to keep a direct fh on the PID file; return the lock's fh
         # to satisfy the context manager typing contract.
@@ -1332,18 +1449,26 @@ class PidFileLock(TemporaryFileLock):
 
         Returns:
             The PID recorded in the file, or `None` when the file is
-            missing, empty, unreadable or does not contain a number. Note
-            that a returned PID only says who *wrote* the file; the process
-            may since have died.
+            missing, unreadable, or does not contain a plain positive
+            decimal number. Validation is strict on purpose: only ASCII
+            digits with a value greater than zero pass, so signs,
+            underscores, non-ASCII digits, zero and negative values are
+            all treated as unreadable. `int` happily parses ``-1`` or
+            ``1_000``, and the obvious consumer feeds the result straight
+            to ``os.kill``, where ``-1`` signals every process the user
+            owns. Note that a returned PID only says who *wrote* the
+            file, the process may since have died.
         """
         try:
-            if os.path.exists(self.filename):
-                with open(self.filename) as f:
-                    content = f.read().strip()
-                    if content:
-                        return int(content)
-        except (ValueError, OSError):
-            pass
+            with open(self.filename) as f:
+                content: str = f.read().strip()
+        except OSError:
+            return None
+        if not (content.isascii() and content.isdigit()):
+            return None
+        pid: int = int(content)
+        if pid > 0:
+            return pid
         return None
 
     def fail_closed(self) -> contextlib.AbstractContextManager[None]:
@@ -1389,13 +1514,18 @@ class PidFileLock(TemporaryFileLock):
 
         Returns:
             `None` when the lock was acquired, or the PID of the process
-            holding it. The PID may also be `None` on contention, when the
-            holder's PID cannot be read.
+            holding it.
 
         Raises:
+            ~portalocker.exceptions.AlreadyLocked: The lock is held by
+                another process *and* that holder's PID cannot be read
+                (the PID file is missing, unreadable or invalid).
+                Returning `None` in that case would falsely report this
+                process as the holder and run the block without mutual
+                exclusion, so an unreadable holder fails closed.
             Exception: Anything `acquire` raises other than
-                `AlreadyLocked`; only contention is turned into a return
-                value.
+                `AlreadyLocked`. Readable contention is turned into a
+                return value.
 
         Example:
             >>> import portalocker
@@ -1413,9 +1543,20 @@ class PidFileLock(TemporaryFileLock):
         """
         try:
             self.acquire()
-        except exceptions.AlreadyLocked:
+        except exceptions.AlreadyLocked as exc:
             # Another process holds the lock, try to read its PID
-            return self.read_pid()
+            holder_pid: int | None = self.read_pid()
+            if holder_pid is None:
+                # The lock is held but the holder's PID cannot be read:
+                # the PID file is missing, unreadable or invalid.
+                # Returning the `None` we-are-the-holder sentinel here
+                # would make the caller run its exclusive block next to a
+                # live holder, so a broken PID file fails closed instead.
+                raise exceptions.AlreadyLocked(
+                    'the lock is held but the holder PID could not be '
+                    'read, refusing to report this process as the holder',
+                ) from exc
+            return holder_pid
 
         return None  # We successfully acquired the lock
 
@@ -1453,24 +1594,33 @@ class PidFileLock(TemporaryFileLock):
         the sidecar path in the window between unlock and unlink (split-brain).
         The PID file itself carries no OS lock (the sidecar holds it), but it
         is removed in the same held window for consistency. On Windows the
-        locked sidecar cannot be unlinked, so it is released first and removed
-        after.
+        locked sidecar cannot be unlinked, so only the sidecar removal
+        happens after its release. The PID file is still unlinked *before*
+        the sidecar lock is dropped, since removing it afterwards could
+        delete the PID a fast successor has already published.
 
         Releasing an object that does not hold the sidecar is a no-op: a
         stale object (double release, or garbage collection of a failed
         acquire calling ``__del__``) must never unlink the PID or sidecar
-        files out from under the current holder.
+        files out from under the current holder. The same applies to an
+        object whose sidecar `Lock` no longer holds a filehandle, for
+        instance after an acquire interrupted while waiting: the files
+        belong to whoever holds the sidecar lock now.
         """
         inner_lock = self._inner_lock
-        if inner_lock is None:
-            # Not holding the sidecar; the files belong to another holder.
+        if inner_lock is None or inner_lock.fh is None:
+            # Not holding the sidecar lock, so the PID and sidecar files
+            # belong to whoever holds it now. A non-None `inner_lock`
+            # whose `fh` is `None` means the OS lock is already gone, and
+            # unlinking the paths would destroy the current holder's lock.
+            self._inner_lock = None
             return
-        if os.name == 'nt':  # pragma: no cover
+        if os.name == 'nt':
             self._inner_lock = None
             with contextlib.suppress(Exception):
-                inner_lock.release()
-            with contextlib.suppress(Exception):
                 os.unlink(self.filename)
+            with contextlib.suppress(Exception):
+                inner_lock.release()
             with contextlib.suppress(Exception):
                 if os.path.isfile(self._lockfile):
                     os.unlink(self._lockfile)

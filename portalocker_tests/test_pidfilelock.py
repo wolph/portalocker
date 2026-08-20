@@ -5,11 +5,14 @@ from __future__ import annotations
 import builtins
 import contextlib
 import errno
+import gc
+import itertools
 import multiprocessing
 import os
 import tempfile
 import time
 import typing
+import weakref
 from pathlib import Path
 from unittest import mock
 
@@ -548,7 +551,7 @@ def test_pidfilelock_release_without_acquire(tmp_path):
 
 @pytest.mark.parametrize(
     'failure_stage',
-    ('open', 'seek', 'truncate', 'write', 'flush', 'fsync', 'close'),
+    ('open', 'write', 'flush', 'fsync', 'close', 'replace'),
 )
 def test_pidfilelock_releases_sidecar_on_publication_failure(
     tmp_path: Path,
@@ -557,11 +560,19 @@ def test_pidfilelock_releases_sidecar_on_publication_failure(
 ) -> None:
     """#116: every PID-publication failure rolls back the sidecar."""
     pid_file: Path = tmp_path / 'pidfilelock_writefail.pid'
+    # The PID is published through a temporary file that `os.replace`
+    # moves over the PID file, so the failures are injected on that
+    # temporary path rather than on the PID file itself.
+    pid_temp_file: str = f'{pid_file}.{os.getpid()}.tmp'
     real_open: typing.Callable[..., typing.TextIO] = typing.cast(
         typing.Callable[..., typing.TextIO],
         builtins.open,
     )
     real_fsync: typing.Callable[[int], None] = os.fsync
+    real_replace: typing.Callable[..., None] = typing.cast(
+        typing.Callable[..., None],
+        os.replace,
+    )
     failure_stages: set[str] = {failure_stage}
 
     def failing_open(
@@ -569,7 +580,7 @@ def test_pidfilelock_releases_sidecar_on_publication_failure(
         *args: typing.Any,
         **kwargs: typing.Any,
     ) -> typing.TextIO:
-        if str(file) != str(pid_file):
+        if str(file) != pid_temp_file:
             return real_open(file, *args, **kwargs)
         if failure_stage == 'open':
             raise OSError('open failed')
@@ -584,8 +595,18 @@ def test_pidfilelock_releases_sidecar_on_publication_failure(
             raise OSError('fsync failed')
         real_fsync(fd)
 
+    def failing_replace(
+        src: typing.Any,
+        dst: typing.Any,
+        **kwargs: typing.Any,
+    ) -> None:
+        if failure_stage == 'replace' and str(dst) == str(pid_file):
+            raise OSError('replace failed')
+        real_replace(src, dst, **kwargs)
+
     monkeypatch.setattr(builtins, 'open', failing_open)
     monkeypatch.setattr(os, 'fsync', failing_fsync)
+    monkeypatch.setattr(os, 'replace', failing_replace)
 
     failing_lock: utils.PidFileLock = utils.PidFileLock(str(pid_file))
     with pytest.raises(OSError, match=rf'^{failure_stage} failed$'):
@@ -593,6 +614,9 @@ def test_pidfilelock_releases_sidecar_on_publication_failure(
 
     assert failing_lock._inner_lock is None
     assert not failing_lock._acquired_lock
+    assert not os.path.exists(pid_temp_file), (
+        'the failed publication left its temporary file behind'
+    )
 
     monkeypatch.undo()
     recovered: utils.PidFileLock = utils.PidFileLock(str(pid_file))
@@ -632,6 +656,7 @@ def test_pidfilelock_preserves_write_error_when_pid_close_fails(
 ) -> None:
     """#116: PID close failure is secondary to the publication failure."""
     pid_file: Path = tmp_path / 'pidfilelock_writeclosefail.pid'
+    pid_temp_file: str = f'{pid_file}.{os.getpid()}.tmp'
     real_open: typing.Callable[..., typing.TextIO] = typing.cast(
         typing.Callable[..., typing.TextIO],
         builtins.open,
@@ -643,7 +668,7 @@ def test_pidfilelock_preserves_write_error_when_pid_close_fails(
         **kwargs: typing.Any,
     ) -> typing.TextIO:
         wrapped: typing.TextIO = real_open(file, *args, **kwargs)
-        if str(file) != str(pid_file):
+        if str(file) != pid_temp_file:
             return wrapped
         return typing.cast(
             typing.TextIO,
@@ -714,13 +739,27 @@ def test_pidfilelock_chains_emergency_close_failure(
     publication_error: OSError = OSError('publication failed')
     cleanup_error: RuntimeError = RuntimeError('cleanup failed')
     wrapped_handles: list[typing.IO[typing.Any]] = []
+    sidecar_locks: list[utils.Lock] = []
+    real_verified: typing.Callable[..., typing.IO[typing.Any]] = (
+        utils.PidFileLock._acquire_verified
+    )
+
+    def capturing_verified(
+        lock: utils.Lock,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> typing.IO[typing.Any]:
+        sidecar_locks.append(lock)
+        return real_verified(lock, *args, **kwargs)
 
     def failing_write_pid(lock: utils.PidFileLock) -> None:
-        assert lock._inner_lock is not None
-        assert lock._inner_lock.fh is not None
-        wrapped: typing.IO[typing.Any] = lock._inner_lock.fh
+        # `_inner_lock` is only published after a fully successful
+        # acquire, so the sidecar is reached through the captured local.
+        inner: utils.Lock = sidecar_locks[-1]
+        assert inner.fh is not None
+        wrapped: typing.IO[typing.Any] = inner.fh
         wrapped_handles.append(wrapped)
-        lock._inner_lock.fh = typing.cast(
+        inner.fh = typing.cast(
             typing.TextIO,
             _FailingPidFile(
                 typing.cast(typing.TextIO, wrapped),
@@ -732,6 +771,11 @@ def test_pidfilelock_chains_emergency_close_failure(
     def failing_release(lock: utils.Lock) -> None:
         raise cleanup_error
 
+    monkeypatch.setattr(
+        utils.PidFileLock,
+        '_acquire_verified',
+        staticmethod(capturing_verified),
+    )
     monkeypatch.setattr(utils.PidFileLock, '_write_pid', failing_write_pid)
     monkeypatch.setattr(utils.Lock, 'release', failing_release)
 
@@ -761,13 +805,27 @@ def test_pidfilelock_uses_emergency_close_error_when_release_leaves_handle(
     pid_file: Path = tmp_path / 'pidfilelock_incomplete_release.pid'
     publication_error: OSError = OSError('publication failed')
     wrapped_handles: list[typing.IO[typing.Any]] = []
+    sidecar_locks: list[utils.Lock] = []
+    real_verified: typing.Callable[..., typing.IO[typing.Any]] = (
+        utils.PidFileLock._acquire_verified
+    )
+
+    def capturing_verified(
+        lock: utils.Lock,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> typing.IO[typing.Any]:
+        sidecar_locks.append(lock)
+        return real_verified(lock, *args, **kwargs)
 
     def failing_write_pid(lock: utils.PidFileLock) -> None:
-        assert lock._inner_lock is not None
-        assert lock._inner_lock.fh is not None
-        wrapped: typing.IO[typing.Any] = lock._inner_lock.fh
+        # `_inner_lock` is only published after a fully successful
+        # acquire, so the sidecar is reached through the captured local.
+        inner: utils.Lock = sidecar_locks[-1]
+        assert inner.fh is not None
+        wrapped: typing.IO[typing.Any] = inner.fh
         wrapped_handles.append(wrapped)
-        lock._inner_lock.fh = typing.cast(
+        inner.fh = typing.cast(
             typing.TextIO,
             _FailingPidFile(
                 typing.cast(typing.TextIO, wrapped),
@@ -779,6 +837,11 @@ def test_pidfilelock_uses_emergency_close_error_when_release_leaves_handle(
     def incomplete_release(lock: utils.Lock) -> None:
         assert lock.fh is not None
 
+    monkeypatch.setattr(
+        utils.PidFileLock,
+        '_acquire_verified',
+        staticmethod(capturing_verified),
+    )
     monkeypatch.setattr(utils.PidFileLock, '_write_pid', failing_write_pid)
     monkeypatch.setattr(utils.Lock, 'release', incomplete_release)
 
@@ -805,6 +868,7 @@ def test_pidfilelock_preserves_pid_close_error_after_rollback_failures(
 ) -> None:
     """#116: rollback causes retain the earlier PID-close failure."""
     pid_file: Path = tmp_path / 'pidfilelock_all_cleanup_failures.pid'
+    pid_temp_file: str = f'{pid_file}.{os.getpid()}.tmp'
     real_open: typing.Callable[..., typing.TextIO] = typing.cast(
         typing.Callable[..., typing.TextIO],
         builtins.open,
@@ -818,7 +882,7 @@ def test_pidfilelock_preserves_pid_close_error_after_rollback_failures(
         **kwargs: typing.Any,
     ) -> typing.TextIO:
         wrapped: typing.TextIO = real_open(file, *args, **kwargs)
-        if str(file) != str(pid_file):
+        if str(file) != pid_temp_file:
             return wrapped
         return typing.cast(
             typing.TextIO,
@@ -888,3 +952,408 @@ def test_pidfilelock_release_without_ownership_keeps_files(tmp_path):
     finally:
         holder.release()
     assert not os.path.isfile(pid_file)
+
+
+def test_pidfilelock_reacquire_is_noop(tmp_path, monkeypatch):
+    """T7: acquire() on an instance that already holds the lock must be an
+    idempotent no-op. The buggy version built a new sidecar `Lock` and
+    overwrote `_inner_lock`, and the discarded object's teardown released
+    the held OS lock mid-call, opening a theft window.
+    """
+    lock = utils.PidFileLock(str(tmp_path / 'reacquire.pid'))
+    first_fh = lock.acquire()
+    # A weak reference on purpose: a strong one would keep the discarded
+    # sidecar Lock alive and hide the buggy teardown release.
+    assert lock._inner_lock is not None
+    inner_before = weakref.ref(lock._inner_lock)
+
+    released: list[str] = []
+    real_release = utils.Lock.release
+
+    def spy_release(self: utils.Lock) -> None:
+        if self.fh is not None:
+            released.append('released-a-held-lock')
+        real_release(self)
+
+    monkeypatch.setattr(utils.Lock, 'release', spy_release)
+    pid_writes: list[str] = []
+    monkeypatch.setattr(
+        lock,
+        '_write_pid',
+        lambda: pid_writes.append('pid-write'),
+    )
+
+    second_fh = lock.acquire()
+    # Drive the finalizer of a discarded sidecar Lock, if one was created.
+    gc.collect()
+
+    assert released == [], 'the second acquire released the held OS lock'
+    assert second_fh is first_fh
+    assert lock._inner_lock is inner_before()
+    assert pid_writes == [], 'the second acquire rewrote the PID file'
+
+    monkeypatch.undo()
+    lock.release()
+    assert not (tmp_path / 'reacquire.pid').exists()
+
+
+def test_pidfilelock_instance_timeout_honoured(tmp_path):
+    """T8: `PidFileLock(path, timeout=0.4, fail_when_locked=False)` must
+    wait out roughly 0.4 seconds. The buggy version built the sidecar
+    `Lock` from the acquire() parameter (None), which `Lock.__init__`
+    silently turned into the module default timeout.
+    """
+    pid_file = str(tmp_path / 'instance_timeout.pid')
+    holder = utils.PidFileLock(pid_file)
+    holder.acquire()
+    try:
+        contender = utils.PidFileLock(
+            pid_file,
+            timeout=0.4,
+            check_interval=0.05,
+            fail_when_locked=False,
+        )
+        start = time.perf_counter()
+        with pytest.raises(portalocker.AlreadyLocked):
+            contender.acquire()
+        waited = time.perf_counter() - start
+        assert 0.25 <= waited < 2.0, (
+            f'instance timeout of 0.4s waited {waited:.3f}s'
+        )
+    finally:
+        holder.release()
+
+
+def test_pidfilelock_percall_timeout_overrides_instance(tmp_path):
+    """The per-call timeout must win over the instance attribute, per the
+    `LockBase` contract: the argument wins when it is not None.
+    """
+    pid_file = str(tmp_path / 'percall_timeout.pid')
+    holder = utils.PidFileLock(pid_file)
+    holder.acquire()
+    try:
+        contender = utils.PidFileLock(
+            pid_file,
+            timeout=5.0,
+            check_interval=0.05,
+            fail_when_locked=False,
+        )
+        start = time.perf_counter()
+        with pytest.raises(portalocker.AlreadyLocked):
+            contender.acquire(timeout=0.3)
+        waited = time.perf_counter() - start
+        assert 0.2 <= waited < 1.5, (
+            f'per-call timeout of 0.3s waited {waited:.3f}s'
+        )
+    finally:
+        holder.release()
+
+
+def test_pidfilelock_instance_check_interval_honoured(tmp_path, monkeypatch):
+    """The instance check_interval must pace the sidecar lock attempts.
+
+    With check_interval=0.2 the retries are roughly 0.2 seconds apart and a
+    0.5 second timeout buys about four attempts. The buggy version paced
+    the sidecar at the module default interval instead.
+    """
+    pid_file = str(tmp_path / 'check_interval.pid')
+    holder = utils.PidFileLock(pid_file)
+    holder.acquire()
+
+    attempts: list[float] = []
+    real_lock = portalocker.portalocker.lock
+
+    def spy_lock(fh, flags):
+        attempts.append(time.perf_counter())
+        return real_lock(fh, flags)
+
+    monkeypatch.setattr(portalocker.portalocker, 'lock', spy_lock)
+    try:
+        contender = utils.PidFileLock(
+            pid_file,
+            timeout=0.5,
+            check_interval=0.2,
+            fail_when_locked=False,
+        )
+        with pytest.raises(portalocker.AlreadyLocked):
+            contender.acquire()
+    finally:
+        monkeypatch.undo()
+        holder.release()
+
+    gaps = [b - a for a, b in itertools.pairwise(attempts)]
+    assert 3 <= len(attempts) <= 6, f'{len(attempts)} attempts: {gaps}'
+    assert max(gaps) >= 0.15, f'attempts paced too tightly: {gaps}'
+
+
+def test_pidfilelock_accepts_pathlib_path(tmp_path):
+    """`filename` is `types.Filename`: a `pathlib.Path` must work end to
+    end and satisfy the type checkers.
+    """
+    path = tmp_path / 'pathlib.pid'
+    lock = utils.PidFileLock(path)
+    lock.acquire()
+    assert path.is_file()
+    assert lock.read_pid() == os.getpid()
+    assert (tmp_path / 'pathlib.pid.lock').is_file()
+    lock.release()
+    assert not path.exists()
+    assert not (tmp_path / 'pathlib.pid.lock').exists()
+
+
+@pytest.mark.parametrize('interrupt', [KeyboardInterrupt, SystemExit])
+def test_pidfilelock_interrupted_contender_leaves_holder_alone(
+    tmp_path,
+    monkeypatch,
+    interrupt,
+):
+    """R2: a contender interrupted while waiting for the sidecar lock (a
+    SIGINT, or a SIGTERM handler calling sys.exit) must not consider itself
+    a holder. Its release must leave the live holder's PID and sidecar
+    files alone, otherwise the next acquirer wins and two processes hold
+    the lock at once.
+    """
+    pid_file = str(tmp_path / 'interrupted.pid')
+    holder = utils.PidFileLock(pid_file)
+    holder.acquire()
+
+    def interrupting_lock(fh, flags):
+        raise interrupt('signal while waiting for the sidecar lock')
+
+    monkeypatch.setattr(portalocker.portalocker, 'lock', interrupting_lock)
+    contender = utils.PidFileLock(
+        pid_file,
+        timeout=0.5,
+        fail_when_locked=False,
+    )
+    with pytest.raises(interrupt):
+        contender.acquire()
+    monkeypatch.undo()
+
+    # The interrupted contender holds nothing, so releasing it must be a
+    # no-op instead of unlinking the holder's files.
+    contender.release()
+    assert os.path.isfile(pid_file), (
+        'the interrupted contender unlinked the holder PID file'
+    )
+    assert holder.read_pid() == os.getpid()
+
+    third = utils.PidFileLock(pid_file)
+    with pytest.raises(portalocker.AlreadyLocked):
+        third.acquire()
+
+    holder.release()
+    assert not os.path.isfile(pid_file)
+
+
+def test_pidfilelock_release_with_lost_sidecar_lock_keeps_files(tmp_path):
+    """A PidFileLock whose sidecar OS lock is already gone (fh is None)
+    must not unlink the PID and sidecar files: they may belong to a new
+    holder by now.
+    """
+    pid_file = str(tmp_path / 'lost.pid')
+    first = utils.PidFileLock(pid_file)
+    first.acquire()
+    # Drop the OS lock behind the instance's back, standing in for any
+    # path that releases the sidecar without going through
+    # `PidFileLock.release`.
+    assert first._inner_lock is not None
+    utils.Lock.release(first._inner_lock)
+
+    second = utils.PidFileLock(pid_file)
+    second.acquire()
+    try:
+        first.release()
+        assert os.path.isfile(pid_file), (
+            'a lockless release unlinked the new holder PID file'
+        )
+        assert second.read_pid() == os.getpid()
+    finally:
+        second.release()
+    assert not os.path.isfile(pid_file)
+
+
+@pytest.mark.parametrize('sabotage', ['missing', 'empty', 'garbage'])
+def test_pidfilelock_enter_raises_when_holder_pid_unreadable(
+    tmp_path,
+    sabotage,
+):
+    """R6: on contention with an unreadable holder PID, `__enter__` must
+    raise instead of returning the `None` we-are-the-holder sentinel. The
+    buggy version made a chmod'ed, deleted or garbage PID file run the
+    caller's exclusive block next to a live holder.
+    """
+    pid_file = tmp_path / 'unreadable.pid'
+    holder = utils.PidFileLock(str(pid_file))
+    holder.acquire()
+    try:
+        if sabotage == 'missing':
+            os.unlink(pid_file)
+        elif sabotage == 'empty':
+            pid_file.write_text('')
+        else:
+            pid_file.write_text('-1')
+
+        contender = utils.PidFileLock(str(pid_file))
+        with pytest.raises(portalocker.AlreadyLocked) as excinfo, contender:
+            pytest.fail('the exclusive block ran without ownership')
+        assert excinfo.value.holder_pid is None
+    finally:
+        holder.release()
+
+
+@pytest.mark.parametrize(
+    'content',
+    ['-1', '0', '+7', '1_000', '\uff11\uff12\uff13', '0x10', '12abc', ''],
+)
+def test_read_pid_rejects_unsafe_content(tmp_path, content):
+    """R6: `read_pid` must only accept plain positive ASCII decimals.
+
+    Signs, underscores, fullwidth digits, zero and negatives all parse
+    through a bare `int()` and the obvious consumer feeds the result to
+    `os.kill`, where -1 signals everything the user owns.
+    """
+    pid_file = tmp_path / 'strict.pid'
+    pid_file.write_text(content)
+    lock = utils.PidFileLock(str(pid_file))
+    assert lock.read_pid() is None
+
+
+def test_read_pid_accepts_surrounding_whitespace(tmp_path):
+    """A trailing newline from `echo $$ > file` style writers stays valid."""
+    pid_file = tmp_path / 'whitespace.pid'
+    pid_file.write_text(' 42\n')
+    lock = utils.PidFileLock(str(pid_file))
+    assert lock.read_pid() == 42
+
+
+class _ObservingWriter:
+    """Wrap a writable file, calling `observe` before every mutation."""
+
+    def __init__(
+        self,
+        wrapped: typing.IO[str],
+        observe: typing.Callable[[], None],
+    ) -> None:
+        self._wrapped = wrapped
+        self._observe = observe
+
+    def write(self, data: str) -> int:
+        self._observe()
+        return self._wrapped.write(data)
+
+    def truncate(self, size: int | None = None) -> int:
+        self._observe()
+        if size is None:
+            return self._wrapped.truncate()
+        return self._wrapped.truncate(size)
+
+    def __getattr__(self, name: str) -> typing.Any:
+        return getattr(self._wrapped, name)
+
+
+def test_pidfilelock_publication_is_atomic(tmp_path, monkeypatch):
+    """R8: a reader must never observe a truncated or empty PID file.
+
+    The buggy version truncated the PID file in place, so between the
+    truncate and the write a concurrent `read_pid` saw an empty file, and
+    before the truncate it saw the previous (possibly dead) holder's PID.
+    The write now goes through a temporary file and `os.replace`, so a
+    reader sees either the old complete PID or the new complete PID.
+    """
+    pid_file = tmp_path / 'atomic.pid'
+    pid_file.write_text('54321')  # a crashed previous holder's PID
+
+    observed: list[str] = []
+    real_open = builtins.open
+
+    def observe() -> None:
+        try:
+            with real_open(pid_file) as fh:
+                observed.append(fh.read())
+        except FileNotFoundError:
+            observed.append('<missing>')
+
+    def observing_open(file, *args, **kwargs):
+        fh = real_open(file, *args, **kwargs)
+        mode = kwargs.get('mode', args[0] if args else 'r')
+        writable = isinstance(mode, str) and ('w' in mode or 'a' in mode)
+        if writable and str(file).startswith(str(tmp_path)):
+            return _ObservingWriter(fh, observe)
+        return fh
+
+    monkeypatch.setattr(builtins, 'open', observing_open)
+    lock = utils.PidFileLock(str(pid_file))
+    lock.acquire()
+    monkeypatch.undo()
+
+    assert observed, 'expected the PID write to be observed'
+    allowed = {'54321', str(os.getpid())}
+    for snapshot in observed:
+        assert snapshot in allowed, (
+            f'a reader could observe {snapshot!r} instead of a complete PID'
+        )
+    assert lock.read_pid() == os.getpid()
+    lock.release()
+
+
+def test_pidfilelock_nt_release_unlinks_pidfile_before_sidecar_unlock(
+    tmp_path,
+    monkeypatch,
+):
+    """The Windows release path must unlink the PID file while the sidecar
+    lock is still held, mirroring the POSIX order. Unlinking after the
+    sidecar release deletes the PID file a fast successor just published.
+    The branch is exercised here by patching `os.name`: the PID file
+    carries no OS lock on any platform, so every step runs fine on POSIX.
+    """
+    pid_file = str(tmp_path / 'nt_order.pid')
+    lock = utils.PidFileLock(pid_file)
+    lock.acquire()
+
+    events: list[str] = []
+    real_unlink = os.unlink
+    real_release = utils.Lock.release
+
+    def recording_unlink(path, *args, **kwargs):
+        events.append(f'unlink:{os.path.basename(str(path))}')
+        return real_unlink(path, *args, **kwargs)
+
+    def recording_release(self: utils.Lock) -> None:
+        events.append('sidecar-release')
+        real_release(self)
+
+    monkeypatch.setattr(os, 'unlink', recording_unlink)
+    monkeypatch.setattr(utils.Lock, 'release', recording_release)
+    monkeypatch.setattr(os, 'name', 'nt')
+    try:
+        lock.release()
+    finally:
+        monkeypatch.undo()
+
+    assert 'unlink:nt_order.pid' in events, events
+    assert 'sidecar-release' in events, events
+    assert events.index('unlink:nt_order.pid') < events.index(
+        'sidecar-release'
+    ), f'PID file unlinked after the sidecar release: {events}'
+    assert not os.path.isfile(pid_file)
+
+
+def test_pidfilelock_nt_release_tolerates_missing_sidecar_file(
+    tmp_path,
+    monkeypatch,
+):
+    """The Windows release path must skip the sidecar unlink when the file
+    is already gone and still finish the rest of the teardown.
+    """
+    pid_file = str(tmp_path / 'nt_missing.pid')
+    lock = utils.PidFileLock(pid_file)
+    lock.acquire()
+    os.unlink(f'{pid_file}.lock')  # a cleaner already removed the sidecar
+    monkeypatch.setattr(os, 'name', 'nt')
+    try:
+        lock.release()
+    finally:
+        monkeypatch.undo()
+    assert not os.path.isfile(pid_file)
+    assert lock._inner_lock is None
