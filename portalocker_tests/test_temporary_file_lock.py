@@ -1,4 +1,5 @@
 import gc
+import logging
 import os
 import pathlib
 import time
@@ -308,3 +309,36 @@ def test_temporaryfilelock_accepts_pathlib_path(tmp_path):
     assert path.is_file()
     lock.release()
     assert not path.exists()
+
+
+@posix_inode_only
+def test_temporaryfilelock_compromised_release_spares_competitor_file(
+    tmpfile,
+    caplog,
+):
+    """Releasing a compromised holder must free its OS lock without
+    unlinking the path: after the external swap the path belongs to the
+    competitor, and unlinking it would destroy that holder's lock.
+    """
+    holder = portalocker.TemporaryFileLock(tmpfile)
+    held_fh = holder.acquire()
+    os.unlink(tmpfile)  # a third party cleans up the "stale" lock file
+
+    competitor = portalocker.TemporaryFileLock(tmpfile)
+    competitor.acquire()
+    try:
+        with pytest.raises(portalocker.LockException, match='unlink'):
+            holder.acquire()
+        with caplog.at_level(logging.WARNING, logger='portalocker.utils'):
+            holder.release()
+        assert os.path.isfile(tmpfile), (
+            'the compromised release unlinked the competitor file'
+        )
+        assert held_fh.closed, 'the OS lock was not freed'
+        assert holder.fh is None
+        assert any(
+            'not unlinking' in record.getMessage() for record in caplog.records
+        ), 'expected a warning about the skipped unlink'
+    finally:
+        competitor.release()
+    assert not os.path.isfile(tmpfile)

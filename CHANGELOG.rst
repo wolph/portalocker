@@ -84,7 +84,13 @@
    held. Re-acquiring while holding a still-valid lock file is now an
    idempotent no-op returning the held filehandle, and a held lock whose
    path was unlinked or replaced externally now raises ``LockException``
-   and leaves the held filehandle untouched instead of closing it
+   and leaves the held filehandle untouched instead of closing it. A
+   ``PidFileLock`` re-acquire runs the same verification on its sidecar.
+   On both classes ``release`` now also skips the unlink, with a warning
+   in the log, when the held handle no longer names the path, so a
+   compromised holder cannot delete the lock file a competitor has since
+   created. The inode comparison uses ``os.path.samestat``, which checks
+   the device as well as the inode
  * Fixed the ``TemporaryFileLock.acquire`` verification retry restarting
    the full timeout for every attempt, which compounded the worst-case
    wall time to roughly ``timeout**2 / check_interval``. The retries now
@@ -115,7 +121,11 @@
    the actual holder, letting the next acquirer create a second holder.
    The sidecar reference is now only published after a fully successful
    acquire, and ``release`` additionally refuses to unlink anything when
-   the sidecar ``Lock`` no longer holds a filehandle
+   the sidecar ``Lock`` no longer holds a filehandle. An interrupt
+   arriving between taking the sidecar lock and publishing it now rolls
+   the sidecar back as well, where it previously stranded the OS lock on
+   a local variable that only garbage collection could release, so a
+   pinned traceback kept every contender blocked
  * Behaviour change: ``PidFileLock`` used as a context manager now raises
    ``AlreadyLocked`` on entry when another process holds the lock but its
    PID cannot be read (missing, unreadable or invalid PID file). It used

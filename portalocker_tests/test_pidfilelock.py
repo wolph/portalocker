@@ -7,6 +7,7 @@ import contextlib
 import errno
 import gc
 import itertools
+import logging
 import multiprocessing
 import os
 import tempfile
@@ -1198,6 +1199,15 @@ def test_pidfilelock_enter_raises_when_holder_pid_unreadable(
         with pytest.raises(portalocker.AlreadyLocked) as excinfo, contender:
             pytest.fail('the exclusive block ran without ownership')
         assert excinfo.value.holder_pid is None
+        # The cause chain names the real problem: the read error when the
+        # PID file could not be read at all, the contention otherwise.
+        if sabotage == 'missing':
+            assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+        else:
+            assert isinstance(
+                excinfo.value.__cause__,
+                portalocker.AlreadyLocked,
+            )
     finally:
         holder.release()
 
@@ -1357,3 +1367,108 @@ def test_pidfilelock_nt_release_tolerates_missing_sidecar_file(
         monkeypatch.undo()
     assert not os.path.isfile(pid_file)
     assert lock._inner_lock is None
+
+
+posix_sidecar_only = pytest.mark.skipif(
+    os.name == 'nt',
+    reason='POSIX-only inode verification, a locked file cannot be '
+    'swapped on nt',
+)
+
+
+@posix_sidecar_only
+def test_pidfilelock_reacquire_raises_when_sidecar_compromised(tmp_path):
+    """Re-acquire on a holding instance whose sidecar a third party
+    unlinked must raise exactly like `TemporaryFileLock` does, instead of
+    silently returning a filehandle whose lock no longer guards the path
+    a competitor now owns.
+    """
+    pid_file = str(tmp_path / 'compromised.pid')
+    holder = utils.PidFileLock(pid_file)
+    held_fh = holder.acquire()
+    os.unlink(f'{pid_file}.lock')  # a cleaner sweeps both files
+    os.unlink(pid_file)
+
+    competitor = utils.PidFileLock(pid_file)
+    competitor.acquire()
+    try:
+        with pytest.raises(portalocker.LockException, match='unlink'):
+            holder.acquire()
+        assert not held_fh.closed, 'the held filehandle was closed'
+        assert holder._inner_lock is not None
+        assert holder._inner_lock.fh is held_fh
+        assert competitor.read_pid() == os.getpid()
+    finally:
+        competitor.release()
+
+
+@posix_sidecar_only
+def test_pidfilelock_compromised_release_spares_competitor_files(
+    tmp_path,
+    caplog,
+):
+    """Releasing a compromised holder must free its OS lock without
+    unlinking the PID and sidecar files a competitor now owns.
+    """
+    pid_file = str(tmp_path / 'swept.pid')
+    holder = utils.PidFileLock(pid_file)
+    holder.acquire()
+    os.unlink(f'{pid_file}.lock')  # a cleaner sweeps both files
+    os.unlink(pid_file)
+
+    competitor = utils.PidFileLock(pid_file)
+    competitor.acquire()
+    try:
+        with caplog.at_level(logging.WARNING, logger='portalocker.utils'):
+            holder.release()
+        assert os.path.isfile(pid_file), (
+            'the compromised release unlinked the competitor PID file'
+        )
+        assert os.path.isfile(f'{pid_file}.lock'), (
+            'the compromised release unlinked the competitor sidecar'
+        )
+        assert competitor.read_pid() == os.getpid()
+        assert holder._inner_lock is None
+        assert any(
+            'not unlinking' in record.getMessage() for record in caplog.records
+        ), 'expected a warning about the skipped unlink'
+    finally:
+        competitor.release()
+    assert not os.path.isfile(pid_file)
+
+
+@pytest.mark.parametrize('interrupt', [KeyboardInterrupt, SystemExit])
+def test_pidfilelock_interrupt_during_publication_releases_sidecar(
+    tmp_path,
+    monkeypatch,
+    interrupt,
+):
+    """An interrupt between taking the sidecar lock and publishing the
+    instance state must roll the sidecar back. Without the rollback the
+    OS lock is stranded on a local that only refcount garbage collection
+    releases, and a pinned traceback (this test keeps the ExceptionInfo
+    alive) blocks every contender indefinitely.
+    """
+    pid_file = str(tmp_path / 'pub_interrupt.pid')
+    lock = utils.PidFileLock(pid_file)
+
+    def interrupting_write_pid(self: utils.PidFileLock) -> None:
+        raise interrupt('signal during PID publication')
+
+    monkeypatch.setattr(
+        utils.PidFileLock,
+        '_write_pid',
+        interrupting_write_pid,
+    )
+    with pytest.raises(interrupt) as excinfo:
+        lock.acquire()
+    monkeypatch.undo()
+
+    # The pinned exception keeps the acquire frame, and with it the local
+    # sidecar Lock, alive: refcount collection cannot help here.
+    assert excinfo.traceback is not None
+    assert lock._inner_lock is None
+
+    contender = utils.PidFileLock(pid_file)
+    contender.acquire(timeout=0)
+    contender.release()
