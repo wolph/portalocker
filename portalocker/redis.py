@@ -939,8 +939,23 @@ class RedisLock(utils.LockBase['RedisLock']):
           stripped, because RESP3 maintenance notifications drive a
           second reconnect path in redis-py's pubsub that ignores the
           retry policy entirely.
-        - The lock's ``health_check_interval`` and decoded responses,
-          matching `DEFAULT_REDIS_KWARGS`.
+        - Decoded responses, because `channel_handler` compares the
+          decoded channel name and payload.
+
+        ``health_check_interval`` is deliberately *not* overridden: the
+        subscription inherits whatever the command connection uses, as
+        it did when both lived on one connection. A lock-created
+        connection carries the `DEFAULT_REDIS_KWARGS` value of ten
+        seconds through the clone, and a caller-supplied connection
+        keeps the caller's choice, which is what the module docs ask
+        them to set. Forcing the lock's default onto a connection whose
+        owner chose otherwise also has a nasty failure mode on
+        fakeredis: its ``read_response`` never advances redis-py's
+        ``next_health_check`` clock, so any non-zero interval makes the
+        worker send a health-check ``PING`` on every ``get_message``
+        poll (on the order of 100k per second), and the spinning worker
+        starves the command connection's ``PUBSUB NUMSUB`` for tens of
+        milliseconds.
 
         The client is built on a fresh connection pool cloned from the
         command connection's pool (same connection class, same
@@ -1001,9 +1016,6 @@ class RedisLock(utils.LockBase['RedisLock']):
                 retry_on_timeout=False,
                 client_name=self.client_name,
                 protocol=2,
-                health_check_interval=self.redis_kwargs[
-                    'health_check_interval'
-                ],
                 decode_responses=True,
             )
             subscription_pool: redis.connection.ConnectionPool = type(pool)(

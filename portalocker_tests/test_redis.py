@@ -20,6 +20,7 @@ import warnings
 import fakeredis
 import pytest
 from redis import client, exceptions
+from redis.connection import AbstractConnection
 
 import portalocker
 from portalocker import redis, utils
@@ -3561,6 +3562,81 @@ def test_redis_subscription_retry_policy(
     finally:
         lock.release()
     assert lock._subscription_client is None
+
+
+def test_redis_subscription_inherits_health_check_interval(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """The subscription keeps the command connection's health check.
+
+    Structural pin: the derived client must not force the lock's
+    default ``health_check_interval`` onto a connection whose owner
+    chose another value. The module docs tell callers to set the
+    interval on their connection, and the clone is what carries that
+    choice over to the subscription.
+    """
+    connection: client.Redis = redis_connection()
+    expected: int = connection.get_connection_kwargs()['health_check_interval']
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+    )
+
+    lock.acquire()
+    try:
+        assert lock.pubsub is not None
+        subscription: typing.Any = lock.pubsub.connection
+        assert subscription.health_check_interval == expected
+    finally:
+        lock.release()
+
+
+def test_redis_subscription_worker_does_not_spin_on_fakeredis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The keep-alive worker idles between polls instead of pinging.
+
+    Regression pin for the CI failure after #137: fakeredis never
+    advances redis-py's ``next_health_check`` clock, so a non-zero
+    ``health_check_interval`` forced onto the subscription made the
+    worker send a health-check ``PING`` on every poll, and the spinning
+    thread starved ``PUBSUB NUMSUB`` on the command connection. The
+    caller's connection here has the fakeredis default of no health
+    check, so a single ``PING`` from the worker is a regression.
+    """
+    pings: list[str] = []
+    original_send: typing.Callable[..., None] = AbstractConnection.send_command
+
+    def counting_send(
+        connection: typing.Any,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> None:
+        if args and args[0] == 'PING':
+            pings.append(connection.client_name)
+        original_send(connection, *args, **kwargs)
+
+    monkeypatch.setattr(
+        AbstractConnection,
+        'send_command',
+        counting_send,
+    )
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.01,
+    )
+
+    lock.acquire()
+    try:
+        time.sleep(0.1)
+    finally:
+        lock.release()
+    assert lock.client_name not in pings
 
 
 def test_redis_subscription_client_name_is_connection_level(

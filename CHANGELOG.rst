@@ -5,7 +5,8 @@
    reconnects (``retry=Retry(NoBackoff(), 0, supported_errors=())``,
    holder name set at the connection level, RESP2 with maintenance
    notifications disabled), derived per attempt from the command
-   connection's pool. Previously a killed or dropped holder connection
+   connection's pool and inheriting that connection's
+   ``health_check_interval``. Previously a killed or dropped holder connection
    was silently resurrected by redis-py's retry machinery: the holder
    resubscribed *without its name*, kept believing it held the lock
    while the channel had already released it, inflated the subscriber
