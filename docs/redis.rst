@@ -257,7 +257,7 @@ True
 False
 >>> lock.release()
 
-Three caveats, stated plainly rather than hidden:
+The caveats, stated plainly rather than hidden:
 
 - Under redis-py's default ``socket_timeout`` of five seconds, a read
   stalled that long counts as a loss. A holder that cannot complete a
@@ -272,6 +272,13 @@ Three caveats, stated plainly rather than hidden:
 - A holder running portalocker 4.1 or older still resubscribes
   silently after a kill, so the loss guarantee covers a channel only
   once every participant on it runs 4.2 or later.
+- Loss detection rides on the socket. A half-open link that never
+  delivers a TCP reset - a hard-powered-off peer, a silently
+  partitioned network - only surfaces when something writes into the
+  connection, so with ``health_check_interval=0`` (redis-py's default
+  for a connection you supply yourself) such a partition goes
+  undetected indefinitely. Set the interval on your connection so the
+  periodic health-check ping turns the partition into a read error.
 - A forked child inherits the lock object and the parent's sockets.
   The child's ``release`` (explicit or via garbage collection) only
   drops the child's local references; the network teardown is skipped

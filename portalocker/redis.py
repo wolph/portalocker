@@ -52,7 +52,7 @@ raises `~portalocker.exceptions.LockLostError`, the ``with`` block exit
 raises it too once the body finished cleanly, an ``on_lost`` callback
 fires on the reader thread, and by default the main thread receives a
 ``KeyboardInterrupt`` (``interrupt_on_lost``, opt-in from 5.0.0
-onwards). Three caveats that follow from this design:
+onwards). Caveats that follow from this design:
 
 - Under redis-py's default ``socket_timeout`` of five seconds, a read
   stalled for that long raises ``TimeoutError`` and counts as a loss. A
@@ -67,10 +67,22 @@ onwards). Three caveats that follow from this design:
 - A holder running portalocker 4.1 or older still resubscribes silently
   after a kill, so the loss guarantee only covers channels where every
   participant runs 4.2 or later.
+- Loss detection rides on the socket. A half-open link that never
+  delivers a TCP reset - a hard-powered-off peer, a silently
+  partitioned network - only surfaces when something writes into the
+  connection, so with ``health_check_interval=0`` (redis-py's default
+  for a connection you supply yourself) such a partition goes
+  undetected indefinitely.
+- From the revocation until the holder observes it, the old and the
+  new holder both run. Detection is bounded (about one worker sleep
+  interval once the TCP layer notices), reaction is not, and only
+  fencing at the resource itself - a token the resource checks, which
+  is outside this lock's reach - closes that window.
 
 Set ``health_check_interval`` on the connection (it is part of
 `RedisLock.DEFAULT_REDIS_KWARGS`) so that both sides notice a dead peer
-promptly.
+promptly; the periodic ping is also what turns a half-open link into a
+read error.
 
 Example:
     >>> import fakeredis
@@ -922,10 +934,13 @@ class RedisLock(utils.LockBase['RedisLock']):
             # The connection must outlive every worker thread, so this is
             # unreachable unless a teardown raced the handler. Dropping
             # the ping makes this holder look unavailable to the prober,
-            # which is recoverable; raising here would be escalated by
-            # `PubSubWorkerThread.run` into interrupting the whole
-            # process. An `assert` would also be stripped under -O and
-            # degrade into an `AttributeError` with the same escalation.
+            # which is recoverable; raising here would land in
+            # `_on_worker_exception`, which classifies it as a loss for
+            # a held lock (killing this holder's own subscription over a
+            # ping it could simply have dropped) or as a burnt attempt
+            # for a waiter. An `assert` would also be stripped under -O
+            # and degrade into an `AttributeError` with the same
+            # escalation.
             logger.error(
                 'Redis lock %s cannot answer ping: connection is closed',
                 self.holder_id,

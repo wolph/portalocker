@@ -432,9 +432,9 @@
    is set, with the release error chained on as its ``__context__``, and
    the chain is kept free of the reference cycle that a release error
    raised while the body exception was in flight used to create.
-   ``PidFileLock`` overrides ``__exit__`` and its release does not yet
-   honour the flag, so its unlink errors can still escape and mask a
-   body exception. That fix is tracked separately
+   ``PidFileLock`` overrides ``__exit__`` but routes it through
+   ``Lock.__exit__`` and its release honours the flag as well, both
+   fixed in this release by the ``PidFileLock.__exit__`` bullet above
  * Fixed ``LockBase.__delete__`` releasing the wrong object: deleting a
    lock stored as a class attribute (``del owner.attribute``) called
    ``release()`` on the owner instead of the lock, raising
@@ -657,7 +657,9 @@
    daemonize sequence. Together with 4.1.1's removal of lock teardown at
    garbage collection time this closes that fork hole for locks acquired
    before forking. A lock constructed in the parent but acquired inside
-   a forked child is still not cleaned up at that child's exit
+   a forked child belongs to the child: ownership is re-recorded on
+   every fresh acquire (fixed in this release as well), so that child's
+   exit cleans its lock up
  * Behaviour change: ``portalocker.open_atomic`` now raises
    ``FileExistsError`` when the destination already exists on entry,
    matching its documentation and the publication-time race. It raised
