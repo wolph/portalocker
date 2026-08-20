@@ -1,5 +1,80 @@
 4.1.1:
 
+ * Fixed two concurrent ``release()`` calls on one ``Lock`` unlocking a
+   stranger's lock: both callers passed the held-handle guard, and the
+   loser then ran the OS unlock on a closed and possibly reused file
+   descriptor, silently dropping whichever lock that descriptor number
+   belonged to by then. Every lock now claims its state atomically under
+   a per-instance reentrant state lock, so exactly one caller tears the
+   lock down and concurrent or reentrant callers no-op
+ * Fixed a ``release()`` reentering from a signal handler (the standard
+   SIGTERM graceful-shutdown idiom) between the ownership guard and the
+   unlink of ``TemporaryFileLock.release`` and ``PidFileLock.release``
+   unlinking the lock files of whoever acquired the lock in between. The
+   handle is claimed before the first OS call, so the reentrant release
+   finds nothing to do and the successor's files survive
+ * Fixed a ``KeyboardInterrupt`` escaping ``fh.close()`` during release
+   leaving the handle stored after the file was unlinked, which let the
+   next release pass the guard and unlink the successor's file. The
+   stored handle is cleared before the close is attempted
+ * Fixed two threads sharing one ``BoundedSemaphore`` instance both
+   taking a slot: the second publication overwrote the first, one exit
+   then released the other thread's slot and the orphaned slot stayed
+   locked until garbage collection. The already-taken guard, the slot
+   sweep and the publication are one atomic step now, so the losing
+   thread gets a ``LockException`` instead of a leaked slot
+ * Behaviour change: ``Lock`` resolves its path with ``os.path.abspath``
+   at construction, so the ``filename`` attribute now holds an absolute
+   path. A relative path used to be resolved on every later OS call,
+   and an ``os.chdir`` between acquire and release (the daemonize idiom
+   does ``chdir('/')``) made release and the interpreter-exit cleanup
+   unlink another process's equally-named lock files at the new working
+   directory while leaving the lock's own files behind
+ * Fixed a ``KeyboardInterrupt`` during ``Lock.acquire`` leaking the
+   opened descriptor for the traceback's lifetime when it landed in the
+   retry sleep, and leaving the OS lock held by an untracked descriptor
+   (with ``release`` a silent no-op) when it landed between the
+   successful lock and the publication of the handle. Every failed exit
+   from ``acquire``, interrupts included, now unlocks and closes the
+   descriptor first; ``PidFileLock.acquire`` rolls its sidecar back the
+   same way
+ * Fixed the interpreter-exit cleanup skipping a ``TemporaryFileLock``
+   or ``PidFileLock`` constructed before a fork and acquired inside the
+   child: the owning pid was recorded at construction only, so the
+   child's exit left its lock file, and for ``PidFileLock`` a stale PID
+   payload, behind. Ownership is re-recorded on every fresh acquire.
+   Also documented that a ``with lock:`` block entered before a fork
+   runs ``__exit__`` in both processes, so the daemonize pattern must
+   fork outside the block or leave the child via ``os._exit``
+ * Fixed ``RLock`` losing acquire counts when two threads nested
+   acquires on one instance: the bare read-modify-write let one
+   increment overwrite the other, and the later releases closed the
+   file while a hold was still outstanding. The counter transitions run
+   under the instance state lock now, which also closes the equivalent
+   lost update on free-threaded (no-GIL) builds
+ * Fixed ``PidFileLock.__exit__`` replacing the ``with`` body's own
+   exception with a release error and ignoring
+   ``raise_on_release_error`` in both directions: the POSIX release
+   leaked unlink errors with the flag unset and the Windows release
+   swallowed them with it set. The exit path routes through
+   ``Lock.__exit__`` now (release failures are chained onto the body's
+   exception instead of masking it) and ``PidFileLock.release`` follows
+   the flag: unlink failures are logged by default and raised in strict
+   mode
+ * Fixed ``TemporaryFileLock`` and ``PidFileLock`` rejecting the
+   ``raise_on_release_error`` keyword their documentation described:
+   both constructors accept and forward it now
+ * Fixed the Windows unlink retry of ``TemporaryFileLock.release``
+   letting every non-``PermissionError`` failure escape regardless of
+   ``raise_on_release_error``, unlike the POSIX path, and sleeping once
+   more after its final failed attempt. Non-retryable errors follow the
+   flag contract now and the trailing sleep is gone
+ * Behaviour change: ``PidFileLock.acquire`` no longer normalizes plain
+   ``LockException`` failures from the sidecar to ``AlreadyLocked``.
+   ``AlreadyLocked`` means contention and nothing else; a terminal
+   backend failure (``ENOLCK``, an unsupported filesystem) propagates
+   as itself instead of telling callers to retry a failure retrying
+   cannot fix
  * Fixed lock exceptions being unpicklable when they carried an open file
    object on ``fh``, which made every contention raised inside a
    ``multiprocessing`` worker crash the result pipe with
