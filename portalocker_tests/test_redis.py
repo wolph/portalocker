@@ -4593,6 +4593,60 @@ def test_redis_terminal_rollback_failure_keeps_original_error(
     assert any('roll back' in record.message for record in caplog.records)
 
 
+def test_live_redis_wrong_password_raises_promptly(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """Bad credentials raise AuthenticationError, never AlreadyLocked.
+
+    ``AuthenticationError`` subclasses ``ConnectionError`` in redis-py,
+    so the transient-blip tolerance used to retry it for the whole
+    timeout and then raise ``AlreadyLocked``, burying the actual
+    problem. Credentials do not heal on retry: the error must take the
+    terminal path promptly, with the owned connection closed and the
+    instance still reusable. Live only: fakeredis accepts any password.
+    """
+    if isinstance(redis_connection(), fakeredis.FakeStrictRedis):
+        pytest.skip('fakeredis accepts any password')
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        redis_kwargs={
+            'host': os.environ.get('REDIS_HOST', 'localhost'),
+            'port': int(os.environ.get('REDIS_PORT', '6379')),
+            'password': 'definitely-wrong-password',
+        },
+        timeout=30,
+        check_interval=0.02,
+    )
+
+    started: float = time.monotonic()
+    with pytest.raises(exceptions.AuthenticationError):
+        lock.acquire()
+    elapsed: float = time.monotonic() - started
+
+    # Prompt: nowhere near the 30 second retry budget.
+    assert elapsed < 5
+    assert lock.pubsub is None
+    assert lock.thread is None
+    assert lock.connection is None
+    # Reusable: the next acquire fails the same clean way instead of
+    # tripping the already-active guard.
+    with pytest.raises(exceptions.AuthenticationError):
+        lock.acquire()
+    assert lock.connection is None
+
+
+def test_redis_optional_error_lookup_skips_missing_names() -> None:
+    """The optional-exception lookup tolerates older redis-py releases.
+
+    ``ExternalAuthProviderError`` only exists from redis-py 8 onwards
+    while portalocker supports redis-py 5, so the non-transient table
+    is built through a lookup that must simply skip names an older
+    release does not define.
+    """
+    assert redis._optional_redis_errors('ExternalAuthProviderError') != ()
+    assert redis._optional_redis_errors('NoSuchExceptionAnywhere') == ()
+
+
 def test_redis_interrupt_survives_escalated_deprecation_warning(
     redis_connection: ConnectionFactory,
     monkeypatch: pytest.MonkeyPatch,

@@ -103,8 +103,18 @@ import warnings
 import redis.backoff
 import redis.client
 import redis.connection
-import redis.exceptions
 import redis.retry
+
+# Aliased instead of `import redis.exceptions`: the single-file build
+# (`python -m portalocker combine`, see `__main__._clean_line`) strips
+# the qualifier of every inlined portalocker module from the output,
+# and portalocker has its own `exceptions` module, so a literal
+# reference to `AuthorizationError` qualified with the dotted module
+# path would be rewritten to `redis.AuthorizationError`, which only
+# exists for the few classes redis re-exports at top level. The
+# `redis_exceptions` alias is a single word to that regex and survives
+# combining unchanged.
+from redis import exceptions as redis_exceptions
 
 from . import constants, exceptions, utils
 
@@ -160,9 +170,66 @@ def _keep_first_error(
 #: subscription nobody services stops answering pings and gets reaped by
 #: the next prober regardless of why its reader died.
 _CONNECTION_LOSS_ERRORS: tuple[type[BaseException], ...] = (
-    redis.exceptions.ConnectionError,
-    redis.exceptions.TimeoutError,
+    redis_exceptions.ConnectionError,
+    redis_exceptions.TimeoutError,
     OSError,
+)
+
+
+def _optional_redis_errors(name: str) -> tuple[type[BaseException], ...]:
+    """Look up a redis-py exception class that may not exist yet.
+
+    portalocker supports redis-py 5.0 and newer, while some exception
+    classes only appeared later, so tables of exception types cannot
+    always reference them directly. The lookup returns a tuple so a
+    missing name simply contributes nothing when splatted into such a
+    table.
+
+    Args:
+        name: Attribute name to look up on ``redis.exceptions``.
+
+    Returns:
+        A one-element tuple with the class, or an empty tuple when this
+        redis-py release does not define it.
+    """
+    error_class: type[BaseException] | None = getattr(
+        redis_exceptions,
+        name,
+        None,
+    )
+    if error_class is None:
+        return ()
+    return (error_class,)
+
+
+#: ``redis_exceptions.ConnectionError`` subclasses that retrying cannot
+#: cure, so `RedisLock._try_subscribe` must not classify them as
+#: transient blips: burning the acquire timeout on them would bury the
+#: real problem under "could not subscribe" noise and end in a
+#: misleading ``AlreadyLocked``. The judgement per subclass:
+#:
+#: - ``AuthenticationError`` and ``AuthorizationError``: wrong or
+#:   insufficient credentials repeat identically on every retry.
+#: - ``MaxConnectionsError``: a factory-supplied pool at its cap is
+#:   exhausted by the application itself; a tight retry loop does not
+#:   free the connections the application holds, and the subscription
+#:   would need one for the whole hold anyway. (The built-in derivation
+#:   builds a fresh, effectively unbounded pool, so from there this
+#:   cannot fire at all.)
+#: - ``ExternalAuthProviderError`` (redis-py 8+): the credential
+#:   provider machinery failed, which is configuration, not weather.
+#:
+#: Deliberately still transient: ``BusyLoadingError`` (the server is
+#: loading its dataset after a restart and finishes on its own, the
+#: canonical condition worth waiting out) and Sentinel's
+#: ``MasterNotFoundError`` (a failover in progress resolves within
+#: seconds, and Sentinel setups reach this code only through
+#: ``subscription_connection_factory`` anyway).
+_NON_TRANSIENT_SUBSCRIBE_ERRORS: tuple[type[BaseException], ...] = (
+    redis_exceptions.AuthenticationError,
+    redis_exceptions.AuthorizationError,
+    redis_exceptions.MaxConnectionsError,
+    *_optional_redis_errors('ExternalAuthProviderError'),
 )
 
 
@@ -1026,8 +1093,8 @@ class RedisLock(utils.LockBase['RedisLock']):
             Exception: Anything the Redis client raises while
                 connecting, subscribing or starting the thread,
                 re-raised unchanged after the rollback. `acquire`
-                treats a ``redis.exceptions.ConnectionError`` or
-                ``redis.exceptions.TimeoutError`` from here as one
+                treats a ``redis_exceptions.ConnectionError`` or
+                ``redis_exceptions.TimeoutError`` from here as one
                 failed attempt and retries within its timeout budget.
         """
         with self._state_lock:
@@ -2269,7 +2336,7 @@ class RedisLock(utils.LockBase['RedisLock']):
 
         Transient connection trouble while merely *waiting* is scoped
         to the attempt (#141): a subscribe that fails with a
-        ``redis.exceptions.ConnectionError`` or ``TimeoutError``, and a
+        ``redis_exceptions.ConnectionError`` or ``TimeoutError``, and a
         keep-alive worker that dies before the lock is held, both count
         as one failed attempt and are retried within the timeout
         budget. Any other subscribe failure rolls back through
@@ -2438,6 +2505,14 @@ class RedisLock(utils.LockBase['RedisLock']):
         `release` runs first so a lock-created command connection is
         closed exactly when nobody is going to retry on it.
 
+        Not every ``ConnectionError`` is a blip: redis-py derives its
+        credential and pool-exhaustion failures from it, and those
+        repeat identically on every retry, so
+        `_NON_TRANSIENT_SUBSCRIBE_ERRORS` routes them onto the same
+        terminal path. A wrong password therefore raises
+        ``AuthenticationError`` promptly instead of burning the whole
+        timeout and ending in a misleading ``AlreadyLocked``.
+
         Args:
             connection: The command connection to derive the
                 subscription client from.
@@ -2454,9 +2529,12 @@ class RedisLock(utils.LockBase['RedisLock']):
         try:
             self._start_subscription(connection)
         except (
-            redis.exceptions.ConnectionError,
-            redis.exceptions.TimeoutError,
-        ):
+            redis_exceptions.ConnectionError,
+            redis_exceptions.TimeoutError,
+        ) as error:
+            if isinstance(error, _NON_TRANSIENT_SUBSCRIBE_ERRORS):
+                self._roll_back_terminal_subscribe_failure()
+                raise
             logger.warning(
                 'Redis lock %s could not subscribe, retrying within the '
                 'timeout',
@@ -2465,20 +2543,28 @@ class RedisLock(utils.LockBase['RedisLock']):
             )
             return False
         except Exception:
-            # Terminal: the error is about to leave acquire, so restore
-            # the fully inactive state release() guarantees, owned
-            # command connection included.
-            try:
-                self.release()
-            except Exception:
-                logger.warning(
-                    'Redis lock %s failed to roll back after a failed '
-                    'subscription',
-                    self.holder_id,
-                    exc_info=True,
-                )
+            self._roll_back_terminal_subscribe_failure()
             raise
         return True
+
+    def _roll_back_terminal_subscribe_failure(self) -> None:
+        """Restore the fully inactive state before an error propagates.
+
+        The terminal half of `_try_subscribe`: when a subscription
+        failure is about to leave `acquire`, a full `release` runs so a
+        lock-created command connection is closed exactly when nobody
+        is going to retry on it. A cleanup failure is logged so it
+        cannot replace the original error, which the caller re-raises.
+        """
+        try:
+            self.release()
+        except Exception:
+            logger.warning(
+                'Redis lock %s failed to roll back after a failed '
+                'subscription',
+                self.holder_id,
+                exc_info=True,
+            )
 
     def _confirm_or_abandon(self) -> bool:
         """Confirm a won attempt, or abandon it for the next round.
