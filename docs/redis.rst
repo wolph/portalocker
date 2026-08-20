@@ -267,6 +267,12 @@ Three caveats, stated plainly rather than hidden:
 - A holder running portalocker 4.1 or older still resubscribes
   silently after a kill, so the loss guarantee covers a channel only
   once every participant on it runs 4.2 or later.
+- A forked child inherits the lock object and the parent's sockets.
+  The child's ``release`` (explicit or via garbage collection) only
+  drops the child's local references; the network teardown is skipped
+  outside the subscribing process, because an UNSUBSCRIBE over the
+  inherited socket would silently revoke the parent's lock. A child
+  that needs the lock must build its own instance.
 
 From the revocation until the holder observes it, both the new and the
 old holder run: detection is bounded (about one worker sleep interval

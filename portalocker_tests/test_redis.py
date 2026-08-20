@@ -15,6 +15,7 @@ import random
 import threading
 import time
 import typing
+import warnings
 
 import fakeredis
 import pytest
@@ -4470,25 +4471,39 @@ def test_redis_acquire_retries_transient_subscribe_failure(
     caplog: pytest.LogCaptureFixture,
     error_class: type[Exception],
 ) -> None:
-    """A connection blip during subscribe costs one attempt, not the call."""
+    """A confirmation blip on a self-created connection stays serviceable.
+
+    Regression pin for the rollback defect the verifier found: the
+    transient-failure rollback used to run through ``release()``, which
+    closed and cleared a lock-created command connection. The retry
+    then subscribed anyway, but ``channel_handler`` had no connection
+    left to answer pings on, so the "held" lock was unanswerable and
+    the next prober reaped it within a second. The real
+    ``_start_subscription`` must run here (only the confirmation wait
+    is made flaky), and after the blip the holder must still answer a
+    probe over its own, still-open command connection.
+    """
+    seed_pool: typing.Any = redis_connection().connection_pool
+    channel: str = str(random.random())
     lock: redis.RedisLock = redis.RedisLock(
-        str(random.random()),
-        connection=redis_connection(),
+        channel,
+        redis_kwargs={'connection_pool': seed_pool},
         timeout=30,
         check_interval=0.02,
+        interrupt_on_lost=False,
     )
-    original_start: typing.Callable[[client.Redis], None] = (
-        lock._start_subscription
+    original_wait: typing.Callable[[client.PubSub], None] = (
+        lock._wait_for_subscribe_confirmation
     )
     failures: list[bool] = []
 
-    def flaky_start(connection_: client.Redis) -> None:
+    def flaky_wait(pubsub: client.PubSub) -> None:
         if not failures:
             failures.append(True)
-            raise error_class('transient subscribe failure')
-        original_start(connection_)
+            raise error_class('transient confirmation failure')
+        original_wait(pubsub)
 
-    monkeypatch.setattr(lock, '_start_subscription', flaky_start)
+    monkeypatch.setattr(lock, '_wait_for_subscribe_confirmation', flaky_wait)
 
     with caplog.at_level(logging.WARNING, logger='portalocker.redis'):
         assert lock.acquire() is lock
@@ -4498,6 +4513,286 @@ def test_redis_acquire_retries_transient_subscribe_failure(
             'could not subscribe' in record.message
             for record in caplog.records
         )
+        # The blip must not have consumed the self-created command
+        # connection the ping handler answers on.
+        assert lock.connection is not None
+        prober: redis.RedisLock = redis.RedisLock(
+            channel,
+            connection=redis_connection(),
+            unavailable_timeout=1,
+        )
+        holders: list[redis.RedisLockHolder] = prober.probe(timeout=5)
+        assert [holder.holder_id for holder in holders] == [lock.holder_id]
+        assert not lock.lost
+    finally:
+        lock.release()
+    assert lock.connection is None
+
+
+def test_redis_terminal_subscribe_failure_closes_created_connection(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-transient subscribe failure still closes an owned connection.
+
+    Transient blips keep the self-created command connection alive for
+    the retry, so the terminal path has to pick up the close that used
+    to happen inside the rollback: when the error propagates out of
+    ``acquire`` the lock must be fully inactive, owned connection
+    included.
+    """
+    seed_pool: typing.Any = redis_connection().connection_pool
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        redis_kwargs={'connection_pool': seed_pool},
+        timeout=1,
+        check_interval=0.02,
+    )
+
+    def broken_wait(pubsub: client.PubSub) -> None:
+        raise _SubscribeError('subscription permanently broken')
+
+    monkeypatch.setattr(lock, '_wait_for_subscribe_confirmation', broken_wait)
+
+    with pytest.raises(_SubscribeError):
+        lock.acquire()
+
+    assert lock.pubsub is None
+    assert lock.thread is None
+    assert lock.connection is None
+
+
+def test_redis_terminal_rollback_failure_keeps_original_error(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A failing terminal cleanup is logged, the subscribe error wins."""
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        timeout=1,
+        check_interval=0.02,
+    )
+
+    def broken_wait(pubsub: client.PubSub) -> None:
+        raise _SubscribeError('subscription permanently broken')
+
+    def broken_release() -> None:
+        raise _TeardownError('terminal cleanup failed')
+
+    monkeypatch.setattr(lock, '_wait_for_subscribe_confirmation', broken_wait)
+    monkeypatch.setattr(lock, 'release', broken_release)
+
+    with (
+        caplog.at_level(logging.WARNING, logger='portalocker.redis'),
+        pytest.raises(_SubscribeError),
+    ):
+        lock.acquire()
+
+    assert any('roll back' in record.message for record in caplog.records)
+
+
+def test_redis_interrupt_survives_escalated_deprecation_warning(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DeprecationWarning-as-error filter cannot eat the interrupt.
+
+    Users who run with ``-W error::DeprecationWarning`` make the
+    loss-time warning raise inside the handler. The interrupt is the
+    documented 4.2 default behaviour and must already have fired by
+    then, so the escalated filter costs only the warning, never the
+    interrupt.
+    """
+    interrupts: list[bool] = []
+    monkeypatch.setattr(
+        _thread, 'interrupt_main', lambda: interrupts.append(True)
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+    )
+
+    lock.acquire()
+    try:
+        assert lock.pubsub is not None
+        assert lock.thread is not None
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', DeprecationWarning)
+            with pytest.raises(DeprecationWarning):
+                lock._on_worker_exception(
+                    exceptions.ConnectionError('connection killed'),
+                    lock.pubsub,
+                    lock.thread,
+                )
+        assert interrupts == [True]
+        assert lock.lost
+    finally:
+        lock.release()
+
+
+def test_redis_release_in_forked_child_leaves_parent_lock_alone(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """A forked child's release must not revoke the parent's lock.
+
+    A forked child inherits the lock object and its sockets. Its
+    ``release`` (explicit or via garbage collection) used to send
+    UNSUBSCRIBE over the inherited socket, silently releasing the
+    parent's lock while the parent's connection stayed alive, so
+    neither the loss machinery nor a probe would ever tell the parent.
+    The teardown must recognise the foreign process (simulated here by
+    patching ``os.getpid``) and only drop the child's local
+    references. The parent-side worker, subscription and connection
+    stay untouched.
+    """
+    seed_pool: typing.Any = redis_connection().connection_pool
+    admin: client.Redis = redis_connection()
+    channel: str = str(random.random())
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        redis_kwargs={'connection_pool': seed_pool},
+        interrupt_on_lost=False,
+    )
+
+    lock.acquire()
+    worker: redis.PubSubWorkerThread | None = lock.thread
+    pubsub: client.PubSub | None = lock.pubsub
+    command_connection: client.Redis | None = lock.connection
+    subscription_client: client.Redis | None = lock._subscription_client
+    assert worker is not None
+    assert pubsub is not None
+    assert command_connection is not None
+    assert subscription_client is not None
+    assert admin.pubsub_numsub(channel)[0][1] == 1
+
+    parent_pid: int = os.getpid()
+    with pytest.MonkeyPatch.context() as fork_patch:
+        fork_patch.setattr(os, 'getpid', lambda: parent_pid + 1)
+        lock.release()
+
+    # The child's references are gone, without touching the sockets.
+    assert lock.thread is None
+    assert lock.pubsub is None
+    assert lock._subscription_client is None
+    assert lock.connection is None
+    assert not lock.lost
+    # The parent's lock is untouched: worker alive, still subscribed.
+    assert worker.is_alive()
+    assert admin.pubsub_numsub(channel)[0][1] == 1
+
+    # Parent-side cleanup, now genuinely in the owning process.
+    worker.stop()
+    worker.join()
+    pubsub.close()
+    subscription_client.close()
+    subscription_client.connection_pool.disconnect()
+    command_connection.close()
+
+
+def test_redis_on_lost_base_exception_is_contained(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An on_lost raising SystemExit cannot skip interrupt or teardown.
+
+    ``BaseException`` from the callback used to escape the handler,
+    skipping the main-thread interrupt and redis-py's post-loop
+    ``pubsub.close()``. The containment must cover ``BaseException``,
+    matching what the documentation promises.
+    """
+    interrupts: list[bool] = []
+    monkeypatch.setattr(
+        _thread, 'interrupt_main', lambda: interrupts.append(True)
+    )
+
+    def bailing_callback(lock_: redis.RedisLock) -> None:
+        raise SystemExit('callback bail-out')
+
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        on_lost=bailing_callback,
+        interrupt_on_lost=True,
+    )
+
+    lock.acquire()
+    worker: redis.PubSubWorkerThread | None = lock.thread
+    assert worker is not None
+    with caplog.at_level(logging.ERROR, logger='portalocker.redis'):
+        _break_subscription_read(
+            monkeypatch,
+            lock,
+            exceptions.ConnectionError('connection killed'),
+        )
+        assert _wait_for(lambda: not worker.is_alive())
+
+    assert lock.lost
+    assert interrupts == [True]
+    # redis-py's post-loop close ran: the pubsub gave its connection up.
+    assert lock.pubsub is not None
+    assert lock.pubsub.connection is None
+    assert any(
+        'on_lost callback failed' in record.message
+        for record in caplog.records
+    )
+    lock.release()
+
+
+def test_redis_subscription_derivation_without_pool_names_escape_hatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client without a connection pool fails with the factory hint.
+
+    Cluster clients have no ``connection_pool`` attribute at all, so
+    the derivation failure is an ``AttributeError`` rather than a
+    ``TypeError``. Both must land in the same ``LockException`` naming
+    ``subscription_connection_factory``.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+    )
+    monkeypatch.delattr(connection, 'connection_pool')
+
+    with pytest.raises(
+        portalocker.LockException,
+        match='subscription_connection_factory',
+    ):
+        lock.acquire()
+
+    assert lock.pubsub is None
+
+
+def test_redis_fresh_subscription_clears_stale_worker_error(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """A stale error from a dead prior attempt cannot refuse the next.
+
+    A worker can die and record its error during the between-attempts
+    teardown, after ``_abandon_failed_attempt`` already consumed the
+    previous one. Starting a fresh subscription must clear that
+    leftover, or ``_confirm_held`` refuses a perfectly healthy attempt
+    once before converging.
+    """
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+    )
+    connection: client.Redis = lock.get_connection()
+    with lock._state_lock:
+        lock._lock_state = redis._LockState.ACQUIRING
+        lock._lost_error = RuntimeError('stale straggler error')
+
+    lock._start_subscription(connection)
+    try:
+        assert lock._confirm_held()
     finally:
         lock.release()
 

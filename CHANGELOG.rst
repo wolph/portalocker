@@ -42,6 +42,12 @@
    state under a lock, so a subscription dying between the winning
    probe and the bookkeeping costs one attempt instead of producing an
    imaginary hold (#141)
+ * Made ``RedisLock`` teardown fork safe: a forked child inheriting a
+   held lock now only drops its local references on ``release()`` or
+   garbage collection, instead of sending UNSUBSCRIBE over the
+   inherited socket and silently releasing the parent's lock while the
+   parent's own connection stayed healthy and nothing ever told it. A
+   child that needs the lock must build its own instance (#137)
  * Deprecated ``RedisLock.check_or_kill_lock`` (removal in 5.0.0): its
    reap arm kills connections on a caller-chosen timeout without the
    protocol discipline that protects live-but-slow holders inside

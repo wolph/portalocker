@@ -91,6 +91,7 @@ import contextlib
 import enum
 import json
 import logging
+import os
 import random
 import re
 import threading
@@ -341,6 +342,14 @@ class RedisLock(utils.LockBase['RedisLock']):
     default ``socket_timeout`` turns a read stalled for five seconds
     into a loss.
 
+    A note on ``os.fork``: a forked child inherits the lock object and
+    the parent's sockets. The child's `release` (or garbage collection
+    of its copy) only drops the child's local references; the network
+    teardown is skipped in any process other than the one that
+    subscribed, because an UNSUBSCRIBE over the inherited socket would
+    silently revoke the *parent's* lock without the parent ever being
+    told. A child that needs the lock must construct its own instance.
+
     To make sure both sides of the lock know about the connection state it is
     recommended to set the `health_check_interval` when creating the redis
     connection.
@@ -466,6 +475,15 @@ class RedisLock(utils.LockBase['RedisLock']):
     #: owned by the lock, also when it came out of
     #: `subscription_connection_factory`.
     _subscription_client: redis.client.Redis | None
+    #: The pid `_start_subscription` last ran in, or `None` without a
+    #: subscription. A forked child inherits the lock object and its
+    #: sockets, and a teardown running in a pid other than this one
+    #: must only drop its local references: any socket operation - the
+    #: UNSUBSCRIBE most of all - would act on the *parent's* live
+    #: subscription, silently releasing a lock the parent still
+    #: believes it holds (the same hazard redis-py's pools guard with
+    #: ``_checkpid``). See `_in_subscribing_process`.
+    _subscription_pid: int | None
     #: Where this instance is in its lifecycle. See `_LockState`.
     #: Together with `_lost_error` it is guarded by the ``_state_lock``
     #: every `utils.LockBase` instance owns (documented there as the
@@ -569,6 +587,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         self._interrupt_on_lost_set = interrupt_on_lost is not None
         self.subscription_connection_factory = subscription_connection_factory
         self._subscription_client = None
+        self._subscription_pid = None
         # Guarded by the base class's `_state_lock` (created in
         # `super().__init__` below) from the moment a worker thread can
         # exist; only the constructor may assign without holding it.
@@ -881,50 +900,57 @@ class RedisLock(utils.LockBase['RedisLock']):
             ~portalocker.exceptions.LockException: The pool could not be
                 cloned, typically because an exotic pool class takes
                 constructor arguments this derivation does not know
-                about. The message points at
+                about, or because a cluster-style client carries no
+                connection pool at all. The message points at
                 `subscription_connection_factory`, which exists for
                 exactly that situation.
         """
         if self.subscription_connection_factory is not None:
             return self.subscription_connection_factory()
 
-        pool: redis.connection.ConnectionPool = connection.connection_pool
-        # `get_connection_kwargs` is annotated as a bare Dict in
-        # redis-py; the cast restores the real shape.
-        connection_kwargs: dict[str, typing.Any] = typing.cast(
-            'dict[str, typing.Any]',
-            connection.get_connection_kwargs(),
-        )
-        subscription_kwargs: dict[str, typing.Any] = {
-            key: value
-            for key, value in connection_kwargs.items()
-            # The maintenance-notification machinery is RESP3-only and
-            # rejects (or bypasses) the RESP2 zero-retry setup below.
-            if 'maint' not in key and key != 'connection_class'
-        }
-        subscription_kwargs.update(
-            retry=redis.retry.Retry(
-                redis.backoff.NoBackoff(),
-                retries=0,
-                supported_errors=(),
-            ),
-            retry_on_error=[],
-            retry_on_timeout=False,
-            client_name=self.client_name,
-            protocol=2,
-            health_check_interval=self.redis_kwargs['health_check_interval'],
-            decode_responses=True,
-        )
         try:
+            pool: redis.connection.ConnectionPool = connection.connection_pool
+            # `get_connection_kwargs` is annotated as a bare Dict in
+            # redis-py; the cast restores the real shape.
+            connection_kwargs: dict[str, typing.Any] = typing.cast(
+                'dict[str, typing.Any]',
+                connection.get_connection_kwargs(),
+            )
+            subscription_kwargs: dict[str, typing.Any] = {
+                key: value
+                for key, value in connection_kwargs.items()
+                # The maintenance-notification machinery is RESP3-only
+                # and rejects (or bypasses) the RESP2 zero-retry setup
+                # below.
+                if 'maint' not in key and key != 'connection_class'
+            }
+            subscription_kwargs.update(
+                retry=redis.retry.Retry(
+                    redis.backoff.NoBackoff(),
+                    retries=0,
+                    supported_errors=(),
+                ),
+                retry_on_error=[],
+                retry_on_timeout=False,
+                client_name=self.client_name,
+                protocol=2,
+                health_check_interval=self.redis_kwargs[
+                    'health_check_interval'
+                ],
+                decode_responses=True,
+            )
             subscription_pool: redis.connection.ConnectionPool = type(pool)(
                 connection_class=pool.connection_class,
                 **subscription_kwargs,
             )
-        except TypeError as error:
+        except (TypeError, AttributeError) as error:
+            # TypeError: an exotic pool class rejects the clone kwargs.
+            # AttributeError: a cluster-style client carries no
+            # connection pool at all.
             raise exceptions.LockException(
                 exceptions.LockException.LOCK_FAILED,
                 'RedisLock could not derive a subscription client from '
-                f'connection pool class {type(pool).__name__}; pass '
+                f'a {type(connection).__name__} connection; pass '
                 'subscription_connection_factory to build one yourself',
             ) from error
         return redis.client.Redis(connection_pool=subscription_pool)
@@ -968,14 +994,26 @@ class RedisLock(utils.LockBase['RedisLock']):
            *is* releasing the lock, dying at process exit is the
            correct behaviour rather than a leak.
 
-        Any failure rolls the whole thing back through `release` before
-        re-raising, leaving `pubsub` as `None`. Without that rollback a
-        failed `acquire` would leave half a subscription behind and the
-        already-active guard at the top of `acquire` would refuse every
-        later retry on the same object. A rollback that fails as well -
-        usually the same dead Redis that broke the subscribe - is logged
-        rather than raised, so the original error is what propagates out
-        of `acquire`.
+        Any failure rolls the whole thing back through `_unsubscribe`
+        before re-raising, leaving `pubsub` as `None`. Without that
+        rollback a failed `acquire` would leave half a subscription
+        behind and the already-active guard at the top of `acquire`
+        would refuse every later retry on the same object. The rollback
+        deliberately keeps the command connection: `acquire` retries a
+        transient failure on that same connection, and closing a
+        lock-created connection here would leave the retry holding a
+        subscription whose ping handler has nothing left to answer on
+        (the terminal cleanup for errors that do propagate lives in
+        `_try_subscribe`). A rollback that fails as well - usually the
+        same dead Redis that broke the subscribe - is logged rather
+        than raised, so the original error is what propagates.
+
+        A leftover `_lost_error` from a worker that died during the
+        previous teardown is cleared before subscribing, so the fresh
+        attempt cannot be refused by `_confirm_held` over a failure
+        that belonged to a subscription which no longer exists. The
+        current pid is recorded as `_subscription_pid`, which is what
+        lets a later teardown detect that it runs in a forked child.
 
         Args:
             connection: The command connection the subscription client
@@ -992,10 +1030,13 @@ class RedisLock(utils.LockBase['RedisLock']):
                 ``redis.exceptions.TimeoutError`` from here as one
                 failed attempt and retries within its timeout budget.
         """
+        with self._state_lock:
+            self._lost_error = None
         subscription_client: redis.client.Redis = (
             self._make_subscription_client(connection)
         )
         self._subscription_client = subscription_client
+        self._subscription_pid = os.getpid()
         pubsub: redis.client.PubSub = self._get_pubsub(subscription_client)
         self.pubsub = pubsub
         try:
@@ -1016,7 +1057,7 @@ class RedisLock(utils.LockBase['RedisLock']):
             # reporting. A rollback that fails as well is logged so it
             # cannot replace the original cause.
             try:
-                self.release()
+                self._unsubscribe()
             except Exception:
                 logger.warning(
                     'Redis lock %s failed to roll back a broken subscription',
@@ -1163,17 +1204,27 @@ class RedisLock(utils.LockBase['RedisLock']):
                 )
             self._fire_on_lost()
             if self.interrupt_on_lost:
+                # The interrupt goes first: users who escalate
+                # DeprecationWarning to an error would otherwise lose
+                # the documented interrupt to their warning filter.
+                _thread.interrupt_main()
                 if not self._interrupt_on_lost_set:
+                    # stacklevel 1 on purpose: this runs on the worker
+                    # thread, where the caller frames belong to
+                    # redis-py's read loop, so pointing higher would
+                    # attribute the warning to redis-py. The message
+                    # names the lock and channel instead.
                     warnings.warn(
-                        'RedisLock lost a held lock and interrupted the '
-                        'main thread because interrupt_on_lost defaults to '
-                        'True in portalocker 4.2. portalocker 5.0.0 flips '
-                        'that default to False; pass interrupt_on_lost '
+                        f'portalocker.RedisLock on channel '
+                        f'{self.channel!r} lost a held lock and '
+                        'interrupted the main thread because '
+                        'interrupt_on_lost defaults to True in '
+                        'portalocker 4.2. portalocker 5.0.0 flips that '
+                        'default to False; pass interrupt_on_lost '
                         'explicitly to keep or drop the interrupt.',
                         DeprecationWarning,
-                        stacklevel=2,
+                        stacklevel=1,
                     )
-                _thread.interrupt_main()
         elif connection_lost:
             logger.warning(
                 'Redis lock %s lost its subscription while waiting for '
@@ -1195,8 +1246,11 @@ class RedisLock(utils.LockBase['RedisLock']):
         """Invoke the `on_lost` callback, containing whatever it raises.
 
         Runs on the worker thread as part of the HELD to LOST
-        transition. A callback failure must not break that transition or
-        the thread teardown around it, so anything the callback raises
+        transition. A callback failure must not break that transition,
+        the main-thread interrupt that follows it, or the thread
+        teardown around it, so anything the callback raises - including
+        a `BaseException` such as `SystemExit`, which would otherwise
+        skip the interrupt and redis-py's post-loop ``pubsub.close()`` -
         is logged with its traceback and swallowed.
         """
         callback: typing.Callable[[RedisLock], None] | None = self.on_lost
@@ -1204,7 +1258,7 @@ class RedisLock(utils.LockBase['RedisLock']):
             return
         try:
             callback(self)
-        except Exception:
+        except BaseException:  # noqa: BLE001
             logger.exception(
                 'Redis lock %s on_lost callback failed',
                 self.holder_id,
@@ -2375,11 +2429,14 @@ class RedisLock(utils.LockBase['RedisLock']):
 
         A subscribe that dies with a connection or timeout error is the
         waiter-side blip `acquire` promises to tolerate: the rollback
-        inside `_start_subscription` already ran, so this only logs,
-        restores the `_LockState.ACQUIRING` lifecycle the rollback's
-        `release` reset, and reports the attempt as failed. Every other
-        error propagates, because an unexpected failure should surface
-        rather than burn the whole timeout retrying it.
+        inside `_start_subscription` already ran (keeping the command
+        connection alive for the retry, which is what keeps the ping
+        handler answerable after the blip), so this only logs and
+        reports the attempt as failed. Every other error propagates,
+        because an unexpected failure should surface rather than burn
+        the whole timeout retrying it, and on that terminal path a full
+        `release` runs first so a lock-created command connection is
+        closed exactly when nobody is going to retry on it.
 
         Args:
             connection: The command connection to derive the
@@ -2388,6 +2445,11 @@ class RedisLock(utils.LockBase['RedisLock']):
         Returns:
             True when the subscription is live, False when the attempt
             failed transiently and should be retried.
+
+        Raises:
+            Exception: The non-transient subscription failure, re-raised
+                after the terminal cleanup. A cleanup failure is logged
+                so it cannot replace the original error.
         """
         try:
             self._start_subscription(connection)
@@ -2401,9 +2463,21 @@ class RedisLock(utils.LockBase['RedisLock']):
                 self.holder_id,
                 exc_info=True,
             )
-            with self._state_lock:
-                self._lock_state = _LockState.ACQUIRING
             return False
+        except Exception:
+            # Terminal: the error is about to leave acquire, so restore
+            # the fully inactive state release() guarantees, owned
+            # command connection included.
+            try:
+                self.release()
+            except Exception:
+                logger.warning(
+                    'Redis lock %s failed to roll back after a failed '
+                    'subscription',
+                    self.holder_id,
+                    exc_info=True,
+                )
+            raise
         return True
 
     def _confirm_or_abandon(self) -> bool:
@@ -2611,6 +2685,27 @@ class RedisLock(utils.LockBase['RedisLock']):
         finally:
             pubsub.close()
 
+    def _in_subscribing_process(self) -> bool:
+        """Report whether this process created the current subscription.
+
+        A forked child inherits the lock object together with the
+        parent's sockets, so a teardown running in the child must not
+        talk to them: an UNSUBSCRIBE sent over the inherited socket
+        releases the *parent's* lock, and the parent - whose connection
+        stays perfectly healthy - is never told (redis-py's connection
+        pools guard the same hazard with their ``_checkpid`` dance).
+        `_unsubscribe` and `release` therefore only drop local
+        references when this returns False.
+
+        Returns:
+            True when no subscription exists or the current pid is the
+            one `_start_subscription` recorded, so socket teardown is
+            safe. False in a process that inherited the subscription
+            through ``fork``.
+        """
+        subscription_pid: int | None = self._subscription_pid
+        return subscription_pid is None or subscription_pid == os.getpid()
+
     def _unsubscribe(self) -> None:
         """Drop the subscription but keep the command connection.
 
@@ -2622,6 +2717,11 @@ class RedisLock(utils.LockBase['RedisLock']):
         stops being counted as a subscriber, and the next attempt
         subscribes from scratch, on a fresh subscription client but the
         same command connection.
+
+        In a forked child (see `_in_subscribing_process`) all of that
+        shrinks to dropping the references: the thread does not exist
+        in the child, and every socket in sight is the parent's live
+        subscription, which the child may not touch.
 
         The teardown is exception safe. `thread` and `pubsub` are
         cleared before their cleanup steps run, every step runs even
@@ -2663,10 +2763,15 @@ class RedisLock(utils.LockBase['RedisLock']):
                 re-raised after the remaining steps have run.
         """
         first_error: Exception | None = None
+        same_process: bool = self._in_subscribing_process()
+        self._subscription_pid = None
 
         thread: PubSubWorkerThread | None = self.thread
         self.thread = None
-        if thread is not None:
+        # In a forked child the thread object is a ghost: fork clones
+        # only the calling thread, and joining a thread that never ran
+        # in this process can hang on its inherited internal lock.
+        if thread is not None and same_process:
             try:
                 thread.stop()
                 if thread.ident is not None:
@@ -2677,7 +2782,7 @@ class RedisLock(utils.LockBase['RedisLock']):
 
         pubsub: redis.client.PubSub | None = self.pubsub
         self.pubsub = None
-        if pubsub is not None:
+        if pubsub is not None and same_process:
             try:
                 # redis-py does not annotate `PubSub.connection` (the
                 # constructor assigns a plain `None`), so mypy infers the
@@ -2699,7 +2804,10 @@ class RedisLock(utils.LockBase['RedisLock']):
             except Exception as error:
                 first_error = _keep_first_error(first_error, error)
 
-        first_error = self._close_subscription_client(first_error)
+        first_error = self._close_subscription_client(
+            first_error,
+            teardown=same_process,
+        )
 
         if first_error is not None:
             raise first_error
@@ -2707,6 +2815,7 @@ class RedisLock(utils.LockBase['RedisLock']):
     def _close_subscription_client(
         self,
         first_error: Exception | None,
+        teardown: bool = True,
     ) -> Exception | None:
         """Close the dedicated subscription client and its pool.
 
@@ -2723,6 +2832,10 @@ class RedisLock(utils.LockBase['RedisLock']):
         Args:
             first_error: The error the surrounding teardown kept so
                 far, or `None`.
+            teardown: Whether the client's sockets may be touched at
+                all. `_unsubscribe` passes False in a forked child,
+                where the reference is dropped but the connections
+                belong to the parent.
 
         Returns:
             The error the caller should keep: `first_error` when it was
@@ -2733,7 +2846,7 @@ class RedisLock(utils.LockBase['RedisLock']):
             self._subscription_client
         )
         self._subscription_client = None
-        if subscription_client is not None:
+        if subscription_client is not None and teardown:
             try:
                 subscription_client.close()
             except Exception as error:
@@ -2770,13 +2883,20 @@ class RedisLock(utils.LockBase['RedisLock']):
         `_unsubscribe`, which keeps the connection so the retry loop and
         the ping handler can keep using it; this method is for when the
         lock is done, either released by the caller or giving up with
-        `AlreadyLocked`. `_start_subscription` also calls it to roll
-        back a subscribe that failed halfway, which is terminal too: the
-        error propagates out of `acquire`.
+        `AlreadyLocked`. `_try_subscribe` also calls it when a
+        subscription failure is about to propagate out of `acquire`,
+        which is terminal too.
 
         Calling this when nothing was acquired is harmless - it still
         closes a self-created connection if one exists - which is what
         makes both that rollback and `__del__` safe.
+
+        In a forked child every socket in sight belongs to the parent,
+        so the teardown only drops this process's references (see
+        `_in_subscribing_process`): the parent keeps its lock, and the
+        child's `release` (or garbage collection) cannot silently
+        revoke it. The child must not otherwise use an inherited lock
+        instance; it should build its own.
 
         A loss is *not* erased here: releasing a lock that was revoked
         while held leaves `lost` True (and the causal error in place)
@@ -2791,6 +2911,10 @@ class RedisLock(utils.LockBase['RedisLock']):
                 re-raised after the remaining steps have run.
         """
         first_error: Exception | None = None
+        # Snapshot before _unsubscribe clears the recorded pid: the
+        # command connection was created alongside the subscription, so
+        # the same fork test governs whether closing it is safe.
+        same_process: bool = self._in_subscribing_process()
         with self._mode_lock:
             self.writer_elected = False
         with self._state_lock:
@@ -2805,13 +2929,16 @@ class RedisLock(utils.LockBase['RedisLock']):
         # Only close connections we created ourselves; caller-supplied ones
         # are left untouched. Clear it even when closing fails so a later
         # acquire recreates the connection instead of reusing a broken one.
+        # A forked child clears without closing: the sockets are the
+        # parent's.
         if self.close_connection and self.connection is not None:
             connection: redis.client.Redis = self.connection
             self.connection = None
-            try:
-                connection.close()
-            except Exception as error:
-                first_error = _keep_first_error(first_error, error)
+            if same_process:
+                try:
+                    connection.close()
+                except Exception as error:
+                    first_error = _keep_first_error(first_error, error)
 
         if first_error is not None:
             raise first_error
