@@ -402,15 +402,20 @@ def test_redis_pending_writers_are_elected_by_holder_id(
     )
     first_thread.start()
     _wait_for_subscribers(reader, 2)
-    second_thread.start()
-    _wait_for_subscribers(reader, 3)
     # An unelected writer backs off by dropping its subscription whenever a
     # holder sample is incomplete, so the election order is only pinned down
     # once the favored writer is actually elected while the reader holds on.
+    # Since #143 a writer that wins an election also keeps it instead of
+    # rerunning the id sort, so on a stalled runner the second writer could
+    # win a clean probe while the first is between attempts and then fairly
+    # keep that election forever. The favored writer must therefore be
+    # elected before the second writer may start.
     election_deadline: float = time.monotonic() + 30
     while not first.writer_elected and time.monotonic() < election_deadline:
         time.sleep(0.001)
     assert first.writer_elected
+    second_thread.start()
+    _wait_for_subscribers(reader, 3)
 
     reader.release()
     acquired_deadline: float = time.monotonic() + 20
