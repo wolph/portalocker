@@ -94,6 +94,14 @@
    spuriously, at the cost of non-blocking latency of up to ``timeout``
    on a noisy channel. Pass ``timeout=0`` to keep the strict
    single-attempt behaviour (#143)
+ * Tightened ``RedisLock.__exit__`` on two edges: the ``lost`` flag is
+   read *after* the release now (the state is sticky through
+   ``release``, so a revocation landing in the instant the block exits
+   is raised instead of slipping out silently), and a release error can
+   no longer replace an exception already leaving the ``with`` body -
+   it is chained onto the body's exception as its ``__context__`` with
+   a note attached, the same discipline ``Lock.__exit__`` has carried
+   since 4.1.1
  * Allowed an ``on_lost`` callback to call ``release()`` on the lock it
    is told about: the callback runs on the keep-alive worker thread and
    the teardown joined that same thread, so the obvious reaction to a

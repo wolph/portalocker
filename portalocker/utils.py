@@ -800,6 +800,47 @@ def _restore_positional_writes(fh: types.IO) -> None:  # pragma: not-posix
     fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_APPEND)
 
 
+def _chain_release_error(
+    exc_value: BaseException,
+    release_error: BaseException,
+) -> None:
+    """Chain a release failure under the exception leaving a block.
+
+    The body-exception-wins discipline shared by `Lock.__exit__` and
+    `~portalocker.redis.RedisLock.__exit__`: the release error becomes
+    the ``__context__`` of the exception already propagating out of the
+    ``with`` block and a note is attached, so both remain visible in
+    the traceback while the block's own exception is what the caller
+    sees.
+
+    Errors raised while ``exc_value`` was in flight carry it as their
+    implicit ``__context__``. Splicing the release error underneath
+    ``exc_value`` would then close a reference cycle that loops naive
+    chain walkers, so those back links are snipped first. The walk is
+    bounded instead of tracked, because a release chain deeper than
+    this is not worth preserving.
+
+    Args:
+        exc_value: The exception leaving the ``with`` block.
+        release_error: What `release` raised while ``exc_value`` was in
+            flight.
+    """
+    previous_context: BaseException | None = exc_value.__context__
+    release_error.__context__ = previous_context
+    link: BaseException | None = release_error
+    depth: int = 0
+    while link is not None and depth < 10:
+        if link.__context__ is exc_value:
+            link.__context__ = None
+        link = link.__cause__ or link.__context__
+        depth += 1
+    exc_value.__context__ = release_error
+    with contextlib.suppress(Exception):
+        exc_value.add_note(  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
+            'portalocker release failed; see exception context',
+        )
+
+
 class Lock(LockBase[typing.IO[typing.Any]]):
     """Lock manager with built-in timeout.
 
@@ -1201,26 +1242,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             if exc_value is None:
                 # Nothing to mask, the release error is the only failure.
                 raise
-            previous_context: BaseException | None = exc_value.__context__
-            release_error.__context__ = previous_context
-            # Errors raised while `exc_value` was in flight carry it as
-            # their implicit ``__context__``. Splicing the release error
-            # underneath `exc_value` would then close a reference cycle
-            # that loops naive chain walkers, so snip those back links
-            # first. The walk is bounded instead of tracked, because a
-            # release chain deeper than this is not worth preserving.
-            link: BaseException | None = release_error
-            depth: int = 0
-            while link is not None and depth < 10:
-                if link.__context__ is exc_value:
-                    link.__context__ = None
-                link = link.__cause__ or link.__context__
-                depth += 1
-            exc_value.__context__ = release_error
-            with contextlib.suppress(Exception):
-                exc_value.add_note(  # type: ignore[attr-defined]  # ty: ignore[unresolved-attribute]
-                    'portalocker release failed; see exception context',
-                )
+            _chain_release_error(exc_value, release_error)
         return None
 
     def release(self) -> None:

@@ -1647,6 +1647,16 @@ class RedisLock(utils.LockBase['RedisLock']):
         when no exception is already propagating out of the body: the
         body's own failure is the more specific signal and must not be
         masked (the loss stays observable through `lost` either way).
+        `lost` is read *after* the release: the LOST state is sticky
+        through `release`, so reading it afterwards also catches a
+        revocation that lands in the instant the block is already
+        exiting.
+
+        A release failure follows `Lock.__exit__`'s discipline: with an
+        exception already leaving the body it is chained onto that
+        exception as its ``__context__`` (with a note attached) instead
+        of replacing it, and only with a clean body does the release
+        error itself propagate.
 
         Args:
             exc_type: Type of the exception leaving the block, if any.
@@ -1660,10 +1670,22 @@ class RedisLock(utils.LockBase['RedisLock']):
         Raises:
             ~portalocker.exceptions.LockLostError: The lock was revoked
                 while the block ran and the block raised nothing itself.
+            Exception: Whatever `release` raises, but only when the
+                block itself ended without an exception.
         """
-        was_lost: bool = self.lost
-        self.release()
-        if exc_type is None and was_lost:
+        try:
+            self.release()
+        except Exception as release_error:
+            if exc_value is None:
+                # Nothing to mask, the release error is the only
+                # failure. A loss stays observable through `lost`.
+                raise
+            utils._chain_release_error(  # pyright: ignore[reportPrivateUsage]
+                exc_value,
+                release_error,
+            )
+            return None
+        if exc_type is None and self.lost:
             raise self._lock_lost_error()
         return None
 

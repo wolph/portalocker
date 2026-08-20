@@ -3982,6 +3982,113 @@ def test_redis_exit_does_not_mask_body_exception(
     assert lock.lost
 
 
+def test_redis_exit_raises_loss_landing_during_exit(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A loss racing the block exit itself still surfaces.
+
+    ``__exit__`` used to read ``lost`` before calling ``release``, so a
+    revocation landing in the gap between that read and the release's
+    state transition ended the ``with`` statement looking successful.
+    ``LOST`` is sticky through ``release``, so reading it afterwards
+    closes the window outright: the loss is staged here at the last
+    possible moment, as the first thing the exit-time release does.
+    """
+    channel: str = str(random.random())
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        interrupt_on_lost=False,
+    )
+    original_release: typing.Callable[[], None] = lock.release
+
+    def racing_release() -> None:
+        assert lock.pubsub is not None
+        assert lock.thread is not None
+        lock._on_worker_exception(
+            exceptions.ConnectionError('revoked at block exit'),
+            lock.pubsub,
+            lock.thread,
+        )
+        original_release()
+
+    error: pytest.ExceptionInfo[portalocker.LockLostError]
+    with (  # noqa: PT012
+        pytest.raises(portalocker.LockLostError) as error,
+        lock,
+    ):
+        monkeypatch.setattr(lock, 'release', racing_release)
+
+    assert error.value.channel == channel
+    assert error.value.holder_id == lock.holder_id
+    # The release ran before the raise.
+    assert lock.pubsub is None
+    assert lock.thread is None
+
+
+def test_redis_exit_release_error_does_not_mask_body_exception(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The body's own failure outranks a release error on the way out.
+
+    The same discipline ``Lock.__exit__`` guarantees: when the block is
+    already leaving with an exception, a failure inside the exit-time
+    ``release`` must not replace it. The release error is chained onto
+    the body exception as its ``__context__`` with a note attached, so
+    both stay visible while the body's exception is what propagates.
+    """
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        interrupt_on_lost=False,
+    )
+
+    def broken_release() -> None:
+        raise _TeardownError('release failed at block exit')
+
+    error: pytest.ExceptionInfo[ValueError]
+    with (  # noqa: PT012
+        pytest.raises(ValueError, match='body failed') as error,
+        lock,
+    ):
+        monkeypatch.setattr(lock, 'release', broken_release)
+        raise ValueError('body failed')
+
+    monkeypatch.undo()
+    context: BaseException | None = error.value.__context__
+    assert isinstance(context, _TeardownError)
+    assert 'portalocker release failed; see exception context' in getattr(
+        error.value, '__notes__', []
+    )
+    lock.release()
+
+
+def test_redis_exit_release_error_propagates_after_clean_body(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With a clean body the release error is the only failure and wins."""
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        interrupt_on_lost=False,
+    )
+
+    def broken_release() -> None:
+        raise _TeardownError('release failed at block exit')
+
+    with (  # noqa: PT012
+        pytest.raises(_TeardownError),
+        lock,
+    ):
+        monkeypatch.setattr(lock, 'release', broken_release)
+
+    monkeypatch.undo()
+    lock.release()
+
+
 def test_redis_exit_propagates_body_exception_without_loss(
     redis_connection: ConnectionFactory,
 ) -> None:
