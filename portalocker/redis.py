@@ -396,8 +396,21 @@ class RedisLock(utils.LockBase['RedisLock']):
         if not isinstance(response_channel, str) or not response_channel:
             return
 
-        assert self.connection is not None
-        self.connection.publish(
+        connection: redis.client.Redis | None = self.connection
+        if connection is None:
+            # The connection must outlive every worker thread, so this is
+            # unreachable unless a teardown raced the handler. Dropping
+            # the ping makes this holder look unavailable to the prober,
+            # which is recoverable; raising here would be escalated by
+            # `PubSubWorkerThread.run` into interrupting the whole
+            # process. An `assert` would also be stripped under -O and
+            # degrade into an `AttributeError` with the same escalation.
+            logger.error(
+                'Redis lock %s cannot answer ping: connection is closed',
+                self.holder_id,
+            )
+            return
+        connection.publish(
             response_channel,
             json.dumps(
                 {
@@ -971,10 +984,11 @@ class RedisLock(utils.LockBase['RedisLock']):
           won, since `release` clears `writer_elected`.
         - **Anything else**: somebody incompatible is there, or the probe
           was inconclusive and this lock is not elected. The
-          subscription is released before retrying. That release is the
-          point rather than a detail: a waiter that stayed subscribed
-          would keep inflating the subscriber count that everybody
-          else's probe has to match exactly.
+          subscription is dropped before retrying (`_unsubscribe`, which
+          keeps the connection for the next attempt). That unsubscribe
+          is the point rather than a detail: a waiter that stayed
+          subscribed would keep inflating the subscriber count that
+          everybody else's probe has to match exactly.
 
         With `fail_when_locked` the caller does not want to wait, so the
         first attempt that does not end in ownership raises instead of
@@ -1023,9 +1037,11 @@ class RedisLock(utils.LockBase['RedisLock']):
         if holders is None and self.writer_elected:
             return False
 
-        self.release()
-        logger.debug('Redis lock %s released to retry', self.holder_id)
+        self.writer_elected = False
+        self._unsubscribe()
+        logger.debug('Redis lock %s unsubscribed to retry', self.holder_id)
         if fail_when_locked:
+            self.release()
             raise exceptions.AlreadyLocked()
         return False
 
@@ -1253,31 +1269,25 @@ class RedisLock(utils.LockBase['RedisLock']):
         finally:
             pubsub.close()
 
-    def release(self) -> None:
-        """Give up the lock and undo everything `acquire` set up.
+    def _unsubscribe(self) -> None:
+        """Drop the subscription but keep the connection.
 
-        Stops and joins the keep-alive thread, unsubscribes and closes
-        the pubsub connection, and forgets any election this lock had
-        won. A connection the lock created itself is closed and cleared,
-        so the next `get_connection` builds a fresh one; a connection
-        supplied by the caller is left alone.
-
-        Dropping the subscription is not merely cleanup, it *is* the
-        release: other processes learn the lock is free by no longer
-        seeing this subscriber, with no key to delete and no expiry to
-        wait for.
-
-        The same method doubles as the back-off between attempts.
+        Stops and joins the keep-alive thread, then unsubscribes and
+        closes the pubsub. This is the back-off between attempts:
         `_resolve_lock_holders` calls it after an unsuccessful probe so
-        that a waiting lock stops being counted as a subscriber, and
-        `_start_subscription` calls it to roll back a subscribe that
-        failed halfway.
+        that a waiting lock stops being counted as a subscriber, and the
+        next attempt subscribes from scratch on the same connection.
 
-        Calling this when nothing was acquired is harmless - it still
-        closes a self-created connection if one exists - which is what
-        makes both that rollback and `__del__` safe.
+        Keeping the connection alive here is not an optimisation but a
+        correctness requirement. `channel_handler` answers pings over
+        `connection` from the worker thread, and `acquire` keeps working
+        with the connection it fetched before its retry loop. Closing
+        and clearing the connection between attempts is exactly the bug
+        that used to interrupt the whole process: the next attempt
+        resubscribed on the stale reference while ``self.connection``
+        was `None`, the handler's assert fired on the worker thread, and
+        `PubSubWorkerThread.run` escalated it to the main thread.
         """
-        self.writer_elected = False
         if self.thread:  # pragma: no branch
             self.thread.stop()
             self.thread.join()
@@ -1291,6 +1301,35 @@ class RedisLock(utils.LockBase['RedisLock']):
             )
             self.pubsub.close()
             self.pubsub = None
+
+    def release(self) -> None:
+        """Give up the lock and undo everything `acquire` set up.
+
+        Stops and joins the keep-alive thread, unsubscribes and closes
+        the pubsub connection (see `_unsubscribe`), and forgets any
+        election this lock had won. A connection the lock created itself
+        is closed and cleared, so the next `get_connection` builds a
+        fresh one; a connection supplied by the caller is left alone.
+
+        Dropping the subscription is not merely cleanup, it *is* the
+        release: other processes learn the lock is free by no longer
+        seeing this subscriber, with no key to delete and no expiry to
+        wait for.
+
+        This is the terminal teardown. The back-off between attempts is
+        `_unsubscribe`, which keeps the connection so the retry loop and
+        the ping handler can keep using it; this method is for when the
+        lock is done, either released by the caller or giving up with
+        `AlreadyLocked`. `_start_subscription` also calls it to roll
+        back a subscribe that failed halfway, which is terminal too: the
+        error propagates out of `acquire`.
+
+        Calling this when nothing was acquired is harmless - it still
+        closes a self-created connection if one exists - which is what
+        makes both that rollback and `__del__` safe.
+        """
+        self.writer_elected = False
+        self._unsubscribe()
 
         # Only close connections we created ourselves; caller-supplied ones
         # are left untouched. Clear it so a later acquire recreates it.

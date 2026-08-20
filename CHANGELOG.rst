@@ -1,3 +1,14 @@
+4.1.1:
+
+ * Fixed a contended ``RedisLock`` with a self-created connection (no
+   ``connection=`` argument) killing its own worker thread and delivering a
+   ``KeyboardInterrupt`` to the main thread. The release between retries
+   closed and cleared the connection while ``acquire`` kept resubscribing on
+   a stale reference, so ``channel_handler`` failed its connection assert
+   and the failure was escalated to the main thread. Retries now drop only
+   the subscription and keep the connection; the connection is closed on
+   final release or when ``acquire`` gives up (#136)
+
 4.1.0:
 
  * Documentation release. No runtime behaviour changed; the only edits to

@@ -9,6 +9,7 @@ server, mirroring real usage.
 
 import _thread
 import json
+import logging
 import os
 import random
 import threading
@@ -573,6 +574,196 @@ def test_redis_relock(redis_connection: ConnectionFactory) -> None:
     time.sleep(0.01)
 
     lock_a.release()
+
+
+def test_redis_contended_retry_with_self_created_connection(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for issue #136.
+
+    A waiter that creates its own connection (no ``connection=`` argument)
+    used to break on its first contended retry: the release-to-retry closed
+    and cleared ``self.connection`` while ``acquire`` kept resubscribing on
+    a stale local reference, so ``channel_handler`` hit its
+    ``assert self.connection is not None`` on the worker thread and
+    ``PubSubWorkerThread.run`` escalated that to ``interrupt_main``,
+    delivering a ``KeyboardInterrupt`` to the waiting main thread.
+    """
+    channel: str = str(random.random())
+
+    interrupts: list[None] = []
+    monkeypatch.setattr(
+        _thread, 'interrupt_main', lambda: interrupts.append(None)
+    )
+
+    thread_errors: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, 'excepthook', thread_errors.append)
+
+    # The bug needs close_connection=True, so the locks must create their
+    # own connections. The helper routes the lazy connection creation to
+    # this test's (fake or live) server instead of passing a connection in.
+    holder: redis.RedisLock = _self_connecting_lock(
+        redis_connection, monkeypatch, channel, timeout=5, check_interval=0.05
+    )
+    waiter: redis.RedisLock = _self_connecting_lock(
+        redis_connection, monkeypatch, channel, timeout=5, check_interval=0.05
+    )
+
+    holder.acquire()
+    release_timer: threading.Timer = threading.Timer(0.5, holder.release)
+    release_timer.start()
+    try:
+        # The waiter must retry against the held lock without crashing its
+        # worker thread and acquire once the holder lets go.
+        with waiter:
+            pass
+    finally:
+        release_timer.join()
+        holder.release()
+        waiter.release()
+
+    assert not interrupts, 'worker thread escalated a failure to main'
+    assert not thread_errors, f'worker thread died: {thread_errors}'
+
+
+def _self_connecting_lock(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    channel: str,
+    **kwargs: typing.Any,
+) -> redis.RedisLock:
+    """Build a lock that lazily creates its own connection (no
+    ``connection=`` argument, so ``close_connection`` stays True) while
+    still connecting to this test's fake or live server.
+    """
+
+    def get_connection(self: redis.RedisLock) -> client.Redis:
+        if not self.connection:
+            self.connection = redis_connection()
+        return self.connection
+
+    monkeypatch.setattr(redis.RedisLock, 'get_connection', get_connection)
+    return redis.RedisLock(
+        channel,
+        unavailable_timeout=0.2,
+        thread_sleep_time=0.01,
+        **kwargs,
+    )
+
+
+def test_redis_fail_when_locked_closes_created_connection(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contended fail_when_locked attempt must fully tear down: the
+    lock-created connection is closed and cleared, not left idling.
+    """
+    channel: str = str(random.random())
+    holder: redis.RedisLock = _self_connecting_lock(
+        redis_connection, monkeypatch, channel, timeout=5
+    )
+    waiter: redis.RedisLock = _self_connecting_lock(
+        redis_connection, monkeypatch, channel, fail_when_locked=True
+    )
+
+    holder.acquire()
+    try:
+        with pytest.raises(portalocker.AlreadyLocked):
+            waiter.acquire()
+    finally:
+        holder.release()
+
+    assert waiter.connection is None
+    assert waiter.pubsub is None
+    assert waiter.thread is None
+
+
+def test_redis_timeout_expiry_closes_created_connection(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A waiter that gives up on timeout leaves no connection behind."""
+    channel: str = str(random.random())
+    holder: redis.RedisLock = _self_connecting_lock(
+        redis_connection, monkeypatch, channel, timeout=5
+    )
+    waiter: redis.RedisLock = _self_connecting_lock(
+        redis_connection,
+        monkeypatch,
+        channel,
+        timeout=0.3,
+        check_interval=0.05,
+    )
+
+    holder.acquire()
+    try:
+        with pytest.raises(portalocker.AlreadyLocked):
+            waiter.acquire()
+    finally:
+        holder.release()
+
+    assert waiter.connection is None
+    assert waiter.pubsub is None
+    assert waiter.thread is None
+
+
+def test_redis_retry_keeps_caller_supplied_connection(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """Contended retries never close or replace a caller-supplied
+    connection.
+    """
+    channel: str = str(random.random())
+    holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        timeout=5,
+        unavailable_timeout=0.2,
+        thread_sleep_time=0.01,
+    )
+    waiter_connection: client.Redis = redis_connection()
+    waiter: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=waiter_connection,
+        timeout=0.3,
+        check_interval=0.05,
+        unavailable_timeout=0.2,
+        thread_sleep_time=0.01,
+    )
+
+    holder.acquire()
+    try:
+        with pytest.raises(portalocker.AlreadyLocked):
+            waiter.acquire()
+    finally:
+        holder.release()
+
+    assert waiter.connection is waiter_connection
+    assert waiter_connection.ping()
+
+
+def test_redis_channel_handler_without_connection(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ping arriving after the connection is gone is dropped with an
+    error instead of raising (which the worker thread would escalate to
+    ``interrupt_main``).
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    assert lock.connection is None
+
+    with caplog.at_level(logging.ERROR, logger='portalocker.redis'):
+        lock.channel_handler(
+            {
+                'type': 'message',
+                'data': json.dumps({'response_channel': 'somewhere'}),
+            }
+        )
+
+    assert any(
+        'cannot answer ping' in record.message for record in caplog.records
+    )
 
 
 def test_redis_get_connection_creates_and_caches() -> None:
