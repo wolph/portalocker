@@ -206,7 +206,10 @@ channels:
 - An ``on_lost`` callback passed to the constructor fires exactly once
   per loss, on the keep-alive thread. Keep it short, do not take
   application locks inside it, and expect anything it raises to be
-  logged rather than propagated.
+  logged rather than propagated. Calling ``release()`` on the lost
+  lock inside the callback is fine: the teardown skips joining the
+  worker thread it runs on, and that thread exits on its own right
+  after the callback returns.
 
 By default a loss additionally interrupts the main thread with a
 `KeyboardInterrupt`, which is the historical behaviour and every bit as

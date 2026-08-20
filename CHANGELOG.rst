@@ -94,6 +94,13 @@
    spuriously, at the cost of non-blocking latency of up to ``timeout``
    on a noisy channel. Pass ``timeout=0`` to keep the strict
    single-attempt behaviour (#143)
+ * Allowed an ``on_lost`` callback to call ``release()`` on the lock it
+   is told about: the callback runs on the keep-alive worker thread and
+   the teardown joined that same thread, so the obvious reaction to a
+   loss raised ``RuntimeError: cannot join current thread`` after most
+   of the teardown had already run. The join is skipped on the worker
+   thread now; the thread exits on its own right after the callback
+   returns and the instance ends up fully torn down and reusable
  * Fixed a failed ``RedisLock.acquire`` stranding a live subscription
    when the command connection failed *after* the subscribe but before
    the decision (a ``PUBSUB NUMSUB`` timeout, for example): the error

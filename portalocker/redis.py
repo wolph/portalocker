@@ -576,7 +576,11 @@ class RedisLock(utils.LockBase['RedisLock']):
             with this lock as its only argument. It runs on the
             keep-alive worker thread, so keep it short, do not block in
             it, and do not take application locks inside it; anything it
-            raises is caught and logged rather than propagated. The
+            raises is caught and logged rather than propagated.
+            Calling `release` on the lost lock inside the callback is
+            allowed: the teardown skips joining the worker thread it is
+            running on, and that thread exits on its own right after
+            the callback returns. The
             loss is recorded first and the callback runs afterwards, so
             `lost` can already be `True` while the callback has not run
             yet: code that needs the callback to have completed must
@@ -3039,6 +3043,14 @@ class RedisLock(utils.LockBase['RedisLock']):
         the acquire. ``is_alive`` would be the wrong test: a thread that
         already finished is no longer alive but can still be joined.
 
+        The join is also skipped when this method runs *on* the worker
+        thread itself, because joining the current thread raises
+        ``RuntimeError`` too. That is a supported path, not an anomaly:
+        an ``on_lost`` callback calling `release` executes on the
+        worker thread, and the worker is already stopping by then, so
+        skipping the join only means the thread finishes on its own a
+        moment after the release returns.
+
         Keeping the connection alive here is not an optimisation but a
         correctness requirement. `channel_handler` answers pings over
         `connection` from the worker thread, and `acquire` keeps working
@@ -3065,7 +3077,10 @@ class RedisLock(utils.LockBase['RedisLock']):
         if thread is not None and same_process:
             try:
                 thread.stop()
-                if thread.ident is not None:
+                if (
+                    thread.ident is not None
+                    and thread is not threading.current_thread()
+                ):
                     thread.join()
                     time.sleep(0.01)
             except Exception as error:

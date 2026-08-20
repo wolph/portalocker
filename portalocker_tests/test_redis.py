@@ -5123,6 +5123,69 @@ def test_redis_release_in_forked_child_leaves_parent_lock_alone(
     command_connection.close()
 
 
+def test_redis_release_from_on_lost_callback_succeeds(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ``on_lost`` callback may release the lock it is told about.
+
+    The callback runs on the keep-alive worker thread, and ``release``
+    joins that thread during teardown. Joining yourself raises
+    ``RuntimeError: cannot join current thread``, so a callback that
+    reacted to the loss with the obvious ``lock.release()`` blew up
+    after most of the teardown had already run. The join is skipped on
+    the worker thread now: the callback's release completes quietly,
+    the worker exits on its own right after, and the instance is fully
+    torn down and reusable.
+    """
+    events: list[str] = []
+
+    def releasing_callback(lost_lock: redis.RedisLock) -> None:
+        try:
+            lost_lock.release()
+        except BaseException as error:  # noqa: BLE001
+            events.append(f'release raised {type(error).__name__}')
+        else:
+            events.append('release ok')
+
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        on_lost=releasing_callback,
+        interrupt_on_lost=False,
+    )
+
+    lock.acquire()
+    worker: redis.PubSubWorkerThread | None = lock.thread
+    assert worker is not None
+    _break_subscription_read(
+        monkeypatch,
+        lock,
+        exceptions.ConnectionError('connection killed'),
+    )
+
+    assert _wait_for(lambda: bool(events))
+    assert events == ['release ok']
+    # The worker was not joined, so it winds down on its own.
+    assert _wait_for(lambda: not worker.is_alive())
+    assert lock.pubsub is None
+    assert lock.thread is None
+    assert lock._subscription_client is None
+    # The loss stays observable through the release, as always.
+    assert lock.lost
+
+    # A released-from-callback instance is a normal released instance:
+    # a later main-thread release is a quiet no-op and a fresh acquire
+    # resets and takes the lock again.
+    lock.release()
+    assert lock.acquire(timeout=5) is lock
+    # Read through a local: mypy narrows the property to True from the
+    # assert above and would call a direct re-check unreachable.
+    lost_after_reacquire: bool = lock.lost
+    assert not lost_after_reacquire
+    lock.release()
+
+
 def test_redis_on_lost_base_exception_is_contained(
     redis_connection: ConnectionFactory,
     monkeypatch: pytest.MonkeyPatch,
