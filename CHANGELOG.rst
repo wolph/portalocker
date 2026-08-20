@@ -8,6 +8,19 @@
    and the failure was escalated to the main thread. Retries now drop only
    the subscription and keep the connection; the connection is closed on
    final release or when ``acquire`` gives up (#136)
+ * Closed three ``RedisLock.acquire`` races that could let two writers both
+   conclude they held the lock exclusively. Subscribing now waits for the
+   server's subscribe confirmation instead of sleeping 10ms, so a subscriber
+   count can no longer run before the server registered the subscription.
+   Mode promotions and ping answers now serialize on a ``threading.Lock``,
+   so a probe can no longer read a torn or stale ``pending`` from a writer
+   mid-promotion. A probe now re-checks the subscriber count immediately
+   before pinging as well as after collecting replies. Count-preserving
+   churn between those two checks remains undetectable because ``PUBSUB
+   NUMSUB`` reports counts rather than identities, and is tolerated because
+   losing waiters retry. Also documented that ``RedisLock`` requires a
+   single standalone Redis endpoint, since ``PUBSUB NUMSUB`` is node-local
+   in cluster and replica setups (#139)
 
 4.1.0:
 

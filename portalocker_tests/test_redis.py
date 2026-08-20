@@ -1093,6 +1093,8 @@ def test_redis_collect_holders_detects_subscriber_churn(
 ) -> None:
     """A holder set that changes mid-probe invalidates the sample.
 
+    The count matches when the ping goes out and differs after the
+    replies are in, so the churn happened while the probe was running.
     In the integration tests this only happens when a competing waiter
     resubscribes at exactly the wrong moment, so it has to be covered
     deterministically here.
@@ -1107,8 +1109,13 @@ def test_redis_collect_holders_detects_subscriber_churn(
         thread_sleep_time=0.001,
     )
     pubsub: _ResponsePubSub = _ResponsePubSub([])
+    subscriber_counts: list[int] = [2, 1]
     monkeypatch.setattr(lock, '_get_pubsub', lambda connection: pubsub)
-    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection: 1)
+    monkeypatch.setattr(
+        lock,
+        '_get_subscriber_count',
+        lambda connection: subscriber_counts.pop(0),
+    )
     monkeypatch.setattr(connection, 'publish', lambda channel, message: 0)
 
     holders: list[redis.RedisLockHolder] | None = lock._collect_lock_holders(
@@ -1118,6 +1125,46 @@ def test_redis_collect_holders_detects_subscriber_churn(
     )
 
     assert holders is None
+    assert subscriber_counts == []
+
+
+def test_redis_collect_holders_aborts_before_ping_on_count_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A count that moved before the ping abandons the probe unsent.
+
+    The subscriber count is re-checked immediately before the ping is
+    published. A probe whose expectation is already stale would collect
+    replies describing a channel that no longer exists in that shape, so
+    it is abandoned before putting any traffic on the channel.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.001,
+    )
+    pubsub: _ResponsePubSub = _ResponsePubSub([])
+    published: list[str] = []
+    monkeypatch.setattr(lock, '_get_pubsub', lambda connection: pubsub)
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection: 3)
+    monkeypatch.setattr(
+        connection,
+        'publish',
+        lambda channel, message: published.append(channel),
+    )
+
+    holders: list[redis.RedisLockHolder] | None = lock._collect_lock_holders(
+        connection,
+        expected_subscribers=2,
+        timeout=0.01,
+    )
+
+    assert holders is None
+    assert published == []
 
 
 def test_redis_collect_holders_kills_only_unresponsive_holder(
@@ -1484,3 +1531,294 @@ def test_redis_acquire_rolls_back_pubsub_on_subscribe_error(
     # AssertionError from a stale ``self.pubsub``.
     with pytest.raises(_SubscribeError):
         lock.acquire()
+
+
+class _ConfirmationPubSub:
+    """Stand-in pubsub for ``_start_subscription`` ordering tests.
+
+    Records every call in order. ``get_message`` replays *confirmations*
+    one frame per call and, once they run out, blocks for ``timeout`` and
+    returns ``None`` like the real client does on an idle connection.
+    ``subscribed`` mirrors redis-py's send-time semantics: it is set the
+    moment ``subscribe`` is called, not when the server confirms.
+    """
+
+    def __init__(
+        self,
+        calls: list[str],
+        confirmations: list[dict[str, typing.Any] | None],
+    ) -> None:
+        self._calls: list[str] = calls
+        self._confirmations: list[dict[str, typing.Any] | None] = confirmations
+        self.subscribed: bool = False
+
+    def execute_command(self, *args: typing.Any) -> None:
+        self._calls.append('execute_command')
+
+    def parse_response(self) -> None:
+        self._calls.append('parse_response')
+
+    def subscribe(self, **channels: typing.Any) -> None:
+        self._calls.append('subscribe')
+        self.subscribed = True
+
+    def get_message(self, timeout: float) -> dict[str, typing.Any] | None:
+        self._calls.append('get_message')
+        if self._confirmations:
+            return self._confirmations.pop(0)
+        time.sleep(timeout)
+        return None
+
+    def unsubscribe(self, *channels: str) -> None:
+        self._calls.append('unsubscribe')
+
+    def close(self) -> None:
+        self._calls.append('close')
+
+
+def _make_stub_worker_thread(calls: list[str]) -> type:
+    """Build a worker-thread stand-in that records when it is started."""
+
+    class StubWorkerThread:
+        def __init__(
+            self,
+            pubsub: typing.Any,
+            sleep_time: float,
+            daemon: bool = False,
+        ) -> None:
+            calls.append('thread_created')
+
+        def start(self) -> None:
+            calls.append('thread_start')
+
+        def stop(self) -> None:
+            calls.append('thread_stop')
+
+        def join(self) -> None:
+            calls.append('thread_join')
+
+    return StubWorkerThread
+
+
+def test_redis_start_subscription_waits_for_subscribe_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The subscribe confirmation is drained before the worker starts.
+
+    The worker thread consumes frames invisibly, so the confirmation must
+    be read on the main thread first: processing it proves the server has
+    registered the subscription, which is what makes a later ``PUBSUB
+    NUMSUB`` count this holder. A bare ``time.sleep`` barrier gives no
+    such guarantee, so no sleep at all may remain on this path.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.001,
+        unavailable_timeout=0.2,
+    )
+    calls: list[str] = []
+    pubsub: _ConfirmationPubSub = _ConfirmationPubSub(
+        calls,
+        confirmations=[{'type': 'subscribe'}],
+    )
+    monkeypatch.setattr(lock, '_get_pubsub', lambda connection: pubsub)
+    monkeypatch.setattr(
+        redis,
+        'PubSubWorkerThread',
+        _make_stub_worker_thread(calls),
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(time, 'sleep', sleeps.append)
+
+    lock._start_subscription(connection)
+
+    assert pubsub.subscribed
+    assert calls.index('subscribe') < calls.index('get_message')
+    assert calls.index('get_message') < calls.index('thread_start')
+    assert sleeps == []
+    lock.pubsub = None
+    lock.thread = None
+
+
+def test_redis_start_subscription_raises_without_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No confirmation within the timeout fails the subscription.
+
+    Returning without the confirmation would let ``acquire`` count
+    subscribers before the server registered this one, which is exactly
+    the fast-path race the wait exists to close. The failure must roll
+    back like any other subscription error: pubsub closed and cleared,
+    no worker thread started.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.001,
+        unavailable_timeout=0.05,
+    )
+    calls: list[str] = []
+    pubsub: _ConfirmationPubSub = _ConfirmationPubSub(
+        calls,
+        confirmations=[None, {'type': 'message'}],
+    )
+    monkeypatch.setattr(lock, '_get_pubsub', lambda connection: pubsub)
+    monkeypatch.setattr(
+        redis,
+        'PubSubWorkerThread',
+        _make_stub_worker_thread(calls),
+    )
+
+    with pytest.raises(portalocker.LockException, match='confirm'):
+        lock._start_subscription(connection)
+
+    assert lock.pubsub is None
+    assert lock.thread is None
+    assert 'thread_start' not in calls
+    assert 'close' in calls
+
+
+def test_redis_channel_handler_serializes_with_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ping answer cannot be computed while a promotion is in flight.
+
+    The handler snapshots ``(holder_id, mode)`` under ``_mode_lock``, the
+    same lock every promotion takes, so an answer that starts after a
+    promotion began reports the promoted mode. Before the fix the handler
+    read ``self.mode`` unsynchronized and could answer ``pending`` for a
+    writer already committed to promoting, letting a lower-id writer
+    elect itself as a second exclusive holder.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+    )
+    published: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        connection,
+        'publish',
+        lambda channel, message: published.append((channel, message)),
+    )
+    answered: threading.Event = threading.Event()
+
+    def handle() -> None:
+        lock.channel_handler(
+            {
+                'type': 'message',
+                'data': json.dumps({'response_channel': 'resp'}),
+            }
+        )
+        answered.set()
+
+    handler_thread: threading.Thread = threading.Thread(target=handle)
+    lock._mode_lock.acquire()
+    try:
+        # The promotion is in flight: the handler must not answer yet.
+        handler_thread.start()
+        assert not answered.wait(timeout=0.2)
+        assert published == []
+        lock.mode = redis.RedisLockMode.EXCLUSIVE
+    finally:
+        lock._mode_lock.release()
+
+    handler_thread.join(timeout=10)
+    assert answered.is_set()
+    assert len(published) == 1
+    answer: dict[str, typing.Any] = json.loads(published[0][1])
+    assert answer['mode'] == 'exclusive'
+    assert answer['holder_id'] == lock.holder_id
+
+
+class _RecordingModeLock:
+    """Context-manager stand-in for ``_mode_lock`` that counts entries."""
+
+    def __init__(self) -> None:
+        self.entries: int = 0
+
+    def __enter__(self) -> '_RecordingModeLock':
+        self.entries += 1
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        pass
+
+
+def test_redis_resolve_promotion_takes_mode_lock() -> None:
+    """The elected-writer promotion runs under ``_mode_lock``."""
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.holder_id = 'writer'
+    recording: _RecordingModeLock = _RecordingModeLock()
+    lock._mode_lock = typing.cast('threading.Lock', recording)
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            holder_id=lock.holder_id,
+            mode=redis.RedisLockMode.PENDING,
+        ),
+    ]
+
+    assert lock._resolve_lock_holders(holders, fail_when_locked=False)
+
+    assert lock.mode is redis.RedisLockMode.EXCLUSIVE
+    assert recording.entries == 1
+
+
+def test_redis_fast_path_promotion_takes_mode_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The uncontended fast-path promotion runs under ``_mode_lock``."""
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        check_interval=0.001,
+        timeout=1,
+    )
+    recording: _RecordingModeLock = _RecordingModeLock()
+    lock._mode_lock = typing.cast('threading.Lock', recording)
+    sentinel_pubsub: client.PubSub = typing.cast('client.PubSub', object())
+
+    def start_subscription(connection_: client.Redis) -> None:
+        lock.pubsub = sentinel_pubsub
+
+    monkeypatch.setattr(lock, '_start_subscription', start_subscription)
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection: 1)
+
+    assert lock.acquire() is lock
+
+    assert lock.mode is redis.RedisLockMode.EXCLUSIVE
+    assert recording.entries == 1
+    lock.pubsub = None
+    connection.close()
+
+
+def test_redis_start_subscription_returns_subscribed(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """Against a real (fake or live) server the pubsub is subscribed."""
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+    )
+    lock._start_subscription(lock.get_connection())
+    try:
+        assert lock.pubsub is not None
+        assert lock.pubsub.subscribed
+    finally:
+        lock.release()
