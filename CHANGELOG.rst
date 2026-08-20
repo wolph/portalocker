@@ -1,3 +1,26 @@
+4.2.0:
+
+ * Fixed ``RedisLock`` non-blocking acquisition raising ``AlreadyLocked``
+   for the writer that had just won the election. The fail check ran
+   before the promotion check, so two ``fail_when_locked`` writers on a
+   free channel could both fail. The winner now takes the lock when no
+   shared holder remains, so exactly one of two non-blocking contenders
+   succeeds (#143)
+ * Fixed an elected ``RedisLock`` writer being usurped by a later writer
+   with a lower holder id. Holder records now carry an ``elected`` field
+   and pending writers defer to an advertised incumbent instead of
+   rerunning the election against it. Records keep protocol version 1,
+   4.0 and 4.1 holders ignore the field and keep the old election on
+   mixed channels, so no coordinated upgrade is needed. Protection is
+   complete once every writer on a channel runs 4.2 or later (#143)
+ * ``RedisLock`` with ``fail_when_locked`` now raises only on a
+   conclusive probe showing the channel is held. Inconclusive probes
+   retry within ``timeout``, which also lets a non-blocking acquire
+   succeed after reaping a crashed holder instead of failing
+   spuriously, at the cost of non-blocking latency of up to ``timeout``
+   on a noisy channel. Pass ``timeout=0`` to keep the strict
+   single-attempt behaviour (#143)
+
 4.1.1:
 
  * Fixed two concurrent ``release()`` calls on one ``Lock`` unlocking a

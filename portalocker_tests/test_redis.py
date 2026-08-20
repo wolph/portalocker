@@ -430,8 +430,17 @@ def test_redis_pending_writers_are_elected_by_holder_id(
     assert not errors
 
 
-def test_redis_elected_writer_waits_for_shared_holders() -> None:
-    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+def test_redis_elected_writer_waits_for_shared_holders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+    )
     lock.holder_id = 'writer'
     holders: list[redis.RedisLockHolder] = [
         redis.RedisLockHolder(
@@ -447,6 +456,25 @@ def test_redis_elected_writer_waits_for_shared_holders() -> None:
     assert not lock._resolve_lock_holders(holders, fail_when_locked=False)
     assert lock.writer_elected
     assert lock.mode is redis.RedisLockMode.PENDING
+
+    # While the readers drain the ping reply advertises the election, so
+    # later writers can defer to this incumbent instead of usurping it.
+    published: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        connection,
+        'publish',
+        lambda channel, message: published.append((channel, message)),
+    )
+    lock.channel_handler(
+        {
+            'type': 'message',
+            'data': json.dumps({'response_channel': 'resp'}),
+        }
+    )
+    reply: dict[str, typing.Any] = json.loads(published[0][1])
+    assert reply['elected'] is True
+    assert reply['mode'] == 'pending'
+
     assert not lock._resolve_lock_holders(None, fail_when_locked=False)
 
     # Once the last shared holder is gone the elected writer acquires. In
@@ -511,6 +539,650 @@ def test_redis_elected_writer_reuses_subscription(
     assert lock.mode is redis.RedisLockMode.EXCLUSIVE
     lock.pubsub = None
     connection.close()
+
+
+class _IdlePubSub:
+    """Stand-in pubsub that ``_unsubscribe`` can tear down quietly.
+
+    ``connection`` is `None`, so the unsubscribe step is skipped, and
+    ``close`` is a no-op, mirroring a pubsub whose worker thread already
+    closed the subscription.
+    """
+
+    connection: None = None
+
+    def close(self) -> None:
+        pass
+
+
+def _idle_pubsub() -> client.PubSub:
+    return typing.cast('client.PubSub', _IdlePubSub())
+
+
+def test_redis_nonblocking_election_winner_promotes() -> None:
+    """A fail_when_locked winner takes a channel that holds no readers.
+
+    Regression test for issue #143 defect 1: the fail check used to run
+    before the promotion check, so the election winner on a channel of
+    pending writers raised ``AlreadyLocked`` even though nobody held the
+    lock and it could have promoted outright.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.holder_id = 'aaa'
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            holder_id='aaa',
+            mode=redis.RedisLockMode.PENDING,
+        ),
+        redis.RedisLockHolder(
+            holder_id='bbb',
+            mode=redis.RedisLockMode.PENDING,
+        ),
+    ]
+
+    assert lock._resolve_lock_holders(holders, fail_when_locked=True)
+
+    assert lock.mode is redis.RedisLockMode.EXCLUSIVE
+    assert lock.writer_elected
+
+
+def test_redis_nonblocking_election_loser_raises() -> None:
+    """The election loser raises and tears down fully."""
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.holder_id = 'bbb'
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            holder_id='aaa',
+            mode=redis.RedisLockMode.PENDING,
+        ),
+        redis.RedisLockHolder(
+            holder_id='bbb',
+            mode=redis.RedisLockMode.PENDING,
+        ),
+    ]
+
+    with pytest.raises(portalocker.AlreadyLocked):
+        lock._resolve_lock_holders(holders, fail_when_locked=True)
+
+    assert lock.pubsub is None
+    assert not lock.writer_elected
+
+
+def test_redis_nonblocking_elected_with_readers_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fail_when_locked winner facing live readers raises.
+
+    Non-blocking means not waiting for the readers to drain. The raise
+    must never leave ``writer_elected`` set on the way out: the instance
+    releases its subscription, so it must not have advertised an
+    election it will not use.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.holder_id = 'aaa'
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            holder_id='aaa',
+            mode=redis.RedisLockMode.PENDING,
+        ),
+        redis.RedisLockHolder(
+            holder_id='reader',
+            mode=redis.RedisLockMode.SHARED,
+        ),
+    ]
+    flags_at_release: list[bool] = []
+    original_release: typing.Callable[[], None] = lock.release
+
+    def recording_release() -> None:
+        flags_at_release.append(lock.writer_elected)
+        original_release()
+
+    monkeypatch.setattr(lock, 'release', recording_release)
+
+    with pytest.raises(portalocker.AlreadyLocked):
+        lock._resolve_lock_holders(holders, fail_when_locked=True)
+
+    assert flags_at_release == [False]
+    assert not lock.writer_elected
+
+
+def test_redis_writer_defers_to_elected_holder() -> None:
+    """A pending writer never elects itself past an advertised incumbent.
+
+    Regression test for issue #143 defect 2: the id sort alone let a
+    lower-id newcomer usurp a writer that had already won a previous
+    election and was waiting for the readers to drain.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.holder_id = 'aaa'
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            holder_id='aaa',
+            mode=redis.RedisLockMode.PENDING,
+            elected=False,
+        ),
+        redis.RedisLockHolder(
+            holder_id='zzz',
+            mode=redis.RedisLockMode.PENDING,
+            elected=True,
+        ),
+    ]
+
+    assert not lock._writer_is_elected(holders)
+
+
+def test_redis_incumbent_keeps_election_against_new_format_newcomer() -> None:
+    """An incumbent is not usurped by a lower-id 4.2 newcomer.
+
+    The newcomer advertises ``elected: false``, so it defers and the
+    incumbent keeps waiting for the reader to drain, then promotes.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.holder_id = 'z-incumbent'
+    lock.writer_elected = True
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            holder_id='z-incumbent',
+            mode=redis.RedisLockMode.PENDING,
+            elected=True,
+        ),
+        redis.RedisLockHolder(
+            holder_id='a-newcomer',
+            mode=redis.RedisLockMode.PENDING,
+            elected=False,
+        ),
+        redis.RedisLockHolder(
+            holder_id='reader',
+            mode=redis.RedisLockMode.SHARED,
+        ),
+    ]
+
+    assert not lock._resolve_lock_holders(holders, fail_when_locked=False)
+    assert lock.writer_elected
+    assert lock.mode is redis.RedisLockMode.PENDING
+
+    # The same probe without the reader promotes the incumbent.
+    assert lock._resolve_lock_holders(holders[:2], fail_when_locked=False)
+    promoted_mode: redis.RedisLockMode = lock.mode
+    assert promoted_mode is redis.RedisLockMode.EXCLUSIVE
+    assert lock.writer_elected
+
+
+def test_redis_incumbent_forfeits_to_old_format_lower_id() -> None:
+    """An incumbent forfeits to a lower-id pre-4.2 pending writer.
+
+    A record without the ``elected`` field comes from a 4.0 or 4.1
+    holder, which runs the plain id election and cannot be told to
+    defer. Forfeiting reproduces the pre-4.2 semantics exactly, so a
+    mixed channel is never less safe than 4.1.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.holder_id = 'z-incumbent'
+    lock.writer_elected = True
+    lock.pubsub = _idle_pubsub()
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            holder_id='z-incumbent',
+            mode=redis.RedisLockMode.PENDING,
+            elected=True,
+        ),
+        redis.RedisLockHolder(
+            holder_id='a-old-writer',
+            mode=redis.RedisLockMode.PENDING,
+        ),
+        redis.RedisLockHolder(
+            holder_id='reader',
+            mode=redis.RedisLockMode.SHARED,
+        ),
+    ]
+
+    assert not lock._resolve_lock_holders(holders, fail_when_locked=False)
+
+    assert not lock.writer_elected
+    assert lock.pubsub is None
+
+
+def test_redis_incumbent_forfeits_to_exclusive_holder() -> None:
+    """An incumbent forfeits when anybody owns the lock exclusively.
+
+    The probe outranks the incumbent's memory regardless of holder ids,
+    and legacy holders are recorded as exclusive, so this rule also
+    covers every reply the incumbent cannot reason about.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.holder_id = 'a-incumbent'
+    lock.writer_elected = True
+    lock.pubsub = _idle_pubsub()
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            holder_id='a-incumbent',
+            mode=redis.RedisLockMode.PENDING,
+            elected=True,
+        ),
+        redis.RedisLockHolder(
+            holder_id='z-owner',
+            mode=redis.RedisLockMode.EXCLUSIVE,
+            elected=True,
+        ),
+    ]
+
+    assert not lock._resolve_lock_holders(holders, fail_when_locked=False)
+
+    assert not lock.writer_elected
+    assert lock.pubsub is None
+
+
+def test_redis_two_incumbents_resolve_by_holder_id() -> None:
+    """Two incumbents resolve deterministically: lower id keeps.
+
+    Both advertise ``elected: true`` after a reply-staleness race let
+    them win overlapping elections. Each computes the same answer from
+    the same records, so the lower id keeps the election and the higher
+    id forfeits within one probe round.
+    """
+    low: redis.RedisLock = redis.RedisLock(str(random.random()))
+    low.holder_id = 'a-low'
+    low.writer_elected = True
+    high: redis.RedisLock = redis.RedisLock(str(random.random()))
+    high.holder_id = 'z-high'
+    high.writer_elected = True
+    high.pubsub = _idle_pubsub()
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            holder_id='a-low',
+            mode=redis.RedisLockMode.PENDING,
+            elected=True,
+        ),
+        redis.RedisLockHolder(
+            holder_id='z-high',
+            mode=redis.RedisLockMode.PENDING,
+            elected=True,
+        ),
+        redis.RedisLockHolder(
+            holder_id='reader',
+            mode=redis.RedisLockMode.SHARED,
+        ),
+    ]
+
+    assert not low._resolve_lock_holders(holders, fail_when_locked=False)
+    assert low.writer_elected
+
+    assert not high._resolve_lock_holders(holders, fail_when_locked=False)
+    assert not high.writer_elected
+    assert high.pubsub is None
+
+
+def test_redis_parse_lock_response_reads_elected_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The elected field parses as bool or None and rides protocol 1.
+
+    `None` marks a record that predates the field, which is the signal
+    the mixed-cluster fallback keys on, so a non-bool value degrades to
+    `None` rather than to a guess.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+    )
+    base: dict[str, typing.Any] = {
+        'holder_id': 'peer',
+        'mode': 'pending',
+        'protocol': 1,
+    }
+
+    assert (
+        lock._parse_lock_response(
+            json.dumps(dict(base, elected=True)),
+            0,
+        ).elected
+        is True
+    )
+    assert (
+        lock._parse_lock_response(
+            json.dumps(dict(base, elected=False)),
+            0,
+        ).elected
+        is False
+    )
+    assert lock._parse_lock_response(json.dumps(base), 0).elected is None
+    assert (
+        lock._parse_lock_response(
+            json.dumps(dict(base, elected='yes')),
+            0,
+        ).elected
+        is None
+    )
+
+    # The reply this lock publishes itself carries the field while the
+    # protocol version stays 1, so 4.0 and 4.1 peers keep parsing it.
+    published: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        connection,
+        'publish',
+        lambda channel, message: published.append((channel, message)),
+    )
+    lock.writer_elected = True
+    lock.channel_handler(
+        {
+            'type': 'message',
+            'data': json.dumps({'response_channel': 'resp'}),
+        }
+    )
+    assert json.loads(published[0][1]) == {
+        'holder_id': lock.holder_id,
+        'mode': 'pending',
+        'protocol': 1,
+        'elected': True,
+    }
+
+
+def test_redis_nonblocking_inconclusive_probe_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With fail_when_locked an inconclusive probe retries, not raises.
+
+    An inconclusive probe is noise, not contention: nobody demonstrably
+    holds the channel, so the attempt is repeated inside the timeout and
+    the second, conclusive probe wins the election and promotes.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        check_interval=0.001,
+        timeout=1,
+    )
+    lock.holder_id = 'writer'
+    probes: list[list[redis.RedisLockHolder] | None] = [
+        None,
+        [
+            redis.RedisLockHolder(
+                holder_id='writer',
+                mode=redis.RedisLockMode.PENDING,
+                elected=False,
+            ),
+        ],
+    ]
+
+    def start_subscription(connection_: client.Redis) -> None:
+        lock.pubsub = _idle_pubsub()
+
+    monkeypatch.setattr(lock, '_start_subscription', start_subscription)
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection_: 2)
+    monkeypatch.setattr(
+        lock,
+        '_collect_lock_holders',
+        lambda connection_, expected_subscribers, timeout: probes.pop(0),
+    )
+
+    assert lock.acquire(fail_when_locked=True) is lock
+
+    assert lock.mode is redis.RedisLockMode.EXCLUSIVE
+    assert probes == []
+    lock.pubsub = None
+    connection.close()
+
+
+def test_redis_nonblocking_zero_timeout_keeps_single_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """timeout=0 bounds a fail_when_locked acquire to one attempt.
+
+    A permanently inconclusive channel still fails after a single probe,
+    which is the knob for callers that want a hard single round trip.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        check_interval=0.001,
+    )
+    probe_calls: list[int] = []
+
+    def collect_lock_holders(
+        connection_: client.Redis,
+        expected_subscribers: int,
+        timeout: float,
+    ) -> None:
+        probe_calls.append(expected_subscribers)
+        return
+
+    def start_subscription(connection_: client.Redis) -> None:
+        lock.pubsub = _idle_pubsub()
+
+    monkeypatch.setattr(lock, '_start_subscription', start_subscription)
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection_: 2)
+    monkeypatch.setattr(lock, '_collect_lock_holders', collect_lock_holders)
+
+    with pytest.raises(portalocker.AlreadyLocked):
+        lock.acquire(timeout=0, fail_when_locked=True)
+
+    assert probe_calls == [2]
+    assert lock.pubsub is None
+    connection.close()
+
+
+@pytest.mark.timeout(180)
+def test_redis_two_nonblocking_writers_exactly_one_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a free channel exactly one of two fail_when_locked writers wins.
+
+    Regression test for issue #143 defect 1. Both contenders start
+    through a barrier so the fast-path and probe-path interleavings both
+    get exercised across the iterations. Before the fix both could
+    raise ``AlreadyLocked`` on a channel nobody held.
+    """
+    server: fakeredis.FakeServer = fakeredis.FakeServer()
+
+    def connect() -> client.Redis:
+        return fakeredis.FakeStrictRedis(server=server, decode_responses=True)
+
+    # fakeredis does not implement CLIENT KILL. Stale-holder cleanup is
+    # covered independently. This test isolates the election outcome.
+    monkeypatch.setattr(
+        redis.RedisLock,
+        '_kill_unavailable_locks',
+        _ignore_stale_cleanup,
+    )
+
+    for _ in range(20):
+        acquired: list[redis.RedisLock]
+        failed: list[redis.RedisLock]
+        errors: list[BaseException]
+        acquired, failed, errors = _race_nonblocking_writers(connect)
+
+        assert not errors
+        assert len(acquired) == 1, 'exactly one contender must win'
+        assert len(failed) == 1, 'exactly one contender must lose'
+        assert failed[0].pubsub is None
+        assert failed[0].thread is None
+        acquired[0].release()
+        for lock in acquired + failed:
+            if lock.connection is not None:
+                lock.connection.close()
+
+
+def _acquire_nonblocking(
+    lock: redis.RedisLock,
+    barrier: threading.Barrier,
+    acquired: list[redis.RedisLock],
+    failed: list[redis.RedisLock],
+    errors: list[BaseException],
+) -> None:
+    """Race one fail_when_locked acquire from behind the barrier."""
+    barrier.wait()
+    try:
+        lock.acquire()
+    except portalocker.AlreadyLocked:
+        failed.append(lock)
+    except BaseException as exception:  # pragma: no cover
+        errors.append(exception)
+    else:
+        acquired.append(lock)
+
+
+def _race_nonblocking_writers(
+    connect: ConnectionFactory,
+) -> tuple[
+    list[redis.RedisLock],
+    list[redis.RedisLock],
+    list[BaseException],
+]:
+    """Race two fail_when_locked writers on one free channel.
+
+    Returns the winners, the losers, and any unexpected errors.
+    """
+    channel: str = str(random.random())
+    locks: list[redis.RedisLock] = []
+    for holder_id in ('a-writer', 'z-writer'):
+        lock: redis.RedisLock = redis.RedisLock(
+            channel,
+            connection=connect(),
+            timeout=5,
+            check_interval=0.02,
+            unavailable_timeout=2,
+            thread_sleep_time=0.01,
+            fail_when_locked=True,
+        )
+        lock.holder_id = holder_id
+        locks.append(lock)
+    barrier: threading.Barrier = threading.Barrier(2)
+    acquired: list[redis.RedisLock] = []
+    failed: list[redis.RedisLock] = []
+    errors: list[BaseException] = []
+    threads: list[threading.Thread] = [
+        threading.Thread(
+            target=_acquire_nonblocking,
+            args=(lock, barrier, acquired, failed, errors),
+        )
+        for lock in locks
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+        assert not thread.is_alive()
+    return acquired, failed, errors
+
+
+@pytest.mark.timeout(180)
+def test_redis_elected_writer_survives_lower_id_newcomer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An elected writer is not usurped by a lower-id newcomer.
+
+    Regression test for issue #143 defect 2. The incumbent keeps its
+    election while the reader drains, takes the lock first when the
+    reader releases, and only then does the newcomer get its turn.
+    """
+    server: fakeredis.FakeServer = fakeredis.FakeServer()
+
+    def connect() -> client.Redis:
+        return fakeredis.FakeStrictRedis(server=server, decode_responses=True)
+
+    # fakeredis does not implement CLIENT KILL. Stale-holder cleanup is
+    # covered independently. This test isolates incumbency protection.
+    monkeypatch.setattr(
+        redis.RedisLock,
+        '_kill_unavailable_locks',
+        _ignore_stale_cleanup,
+    )
+    channel: str = str(random.random())
+    reader: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=connect(),
+        flags=portalocker.LockFlags.SHARED,
+    )
+    # Timeouts are sized for heavily loaded CI runners. The assertions
+    # below never wait for these upper bounds on the happy path.
+    incumbent: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=connect(),
+        timeout=60,
+        check_interval=0.02,
+        unavailable_timeout=5,
+        thread_sleep_time=0.01,
+    )
+    newcomer: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=connect(),
+        timeout=60,
+        check_interval=0.02,
+        unavailable_timeout=5,
+        thread_sleep_time=0.01,
+    )
+    incumbent.holder_id = 'z-incumbent'
+    newcomer.holder_id = 'a-newcomer'
+    acquired: list[str] = []
+    errors: list[BaseException] = []
+
+    def acquire(lock: redis.RedisLock, name: str) -> None:
+        try:
+            lock.acquire()
+            acquired.append(name)
+        except BaseException as exception:  # pragma: no cover
+            errors.append(exception)
+
+    reader.acquire()
+    incumbent_thread: threading.Thread = threading.Thread(
+        target=acquire,
+        args=(incumbent, 'incumbent'),
+    )
+    newcomer_thread: threading.Thread = threading.Thread(
+        target=acquire,
+        args=(newcomer, 'a-newcomer'),
+    )
+    incumbent_thread.start()
+    _wait_for_subscribers(reader, 2)
+    election_deadline: float = time.monotonic() + 30
+    while (
+        not incumbent.writer_elected and time.monotonic() < election_deadline
+    ):
+        time.sleep(0.001)
+    assert incumbent.writer_elected
+
+    newcomer_thread.start()
+    _wait_for_subscribers(reader, 3)
+    # Over a bounded window the incumbent keeps its election and the
+    # newcomer stays out. Before the fix the newcomer's lower id won
+    # the rerun election and the incumbent forfeited here.
+    observation_deadline: float = time.monotonic() + 1
+    while time.monotonic() < observation_deadline:
+        assert incumbent.writer_elected
+        assert acquired == []
+        time.sleep(0.005)
+
+    reader.release()
+    acquired_deadline: float = time.monotonic() + 30
+    while (
+        not acquired and not errors and (time.monotonic() < acquired_deadline)
+    ):
+        time.sleep(0.001)
+    if errors:  # pragma: no cover
+        raise errors[0]
+    assert acquired == ['incumbent']
+    assert incumbent.mode is redis.RedisLockMode.EXCLUSIVE
+
+    incumbent.release()
+    newcomer_thread.join(timeout=60)
+    assert acquired == ['incumbent', 'a-newcomer']
+    newcomer.release()
+    incumbent_thread.join(timeout=10)
+    assert not incumbent_thread.is_alive()
+    assert not newcomer_thread.is_alive()
+    assert not errors
 
 
 @pytest.mark.parametrize('timeout', [None, 0, 0.001])
@@ -822,6 +1494,7 @@ def test_redis_channel_handler(redis_connection: ConnectionFactory) -> None:
             'holder_id': lock.holder_id,
             'mode': 'exclusive',
             'protocol': 1,
+            'elected': False,
         }
         pubsub.close()
     finally:
