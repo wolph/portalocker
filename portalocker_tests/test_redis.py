@@ -3635,6 +3635,7 @@ def _make_stub_worker_thread(calls: list[str]) -> type:
             sleep_time: float,
             daemon: bool = False,
             exception_handler: typing.Any = None,
+            tick: typing.Any = None,
         ) -> None:
             calls.append('thread_created')
 
@@ -6558,5 +6559,640 @@ def test_redis_worker_stop_before_run_is_not_lost(
         assert injected == [True]
         assert not lock.lost
         assert interrupts == []
+    finally:
+        lock.release()
+
+
+# --------------------------------------------------------------------- #
+#  Opt-in self-check heartbeat (#146)
+# --------------------------------------------------------------------- #
+
+
+def _record_self_check_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    lock: redis.RedisLock,
+    entered: threading.Event | None = None,
+) -> list[str]:
+    """Record how every self-check ``lock`` runs from now on ends.
+
+    Each completed check appends ``'passed'``, each failed one the name
+    of the exception type it raised. ``entered``, when given, is set the
+    moment a check starts, so a test can hold a check mid-flight.
+    """
+    outcomes: list[str] = []
+    original: typing.Callable[[client.PubSub], None] = lock._run_self_check
+
+    def recording(held_pubsub: client.PubSub) -> None:
+        if entered is not None:
+            entered.set()
+        try:
+            original(held_pubsub)
+        except BaseException as error:
+            outcomes.append(type(error).__name__)
+            raise
+        outcomes.append('passed')
+
+    monkeypatch.setattr(lock, '_run_self_check', recording)
+    return outcomes
+
+
+def _disable_ping_handler(lock: redis.RedisLock) -> None:
+    """Silence the held subscription's handler, keeping delivery alive.
+
+    The staged silent failure: frames still arrive and are read, but
+    the holder no longer reacts to them, so its own self-check ping
+    goes unanswered while no read ever raises.
+    """
+    pubsub: client.PubSub | None = lock.pubsub
+    assert pubsub is not None
+    for key in list(pubsub.channels):
+        pubsub.channels[key] = lambda message: None
+
+
+@pytest.mark.parametrize('interval', [0.0, -1.0])
+def test_redis_self_check_interval_must_be_positive(interval: float) -> None:
+    """A non-positive self-check interval is a configuration error."""
+    with pytest.raises(ValueError, match='self_check_interval'):
+        redis.RedisLock(str(random.random()), self_check_interval=interval)
+
+
+def test_redis_self_check_passes_while_healthy(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A healthy held lock passes check after check and stays held."""
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        self_check_interval=0.05,
+        interrupt_on_lost=False,
+    )
+    outcomes: list[str] = _record_self_check_outcomes(monkeypatch, lock)
+
+    lock.acquire()
+    try:
+        assert _wait_for(lambda: len(outcomes) >= 2)
+        assert set(outcomes) == {'passed'}
+        assert not _lost(lock)
+        lock.ensure_held()
+    finally:
+        lock.release()
+
+
+@pytest.mark.parametrize('interrupt_on_lost', [True, False])
+def test_redis_self_check_detects_silent_delivery_failure(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt_on_lost: bool,
+) -> None:
+    """A subscription that delivers nothing flips to LOST in one interval.
+
+    The handler is disabled rather than the socket broken, so no read
+    ever raises: only the end-to-end self-check can notice that the
+    holder's own ping no longer comes back, and its failure must run
+    the identical loss escalation a socket error runs (#146).
+    """
+    interrupts: list[bool] = []
+    monkeypatch.setattr(
+        _thread, 'interrupt_main', lambda: interrupts.append(True)
+    )
+    lost_calls: list[redis.RedisLock] = []
+    channel: str = str(random.random())
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        unavailable_timeout=0.5,
+        self_check_interval=0.1,
+        on_lost=lost_calls.append,
+        interrupt_on_lost=interrupt_on_lost,
+    )
+
+    lock.acquire()
+    assert not _lost(lock)
+    worker: redis.PubSubWorkerThread | None = lock.thread
+    assert worker is not None
+    _disable_ping_handler(lock)
+
+    # The worker runs the whole escalation before it ends, so its death
+    # means every loss side effect has landed.
+    assert _wait_for(lambda: not worker.is_alive())
+    assert _lost(lock)
+    assert lost_calls == [lock]
+    assert interrupts == ([True] if interrupt_on_lost else [])
+    error: pytest.ExceptionInfo[portalocker.LockLostError]
+    with pytest.raises(portalocker.LockLostError) as error:
+        lock.ensure_held()
+    assert error.value.channel == channel
+    assert isinstance(error.value.__cause__, redis.RedisLockSelfCheckError)
+    lock.release()
+    assert _lost(lock)
+
+
+def test_redis_self_check_no_traffic_when_unset(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without an interval the lock publishes nothing while held."""
+    connection: client.Redis = redis_connection()
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.01,
+    )
+    outcomes: list[str] = _record_self_check_outcomes(monkeypatch, lock)
+    published: list[str] = []
+    original_publish: typing.Callable[..., typing.Any] = connection.publish
+
+    def counting_publish(
+        channel: str,
+        message: str,
+    ) -> typing.Any:
+        published.append(channel)
+        return original_publish(channel, message)
+
+    monkeypatch.setattr(connection, 'publish', counting_publish)
+
+    lock.acquire()
+    try:
+        time.sleep(0.2)  # roughly twenty worker read cycles
+        assert published == []
+        assert outcomes == []
+        worker: redis.PubSubWorkerThread | None = lock.thread
+        assert worker is not None
+        assert worker._tick is None
+    finally:
+        lock.release()
+
+
+def test_redis_self_check_noop_while_waiting(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A waiter's ticks run but never start a check while ACQUIRING."""
+    channel: str = str(random.random())
+    holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+    )
+    waiter: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        unavailable_timeout=0.3,
+        self_check_interval=0.01,
+    )
+    ticks: list[bool] = []
+    original_tick: typing.Callable[[client.PubSub], None] = (
+        waiter._self_check_tick
+    )
+
+    def counting_tick(held_pubsub: client.PubSub) -> None:
+        ticks.append(True)
+        original_tick(held_pubsub)
+
+    monkeypatch.setattr(waiter, '_self_check_tick', counting_tick)
+    outcomes: list[str] = _record_self_check_outcomes(monkeypatch, waiter)
+
+    holder.acquire()
+    try:
+        with pytest.raises(portalocker.AlreadyLocked):
+            waiter.acquire(timeout=0.3)
+        assert ticks
+        assert outcomes == []
+    finally:
+        holder.release()
+
+
+def test_redis_self_check_aborts_quietly_when_released_mid_check(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A release landing mid-check abandons the check, not the release.
+
+    The check is pinned in flight (its reply can never arrive and its
+    deadline is far away), then the lock is released from the main
+    thread. The check must notice the state change within one poll and
+    stop without declaring a loss or delaying the release by anything
+    near its deadline.
+    """
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        unavailable_timeout=5,
+        self_check_interval=5,
+        interrupt_on_lost=False,
+    )
+    entered: threading.Event = threading.Event()
+    outcomes: list[str] = _record_self_check_outcomes(
+        monkeypatch,
+        lock,
+        entered,
+    )
+
+    lock.acquire()
+    _disable_ping_handler(lock)  # the check can never complete on its own
+    with lock._state_lock:
+        lock._next_self_check = 0.0  # the next tick starts a check now
+    assert entered.wait(timeout=5)
+
+    started: float = time.monotonic()
+    lock.release()
+    elapsed: float = time.monotonic() - started
+
+    assert elapsed < 2
+    assert not _lost(lock)
+    assert outcomes == ['_SelfCheckAbandoned']
+
+
+def test_redis_self_check_fails_without_subscribe_confirmation(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A response channel that never confirms is a failed check too.
+
+    The reply deadline covers the whole round trip, the response
+    channel's own subscribe confirmation included: a holder whose
+    command path cannot even set up the return channel could not answer
+    another prober's ping either, so it must not keep believing it
+    holds the lock.
+    """
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        unavailable_timeout=0.3,
+        self_check_interval=0.05,
+        interrupt_on_lost=False,
+    )
+    lock.acquire()
+    original_get_pubsub: typing.Callable[[client.Redis], client.PubSub] = (
+        lock._get_pubsub
+    )
+
+    def deaf_pubsub(connection: client.Redis) -> client.PubSub:
+        pubsub: client.PubSub = original_get_pubsub(connection)
+        monkeypatch.setattr(
+            pubsub,
+            'get_message',
+            lambda *args, **kwargs: None,
+        )
+        return pubsub
+
+    monkeypatch.setattr(lock, '_get_pubsub', deaf_pubsub)
+
+    assert _wait_for(lambda: lock.lost)
+    error: pytest.ExceptionInfo[portalocker.LockLostError]
+    with pytest.raises(portalocker.LockLostError) as error:
+        lock.ensure_held()
+    assert isinstance(error.value.__cause__, redis.RedisLockSelfCheckError)
+    lock.release()
+
+
+class _ServicedHeldPubSub:
+    """Held-subscription stand-in that counts its service reads."""
+
+    reads: int
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def get_message(
+        self,
+        timeout: float = 0.0,
+        ignore_subscribe_messages: bool = False,
+    ) -> None:
+        self.reads += 1
+        return
+
+
+def test_redis_self_check_skips_other_holders_replies() -> None:
+    """The reply wait ignores everything that is not this holder's echo.
+
+    A self-check ping is an ordinary probe ping, so every other holder
+    on the channel answers it too, and unparseable noise can land on
+    the response channel as well. Only this holder's own record may
+    conclude the check, and the held subscription is serviced while
+    the wait polls.
+    """
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        self_check_interval=1,
+    )
+    with lock._state_lock:
+        lock._lock_state = redis._LockState.HELD
+    response: _ScriptedPubSub = _ScriptedPubSub(
+        [
+            None,  # first poll comes up empty: the held side is serviced
+            _probe_reply('0' * 32),  # another holder's answer
+            {'type': 'message', 'data': 'junk'},  # unparseable noise
+            _probe_reply(lock.holder_id),  # this holder's own echo
+        ]
+    )
+    held: _ServicedHeldPubSub = _ServicedHeldPubSub()
+
+    replied: bool = lock._await_self_check_frame(
+        typing.cast('client.PubSub', response),
+        typing.cast('client.PubSub', held),
+        time.monotonic() + 5,
+        0.001,
+        lock._is_own_probe_reply,
+    )
+
+    assert replied is True
+    assert held.reads >= 1
+    assert response.messages == []
+    with lock._state_lock:
+        lock._lock_state = redis._LockState.IDLE
+
+
+@pytest.mark.timeout(60)
+def test_live_redis_self_check_detects_half_open_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live link that silently stops delivering is detected (#146).
+
+    As close to a real half-open link as honest staging gets without
+    netem: the subscription connection's ``can_read`` is pinned False,
+    so every read sees nothing, nothing errors, and the socket stays
+    open - which is exactly what a partition with no RST looks like
+    from the reader. The server keeps counting the holder the whole
+    time, and only the end-to-end self-check can notice.
+    """
+    _ensure_live_redis_available(_LIVE_REDIS)
+    admin: client.Redis = _live_redis_connection()
+    lost_calls: list[redis.RedisLock] = []
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=_live_redis_connection(),
+        thread_sleep_time=0.01,
+        unavailable_timeout=0.5,
+        self_check_interval=0.2,
+        on_lost=lost_calls.append,
+        interrupt_on_lost=False,
+    )
+    outcomes: list[str] = _record_self_check_outcomes(monkeypatch, lock)
+
+    lock.acquire()
+    try:
+        # Healthy first: at least one full round trip passes.
+        assert _wait_for(lambda: 'passed' in outcomes)
+        assert not _lost(lock)
+
+        pubsub: client.PubSub | None = lock.pubsub
+        assert pubsub is not None
+        subscription_connection: typing.Any = pubsub.connection
+        assert subscription_connection is not None
+        monkeypatch.setattr(
+            subscription_connection,
+            'can_read',
+            lambda timeout=0: False,
+        )
+        # The server was never told anything: it still counts the
+        # holder while delivery is already dead.
+        assert len(_clients_named(admin, lock.client_name)) == 1
+
+        assert _wait_for(lambda: lock.lost, timeout=10)
+        assert lost_calls == [lock]
+        error: pytest.ExceptionInfo[portalocker.LockLostError]
+        with pytest.raises(portalocker.LockLostError) as error:
+            lock.ensure_held()
+        assert isinstance(
+            error.value.__cause__,
+            redis.RedisLockSelfCheckError,
+        )
+        # The loss teardown closes the socket, so the ghost the server
+        # kept counting disappears too.
+        assert _wait_for(
+            lambda: _clients_named(admin, lock.client_name) == [],
+            timeout=10,
+        )
+    finally:
+        lock.release()
+        if lock.connection is not None:
+            lock.connection.close()
+        admin.close()
+
+
+# --------------------------------------------------------------------- #
+#  Opt-in fencing tokens (#146)
+# --------------------------------------------------------------------- #
+
+
+def test_redis_fence_token_increments_across_grants(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """Alternating exclusive grants draw strictly increasing tokens."""
+    channel: str = str(random.random())
+    connection: client.Redis = redis_connection()
+    first: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=connection,
+        thread_sleep_time=0.01,
+        fencing=True,
+    )
+    second: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        fencing=True,
+    )
+
+    first.acquire(timeout=5)
+    assert first.fence_token == 1
+    first.release()
+    second.acquire(timeout=5)
+    assert second.fence_token == 2
+    second.release()
+    first.acquire(timeout=5)
+    assert first.fence_token == 3
+    first.release()
+
+    # Monotonicity is the key's job, so release leaves it behind.
+    assert connection.get(f'{channel}-fence') == '3'
+
+
+def test_redis_fence_token_none_while_unheld_shared_or_disabled(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """No token without fencing, without a grant, or for a reader."""
+    connection: client.Redis = redis_connection()
+    plain: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.01,
+    )
+    assert plain.fence_token is None  # fencing disabled
+    plain.acquire(timeout=5)
+    assert plain.fence_token is None  # even while held
+    plain.release()
+
+    shared: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        flags=portalocker.LockFlags.SHARED,
+        fencing=True,
+    )
+    assert shared.fence_token is None
+    shared.acquire(timeout=5)
+    assert shared.fence_token is None  # shared grants draw no token
+    shared.release()
+    # A shared channel never grows a fence key either.
+    assert connection.exists(f'{shared.channel}-fence') == 0
+
+    fresh: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        fencing=True,
+    )
+    assert fresh.fence_token is None  # never acquired
+
+
+def test_redis_fence_token_available_inside_with_block(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """The token is readable inside the block and survives the exit."""
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        fencing=True,
+    )
+
+    with lock:
+        assert lock.fence_token == 1
+    assert lock.fence_token == 1  # survives until the next acquire
+
+
+def test_redis_fence_token_reset_by_the_next_acquire(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """The next acquire consumes the previous grant's token."""
+    channel: str = str(random.random())
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        fencing=True,
+    )
+    holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+    )
+
+    lock.acquire(timeout=5)
+    assert lock.fence_token == 1
+    lock.release()
+    holder.acquire(timeout=5)
+    try:
+        with pytest.raises(portalocker.AlreadyLocked):
+            lock.acquire(timeout=0, fail_when_locked=True)
+        assert lock.fence_token is None  # the failed acquire reset it
+    finally:
+        holder.release()
+
+
+def test_redis_fence_wrong_typed_key_fails_acquire_terminally(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """A fence key of the wrong type fails the acquire, fully released.
+
+    ``INCR`` on a non-integer value repeats identically on every retry,
+    so burning the timeout on it would bury the configuration problem
+    under a misleading ``AlreadyLocked``. The error propagates, and the
+    lock must be off the channel: held-with-fencing always implies a
+    token, so a grant that cannot draw one may not stand.
+    """
+    channel: str = str(random.random())
+    connection: client.Redis = redis_connection()
+    connection.set(f'{channel}-fence', 'not-a-counter')
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=connection,
+        thread_sleep_time=0.01,
+        fencing=True,
+    )
+
+    with pytest.raises(exceptions.ResponseError):
+        lock.acquire(timeout=1)
+
+    assert lock.fence_token is None
+    assert lock.pubsub is None  # fully released, no zombie subscription
+    assert not _lost(lock)
+    assert connection.pubsub_numsub(channel)[0][1] == 0
+
+    # The instance stays usable once the key is fixed.
+    connection.delete(f'{channel}-fence')
+    lock.acquire(timeout=5)
+    try:
+        assert lock.fence_token == 1
+    finally:
+        lock.release()
+
+
+def test_redis_fence_transient_incr_failure_burns_one_attempt(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connection blip during INCR costs one attempt, not the acquire."""
+    channel: str = str(random.random())
+    connection: client.Redis = redis_connection()
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=connection,
+        thread_sleep_time=0.01,
+        fencing=True,
+    )
+    attempts: list[str] = []
+    original_incr: typing.Callable[..., typing.Any] = connection.incr
+
+    def flaky_incr(key: str) -> typing.Any:
+        attempts.append(key)
+        if len(attempts) == 1:
+            raise exceptions.ConnectionError('fence INCR hit a blip')
+        return original_incr(key)
+
+    monkeypatch.setattr(connection, 'incr', flaky_incr)
+
+    lock.acquire(timeout=5)
+    try:
+        assert lock.fence_token == 1
+        assert attempts == [f'{channel}-fence'] * 2
+    finally:
+        lock.release()
+
+
+def test_redis_fence_token_survives_loss_until_next_acquire(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lost hold keeps its token readable for forensic use."""
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        fencing=True,
+        interrupt_on_lost=False,
+    )
+
+    lock.acquire(timeout=5)
+    assert lock.fence_token == 1
+    _break_subscription_read(
+        monkeypatch,
+        lock,
+        exceptions.ConnectionError('connection killed'),
+    )
+    assert _wait_for(lambda: lock.lost)
+    assert lock.fence_token == 1  # the token the lost hold carried
+    lock.release()
+    assert lock.fence_token == 1
+    lock.acquire(timeout=5)
+    try:
+        assert not _lost(lock)
+        assert lock.fence_token == 2
     finally:
         lock.release()

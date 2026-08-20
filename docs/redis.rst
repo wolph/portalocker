@@ -6,9 +6,10 @@ channel rather than a shared filesystem; see :doc:`lock-types` for where it
 fits next to the file-based locks, and :doc:`quickstart` for installing
 portalocker itself. This page is the deep dive: why the lock works this
 way, installing the extra it needs, everyday usage, who owns the
-underlying connection, how a holder learns that it lost the lock, how a
-wedged holder gets cleaned up, and how to exercise all of it with
-`fakeredis` instead of a real server.
+underlying connection, how a holder learns that it lost the lock, the
+two opt-in hardenings on top of that (an end-to-end self-check and
+fencing tokens), how a wedged holder gets cleaned up, and how to
+exercise all of it with `fakeredis` instead of a real server.
 
 Why a pubsub lock
 ------------------
@@ -290,7 +291,9 @@ The caveats, stated plainly rather than hidden:
   connection, so with ``health_check_interval=0`` (redis-py's default
   for a connection you supply yourself) such a partition goes
   undetected indefinitely. Set the interval on your connection so the
-  periodic health-check ping turns the partition into a read error.
+  periodic health-check ping turns the partition into a read error,
+  or enable the end-to-end check from `Self-checking a held lock`_ to
+  bound detection with an application-level deadline.
 - A forked child inherits the lock object and the parent's sockets.
   The child's ``release`` (explicit or via garbage collection) only
   drops the child's local references; the network teardown is skipped
@@ -301,7 +304,155 @@ The caveats, stated plainly rather than hidden:
 From the revocation until the holder observes it, both the new and the
 old holder run: detection is bounded (about one worker sleep interval
 after the TCP layer notices), reaction is not. Only resource-side
-fencing closes that window, and that is outside the lock's reach.
+fencing closes that window, and the resource-side half is necessarily
+yours. The token half is the opt-in described in `Fencing tokens`_.
+
+Self-checking a held lock
+--------------------------
+
+Everything in `Losing a lock`_ rides on the socket: the revocation
+becomes a read error, the worker escalates it, done. A half-open link
+breaks that chain. When the peer is hard-powered off or the network
+partitions without ever delivering a TCP reset, reads see nothing and
+error never, so the holder keeps believing it holds a lock the server
+may long have handed to someone else - until the kernel gives up on
+retransmits, minutes later. The health-check ping only helps once
+something writes into the dead socket, and with
+``health_check_interval=0`` (redis-py's default for a connection you
+supply yourself) nothing ever does.
+
+The opt-in ``self_check_interval`` closes that gap above the
+transport. Every interval, a held lock publishes an ordinary liveness
+ping to its own channel and requires its own reply back through the
+same response-channel machinery every probe uses, within
+``min(self_check_interval, unavailable_timeout)`` seconds. Only a
+working loop produces that echo - publish, server, subscription,
+handler, reply - so a subscription that silently delivers nothing
+fails the check within about one interval. A failed check is a loss
+like any other: it is classified as a connection loss, with
+:class:`~portalocker.redis.RedisLockSelfCheckError` as the
+``__cause__`` of the :class:`~portalocker.exceptions.LockLostError`,
+and every loss channel from `Losing a lock`_ fires identically.
+
+Staging the failure without a real network partition means breaking
+the delivery path while keeping the socket healthy, which is exactly
+what disabling the subscription's handler does:
+
+>>> lock = portalocker.RedisLock(
+...     'self_checked_channel',
+...     connection=connection,
+...     thread_sleep_time=0.01,
+...     self_check_interval=0.1,
+...     interrupt_on_lost=False,
+... )
+>>> _ = lock.acquire()
+>>> # Frames still arrive and nothing ever errors. Only the missing
+>>> # echo can reveal that the holder has gone deaf.
+>>> for key in list(lock.pubsub.channels):
+...     lock.pubsub.channels[key] = lambda message: None
+>>> import time
+>>> while not lock.lost:  # detected within about one interval
+...     time.sleep(0.01)
+>>> try:
+...     lock.ensure_held()
+... except portalocker.LockLostError as error:
+...     print(type(error.__cause__).__name__)
+RedisLockSelfCheckError
+>>> lock.release()
+
+The check stays honest about its costs, which is why it is opt-in:
+
+- Two extra round trips per interval per holder (one publish, one
+  short-lived response subscription), plus one reply from every other
+  holder on the channel, since a self-check ping looks like a normal
+  probe ping to them.
+- It verifies the whole loop, command connection included. A holder
+  whose command path is down fails the check even though its
+  subscription may be fine - deliberately, because that holder could
+  not answer other probers' pings either and would be reaped by the
+  next contended probe anyway - but it does mean a command-connection
+  outage can cost a hold. Occasional false losses on a struggling
+  link are the price of never running blind.
+- Left unset (the default), no check ever runs and the lock puts no
+  extra traffic on the wire.
+
+Fencing tokens
+---------------
+
+Detection has a floor. From the instant a holder is revoked until its
+worker observes the loss, the old holder and the new one both run, and
+no lock - this one included - can shrink that window below its
+detection latency. A resource that must never accept a stale write
+therefore needs a check on its own side, and a fencing token is that
+check's raw material: a number every exclusive grant increments, so
+the resource can remember the highest token it has seen and reject
+anything older.
+
+Pass ``fencing=True`` and every exclusive grant runs ``INCR`` on
+``<channel>-fence`` (see `RedisLock.fence_key`) right after the grant
+is confirmed, exposing the result as `RedisLock.fence_token`:
+
+>>> writer = portalocker.RedisLock(
+...     'fenced_channel', connection=connection, fencing=True
+... )
+>>> rival = portalocker.RedisLock(
+...     'fenced_channel', connection=connection, fencing=True
+... )
+>>> with writer:
+...     writer.fence_token
+1
+>>> with rival:
+...     rival.fence_token
+2
+>>> writer.fence_token  # survives release, until the next acquire
+1
+>>> connection.get(writer.fence_key)  # release leaves the key behind
+'2'
+
+The resource-side check is the half portalocker cannot do for you:
+store the token next to every write and refuse tokens smaller than
+the largest one already stored. With a SQL store that is one guarded
+``UPDATE``:
+
+.. code-block:: python
+
+    with portalocker.RedisLock('jobs', fencing=True) as lock:
+        cursor.execute(
+            'UPDATE jobs SET state = %s, fence = %s'
+            ' WHERE id = %s AND fence <= %s',
+            (state, lock.fence_token, job_id, lock.fence_token),
+        )
+        if cursor.rowcount == 0:
+            raise RuntimeError('stale fence token: a newer holder won')
+
+A stale holder still running inside the detection window carries a
+smaller token, so its write matches zero rows instead of clobbering
+the newer holder's work. Any storage with a compare-and-set works the
+same way, and a resource that cannot check anything gains nothing
+from fencing, which is the honest limit of the whole technique.
+
+What the flag signs you up for, stated plainly:
+
+- The counter key never expires, by design: monotonicity must survive
+  idle periods, so ``release`` leaves ``<channel>-fence`` behind and
+  nothing in portalocker ever deletes it. One small key per fenced
+  channel is the storage bill, and this is the one deliberate
+  exception to the module's nothing-is-stored design. Delete the key
+  by hand only when no resource remembers a token from it any more.
+- Only fencing-enabled writers bump the counter. A portalocker 4.1
+  holder, or a 4.2+ writer constructed without ``fencing=True``,
+  takes the channel without drawing a token, so the tokens order
+  exactly the exclusive grants of fencing-enabled writers and say
+  nothing about anyone else. Enable it on every writer of a channel,
+  or the guarantee quietly narrows to the writers that opted in.
+- Shared holders never carry a token: `RedisLock.fence_token` stays
+  `None` for readers, ``fencing=True`` or not, because coexisting
+  grants have no single-writer order for a token to express. Fencing
+  is a writer-side guarantee.
+- A failed ``INCR`` fails the acquire. Transient connection trouble
+  costs one attempt like any other blip, while a fence key of the
+  wrong type raises immediately instead of burning the timeout. With
+  fencing enabled the lock is never reported held without a token.
 
 Crashed holders
 -----------------

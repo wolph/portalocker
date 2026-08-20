@@ -170,6 +170,34 @@
    new worker thread has not been scheduled yet. The worker now records
    stop requests in its own event, which the read loop consults before
    every read, so a stop can never be lost
+ * Added an opt-in end-to-end self-check to ``RedisLock``
+   (``self_check_interval``, default ``None`` meaning off): every
+   interval a held lock publishes a liveness ping to its own channel
+   and requires its own reply back through the response-channel
+   machinery within ``min(self_check_interval, unavailable_timeout)``
+   seconds, run on the keep-alive worker's cadence with the held
+   subscription still serviced throughout. This closes the half-open
+   link hole that socket-level detection cannot see (a partition with
+   no TCP reset delivers nothing and errors never). A failed check is
+   classified as a connection loss - ``RedisLockSelfCheckError``
+   becomes the ``__cause__`` of the ``LockLostError`` - and surfaces
+   through exactly the channels a socket-detected loss uses. Costs
+   two round trips plus one channel-wide reply round per interval per
+   holder, and a broken command path fails the check too, which is
+   why it stays opt-in (#146)
+ * Added opt-in fencing tokens to ``RedisLock`` (``fencing=True``):
+   every exclusive grant runs ``INCR`` on the never-expiring
+   ``<channel>-fence`` key right after the confirm probe and exposes
+   the result as ``fence_token``, so resources that can check fences
+   reject writes from a holder revoked inside the detection window -
+   the one window no lock can close by itself. The token is ``None``
+   while no fenced grant stands, survives loss and ``release`` for
+   forensic use until the next ``acquire``, and is never drawn for
+   shared holders. A failed ``INCR`` fails the acquire (transient
+   blips burn one attempt, a wrong-typed key raises), so a
+   fencing-enabled lock is never held without a token. Only
+   fencing-enabled 4.2+ writers bump the counter, so mixed channels
+   narrow the guarantee to the writers that opted in (#146)
 
 4.1.1:
 
