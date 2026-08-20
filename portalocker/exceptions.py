@@ -5,14 +5,15 @@ Hierarchy::
     BaseLockException
       LockException
         AlreadyLocked
-        FileToLarge
+        FileToLarge  (deprecated, never raised)
 
 `BaseLockException` is the shared base and is rarely raised directly;
-catch `LockException` to handle any locking failure, or one of its two
-subclasses to handle a specific cause.
+catch `LockException` to handle any locking failure, or `AlreadyLocked`
+to handle contention specifically.
 """
 
 import typing
+import warnings
 
 from . import types
 
@@ -27,8 +28,17 @@ class BaseLockException(Exception):  # noqa: N818
         that was being locked when the failure happened, if one was
         available yet. `None` when the failure happened before a handle
         existed, e.g. while opening the file.
+    - `fh_name`: the name of that file as a plain string, when the
+        handle had one. `None` otherwise.
     - `strerror`: the OS error message, when the failure came from a
         system call. `None` otherwise.
+
+    Instances pickle, so they survive the trip out of a
+    `multiprocessing` worker back to the parent process. An open file
+    object cannot be pickled, so `fh` is dropped (replaced by `None`)
+    during pickling; `fh_name` still identifies the file afterwards, and
+    an integer file descriptor is kept as-is. This applies recursively
+    when one lock exception wraps another in its ``args``.
 
     Example:
         >>> from portalocker import exceptions
@@ -45,13 +55,22 @@ class BaseLockException(Exception):  # noqa: N818
     LOCK_FAILED: typing.Final = 1
     """The only error code this package has ever raised.
 
-    Callers within this package pass it as the first positional argument
-    for every raise; it does not distinguish between causes and exists
-    only for backwards compatibility with code that inspects
-    `exc.args[0]`.
+    The Windows lockers pass it as the first positional argument, with
+    the OS message second, so ``exc.args`` is ``(1, message)`` there. The
+    POSIX lockers put the original `OSError` in the first slot instead,
+    with ``str`` of it second, so code that inspects ``exc.args[0]``
+    sees this constant only on Windows. It does not distinguish between
+    causes and exists for backwards compatibility.
     """
 
     strerror: str | None = None  # ensure attribute always exists
+
+    fh_name: str | None = None
+    """Name of the file behind `fh` as a plain string, when it had one.
+
+    Unlike `fh` itself, this survives pickling, so an exception that
+    crossed a process boundary still says which file was involved.
+    """
 
     def __init__(
         self,
@@ -77,6 +96,8 @@ class BaseLockException(Exception):  # noqa: N818
                 without this initialiser rejecting them.
         """
         self.fh = fh
+        name: typing.Any = getattr(fh, 'name', None)
+        self.fh_name = name if isinstance(name, str) else None
         self.strerror = (
             str(args[1])
             if len(args) > 1 and isinstance(args[1], str)
@@ -84,22 +105,58 @@ class BaseLockException(Exception):  # noqa: N818
         )
         Exception.__init__(self, *args)
 
+    def __reduce__(
+        self,
+    ) -> tuple[
+        type['BaseLockException'],
+        tuple[typing.Any, ...],
+        dict[str, typing.Any],
+    ]:
+        """Pickle without the filehandle, which cannot be pickled.
+
+        `BaseException.__reduce__` includes the full instance ``__dict__``
+        in the pickle payload (and bypasses ``__getstate__``, which is
+        why this override targets ``__reduce__`` itself). With an open
+        file object on `fh` that made every lock exception unpicklable,
+        so a `multiprocessing` worker hitting contention crashed the
+        result pipe with a ``MaybeEncodingError`` instead of delivering
+        `AlreadyLocked` to the parent.
+
+        Returns:
+            The standard ``(callable, args, state)`` reduction triple:
+            the class, the ``args`` tuple, and a copy of the instance
+            dict in which a non-integer `fh` is replaced by `None`. An
+            integer file descriptor pickles fine and is kept, and
+            `fh_name` keeps identifying the file either way. Exceptions
+            nested inside ``args`` are reduced recursively by pickle
+            itself, so a wrapped lock exception sheds its own handle the
+            same way.
+        """
+        state: dict[str, typing.Any] = dict(self.__dict__)
+        if state.get('fh') is not None and not isinstance(state['fh'], int):
+            state['fh'] = None
+        return (self.__class__, self.args, state)
+
 
 class LockException(BaseLockException):
     """Raised when acquiring or releasing a lock fails.
 
     This is the general-purpose locking failure and the type to catch
     when any locking error is acceptable to handle uniformly:
-    `AlreadyLocked` and `FileToLarge` both derive from it, so `except
-    LockException` also catches those.
+    `AlreadyLocked` derives from it, so `except LockException` also
+    catches contention (as does the deprecated, never-raised
+    `FileToLarge`).
 
     .. versionchanged:: 4.0.0
         On POSIX, lock failures now populate `strerror` and pass the
         OS error message as the second positional argument, matching the
-        contract this module already followed on Windows. Previously,
-        `str(exc)` on POSIX returned the bare underlying `OSError` text;
-        it now returns the 2-argument exception repr instead (for
-        example ``(1, 'Resource temporarily unavailable')``). Code that
+        contract this module already followed on Windows. The first
+        positional argument on POSIX stays the original `OSError`, where
+        Windows passes the `LOCK_FAILED` code. Previously, `str(exc)` on
+        POSIX returned the bare underlying `OSError` text; it now
+        returns the 2-argument exception repr instead, for example
+        ``(BlockingIOError(11, 'Resource temporarily unavailable'),
+        '[Errno 11] Resource temporarily unavailable')``. Code that
         parsed `str(exc)` on POSIX should read `.strerror` instead, which
         has held the message consistently on both platforms since 4.0.0.
     """
@@ -143,10 +200,40 @@ class AlreadyLocked(LockException):
 
 
 class FileToLarge(LockException):
-    """Raised when a file is too large for the locking call to handle.
+    """Deprecated and never raised; kept only for backwards compatibility.
+
+    No version of this package has ever raised it: it was defined for a
+    file-too-large failure mode that the locking backends never
+    reported. Code catching it catches nothing, so it is deprecated and
+    instantiating it emits a `DeprecationWarning`. Catch `LockException`
+    instead.
 
     The misspelling in the name (`FileToLarge`, rather than
     `FileTooLarge`) is a long-standing typo in the public API. It is kept
-    exactly as-is for backwards compatibility instead of being silently
-    renamed, which would break `except FileToLarge` in existing code.
+    exactly as-is instead of being silently renamed, which would break
+    `except FileToLarge` in existing code.
+
+    .. deprecated:: 4.1.1
+        Will be removed in a future major release.
     """
+
+    def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
+        """Initialise like `LockException`, plus warn about deprecation.
+
+        Args:
+            *args: Forwarded to `LockException.__init__`.
+            **kwargs: Forwarded to `LockException.__init__`.
+
+        Warns:
+            DeprecationWarning: Always. The warning points at the caller
+                (``stacklevel=2``) so the deprecated construction site
+                shows up in the report, not this initialiser.
+        """
+        warnings.warn(
+            'FileToLarge is deprecated: portalocker has never raised it '
+            'and it will be removed in a future major release. Catch '
+            'LockException instead.',
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)

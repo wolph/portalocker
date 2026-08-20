@@ -1,5 +1,36 @@
 4.1.1:
 
+ * Fixed lock exceptions being unpicklable when they carried an open file
+   object on ``fh``, which made every contention raised inside a
+   ``multiprocessing`` worker crash the result pipe with
+   ``MaybeEncodingError: ... cannot pickle 'TextIOWrapper'`` instead of
+   delivering ``AlreadyLocked`` to the parent. Pickling now drops the
+   handle (an integer descriptor is kept) and the new ``fh_name``
+   attribute preserves the file's name as a plain string, recursively
+   for wrapped lock exceptions
+ * Fixed the ``AlreadyLocked`` raised by ``Lock.acquire`` with
+   ``fail_when_locked=True`` having ``strerror=None`` with the OS message
+   buried inside a wrapped inner exception. The wrap now propagates the
+   locker's own arguments, so ``.strerror`` is populated at the ``Lock``
+   level as the migration guide promises. ``args[0]`` is therefore now
+   the original ``OSError`` (POSIX) or error code (Windows) instead of
+   the inner lock exception, which stays reachable as ``__cause__``
+ * Behaviour change: a failing POSIX module-level ``unlock`` now raises
+   ``portalocker.LockException`` instead of leaking the raw ``OSError``,
+   matching what the Windows unlock has always done. The ``OSError``
+   (and its ``errno``) stays reachable through ``args[0]`` and
+   ``__cause__``
+ * Deprecated ``exceptions.FileToLarge``: no version of this package has
+   ever raised it, so code catching it catches nothing. The class stays
+   for backwards compatibility and now emits a ``DeprecationWarning`` on
+   instantiation
+ * Corrected the exception documentation: the docs claimed every raise
+   passes the ``LOCK_FAILED`` code as ``args[0]``, but the POSIX lockers
+   put the originating ``OSError`` there. Both real shapes are now
+   described, the doctests build the honest POSIX shape, the module-level
+   POSIX ``lock``/``unlock`` docstrings note that a raw
+   ``(lock, unlock)`` callable tuple owns its own error translation, and
+   the README ``'r+'`` example now creates its file first
  * Fixed ``RedisLock`` stale-holder cleanup killing healthy holders of
    other channels. The cleanup prefix-matched ``CLIENT LIST`` names, so a
    probe on channel ``a`` matched the holders of a channel named

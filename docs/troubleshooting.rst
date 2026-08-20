@@ -128,18 +128,18 @@ str() of a lock exception changed after upgrading
 
 **Cause:** before 4.0.0, ``str(exc)`` on POSIX was whatever the bare
 ``OSError`` from ``fcntl`` reported. Since 4.0.0, every lock failure --
-POSIX and Windows alike -- passes an error code as the first argument
-and the message as the second, matching the two-argument convention
-`BaseLockException` already followed on Windows. That makes
-``str(exc)`` on POSIX a 2-tuple repr instead of the bare message:
+POSIX and Windows alike -- carries two positional arguments and renders
+as a 2-tuple repr. The second argument is the OS message on both
+platforms. The first differs: Windows passes the ``LOCK_FAILED`` code
+(``1``), while POSIX passes the originating ``OSError`` itself. Built
+by hand with a plain ``OSError`` so the example runs everywhere, the
+POSIX shape looks like this:
 
 >>> from portalocker import exceptions
->>> exc = exceptions.LockException(
-...     exceptions.LockException.LOCK_FAILED,
-...     'Resource temporarily unavailable',
-... )
+>>> original = OSError('Resource temporarily unavailable')
+>>> exc = exceptions.LockException(original, str(original))
 >>> str(exc)
-"(1, 'Resource temporarily unavailable')"
+"(OSError('Resource temporarily unavailable'), 'Resource temporarily unavailable')"
 >>> exc.strerror
 'Resource temporarily unavailable'
 

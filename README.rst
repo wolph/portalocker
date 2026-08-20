@@ -195,6 +195,7 @@ To make sure your cache generation scripts don't race, use the `Lock` class:
 To customize the opening and locking a manual approach is also possible:
 
 >>> import portalocker
+>>> open('somefile', 'a').close()  # the 'r+' mode needs an existing file
 >>> file = open('somefile', 'r+')
 >>> portalocker.lock(file, portalocker.LockFlags.EXCLUSIVE)
 >>> _ = file.seek(12)

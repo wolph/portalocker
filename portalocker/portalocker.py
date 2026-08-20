@@ -907,15 +907,35 @@ else:  # pragma: not-posix
         def unlock(self, file_obj: PosixFileArgument) -> None:
             """Release a lock by calling `locker` with `LockFlags.UNBLOCK`.
 
-            Unlike `lock`, this does not translate errors: an ``OSError``
-            from ``fcntl`` propagates to the caller unchanged.
+            Failures are translated the same way `lock` translates them,
+            matching the Windows lockers: the original ``OSError`` goes
+            into ``args[0]`` and onto ``__cause__``, so its ``errno``
+            stays reachable.
 
             Args:
                 file_obj: The same file object, `fileno()` provider or raw
                     file descriptor that was passed to `lock`.
+
+            Raises:
+                ~portalocker.exceptions.LockException: The unlock call
+                    failed, for example with ``EBADF`` when the
+                    descriptor was already closed. Wraps the ``OSError``
+                    that ``fcntl`` raised.
+
+            .. versionchanged:: 4.1.1
+                Previously the raw ``OSError`` propagated unchanged,
+                unlike on Windows where unlock failures have always been
+                wrapped in `LockException`.
             """
             fd = self._get_fd(file_obj)
-            self.locker(fd, LockFlags.UNBLOCK)
+            try:
+                self.locker(fd, LockFlags.UNBLOCK)
+            except OSError as exc_value:
+                raise exceptions.LockException(
+                    exc_value,
+                    str(exc_value),
+                    fh=file_obj,  # Pass original file_obj
+                ) from exc_value
 
     class FlockLocker(PosixLocker):
         """FlockLocker is a PosixLocker implementation using fcntl.flock."""
@@ -975,6 +995,16 @@ else:  # pragma: not-posix
                 and `LockFlags.NON_BLOCKING` was set.
             ~portalocker.exceptions.LockException: The locking call failed for
                 another reason.
+            RuntimeError: `LockFlags.NON_BLOCKING` was passed on its own,
+                without `LockFlags.SHARED` or `LockFlags.EXCLUSIVE`. The
+                built-in lockers reject this before touching the file,
+                because on POSIX the flag only says *how* to wait and not
+                what kind of lock to take.
+
+        The exception translation above is provided by the built-in
+        lockers. A raw ``(lock, unlock)`` callable tuple assigned to
+        `LOCKER` is invoked as-is and owns its own error translation, so
+        an untranslated ``OSError`` can escape it.
 
         Example:
             >>> import portalocker
@@ -998,6 +1028,18 @@ else:  # pragma: not-posix
         Args:
             file: The same file object, `fileno()` provider or raw file
                 descriptor that was passed to `lock`.
+
+        Raises:
+            ~portalocker.exceptions.LockException: The unlock call failed,
+                wrapping the original ``OSError`` (reachable through
+                ``args[0]`` and ``__cause__``), matching what the
+                Windows unlock has always raised. As with `lock`, a raw
+                ``(lock, unlock)`` callable tuple assigned to `LOCKER`
+                owns its own error translation and can leak an
+                untranslated ``OSError`` instead.
+
+        .. versionchanged:: 4.1.1
+            Previously a failing unlock raised the raw ``OSError``.
 
         Example:
             >>> import portalocker
