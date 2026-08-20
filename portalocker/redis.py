@@ -2672,7 +2672,10 @@ class RedisLock(utils.LockBase['RedisLock']):
         that cannot reach one clean round demotes when the budget runs
         out: giving up a promotion that could not be verified is the
         safe direction, and costs one attempt in `acquire`'s retry
-        loop.
+        loop. Under `fail_when_locked` that exhausted budget is
+        terminal instead: the demotion releases fully and raises
+        `AlreadyLocked`, even when every round was inconclusive noise
+        rather than contention.
 
         This is a channel-level check and deliberately distinct from
         `_confirm_held`, the worker-death handshake: this method asks
@@ -2685,10 +2688,12 @@ class RedisLock(utils.LockBase['RedisLock']):
         Count-preserving churn can still hide a subscribed rival from a
         single conclusive probe, this one included, but only when a
         join lands in the instant between the probe's count pre-check
-        and its ping, and producing two confirmed holders needs that
-        coincidence on both sides at once. And a pre-4.2 rival that
-        promotes on a stale view *after* this confirm concluded is not
-        seen by anybody, since it never confirms. Among 4.2.1+ writers
+        and its ping. Producing two confirmed holders needs that join
+        to hide the rival from the one confirm that would otherwise
+        demote, on top of the double promotion itself, so it is the
+        product of two rare events. And a pre-4.2 rival that promotes
+        on a stale view *after* this confirm concluded is not seen by
+        anybody, since it never confirms. Among 4.2+ writers
         that ordering is impossible, because a rival mid-decision is
         still subscribed and therefore visible to this confirm as
         pending or exclusive.
