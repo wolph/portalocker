@@ -785,7 +785,15 @@ class Lock(LockBase[typing.IO[typing.Any]]):
 
         Args:
             filename: Path of the file to lock. Anything `str` accepts,
-                including a `pathlib.Path`. It is stored as a string.
+                including a `pathlib.Path`. It is stored as an absolute
+                path string: a relative path is resolved against the
+                working directory once, here, so an ``os.chdir`` between
+                acquire and release (the daemonize idiom does
+                ``chdir('/')``) cannot redirect the release, or the
+                interpreter-exit cleanup of the subclasses, at another
+                process's equally-named lock files. Changed in 4.1.1;
+                the ``filename`` attribute used to keep the path as
+                given.
             mode: Open mode for the file. Use ``'a'`` or ``'ab'`` to write.
                 A mode containing ``w`` is rewritten to ``a`` and the
                 truncation is postponed until the lock has been taken, see
@@ -823,7 +831,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             truncate = False
 
         self.fh = None
-        self.filename = str(filename)
+        self.filename = os.path.abspath(filename)
         self.mode = mode
         self.truncate = truncate
         self.flags = flags
