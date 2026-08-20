@@ -7,6 +7,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import typing
 
 import pytest
 
@@ -825,7 +826,7 @@ def _patch_nt_release(
         real_unlink(target, *args, **kwargs)
 
     monkeypatch.setattr(os, 'unlink', scripted_unlink)
-    monkeypatch.setattr(utils.time, 'sleep', sleeps.append)
+    monkeypatch.setattr(time, 'sleep', sleeps.append)
     monkeypatch.setattr(os, 'name', 'nt')
     return attempts, sleeps
 

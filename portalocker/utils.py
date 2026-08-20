@@ -989,7 +989,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
 
             if exception:
                 # We got a timeout... reraising
-                raise exception
+                raise exception  # noqa: TRY301
 
             # Prepare the filehandle (truncate if needed)
             fh = self._prepare_locked_fh(fh)
@@ -1777,10 +1777,12 @@ class TemporaryFileLock(Lock):
         self._release_claimed_fh(fh)
         unlink_error: Exception | None = None
         last_attempt: int = 4
+        # The retry loop needs per-attempt error classification, so the
+        # try/except stays inside it despite the PERF203 overhead.
         for attempt in range(last_attempt + 1):
             try:
                 os.unlink(self.filename)
-            except FileNotFoundError:
+            except FileNotFoundError:  # noqa: PERF203
                 # Already gone, nothing left to remove.
                 return None
             except PermissionError as error:
@@ -2544,7 +2546,7 @@ class PidFileLock(TemporaryFileLock):
         for path in (self.filename, self._lockfile):
             try:
                 os.unlink(path)
-            except FileNotFoundError:
+            except FileNotFoundError:  # noqa: PERF203
                 pass
             except Exception as error:
                 if unlink_error is None:

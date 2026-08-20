@@ -25,7 +25,7 @@ import typing
 import pytest
 
 import portalocker
-from portalocker import types, utils
+from portalocker import types
 
 posix_release_ordering = pytest.mark.skipif(
     os.name == 'nt',
@@ -51,7 +51,7 @@ def test_lock_concurrent_release_unlocks_once(
     unlock_calls: list[int] = []
     parked = threading.Event()
     resume = threading.Event()
-    real_unlock = utils.portalocker.unlock
+    real_unlock = portalocker.portalocker.unlock
 
     def gated_unlock(fh: types.IO) -> None:
         unlock_calls.append(fh.fileno())
@@ -60,7 +60,7 @@ def test_lock_concurrent_release_unlocks_once(
             assert resume.wait(timeout=5), 'the releaser was never resumed'
         real_unlock(fh)
 
-    monkeypatch.setattr(utils.portalocker, 'unlock', gated_unlock)
+    monkeypatch.setattr(portalocker.portalocker, 'unlock', gated_unlock)
 
     releaser = threading.Thread(target=lock.release)
     releaser.start()
@@ -108,7 +108,10 @@ def test_lock_release_clears_state_before_close_interrupt(
     lock = portalocker.Lock(tmpfile, timeout=0)
     fh = lock.acquire()
     proxy = _InterruptingClose(fh)
-    lock.fh = typing.cast(types.IO, proxy)
+    # Annotated as optional so mypy does not narrow `lock.fh` to a plain
+    # IO and declare the `is None` assertions below unreachable.
+    proxy_fh: types.IO | None = typing.cast(types.IO, proxy)
+    lock.fh = proxy_fh
 
     with pytest.raises(KeyboardInterrupt):
         lock.release()
@@ -130,7 +133,10 @@ def test_temporaryfilelock_close_interrupt_cannot_double_unlink(
     lock = portalocker.TemporaryFileLock(tmpfile)
     fh = lock.acquire()
     proxy = _InterruptingClose(fh)
-    lock.fh = typing.cast(types.IO, proxy)
+    # Annotated as optional so mypy does not narrow `lock.fh` to a plain
+    # IO and declare the `is None` assertions below unreachable.
+    proxy_fh: types.IO | None = typing.cast(types.IO, proxy)
+    lock.fh = proxy_fh
 
     with pytest.raises(KeyboardInterrupt):
         lock.release()
@@ -266,6 +272,9 @@ class _GatedCountRLock(portalocker.RLock):
     """
 
     def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
+        # Ordinary attributes, created before `super().__init__` runs the
+        # first `_acquire_count = 0` assignment through the property.
+        self._count_store: dict[str, int] = {}
         self._gate_thread: int | None = None
         self._gated_reads = 0
         self.parked = threading.Event()
@@ -273,8 +282,8 @@ class _GatedCountRLock(portalocker.RLock):
         super().__init__(*args, **kwargs)
 
     @property
-    def _acquire_count(self) -> int:
-        value: int = self.__dict__['_acquire_count_value']
+    def _acquire_count(self) -> int:  # pyrefly: ignore[bad-override]
+        value: int = self._count_store['value']
         if threading.get_ident() == self._gate_thread:
             self._gated_reads += 1
             if self._gated_reads == 2:
@@ -284,7 +293,7 @@ class _GatedCountRLock(portalocker.RLock):
 
     @_acquire_count.setter
     def _acquire_count(self, value: int) -> None:
-        self.__dict__['_acquire_count_value'] = value
+        self._count_store['value'] = value
 
 
 def test_rlock_counter_survives_interleaved_nested_acquires(

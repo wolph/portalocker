@@ -206,7 +206,7 @@ def test_acquire_interrupt_in_retry_sleep_closes_fd(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(portalocker.Lock, '_get_fh', recording_get_fh)
-    monkeypatch.setattr(utils.time, 'sleep', interrupting_sleep)
+    monkeypatch.setattr(time, 'sleep', interrupting_sleep)
 
     with pytest.raises(KeyboardInterrupt):
         waiter.acquire()

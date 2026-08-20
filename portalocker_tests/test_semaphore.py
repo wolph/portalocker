@@ -4,9 +4,10 @@ import pathlib
 import random
 import subprocess
 import sys
-import threading
 import textwrap
+import threading
 import time
+import typing
 
 import pytest
 
@@ -225,9 +226,9 @@ def test_bounded_semaphore_concurrent_acquire_takes_one_slot(
 
     def gated_acquire(
         self: utils.Lock,
-        *args: object,
-        **kwargs: object,
-    ) -> object:
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> typing.Any:
         calls.append(threading.get_ident())
         result = real_acquire(self, *args, **kwargs)
         if len(calls) == 1:
@@ -264,12 +265,16 @@ def test_bounded_semaphore_concurrent_acquire_takes_one_slot(
     assert not first_thread.is_alive()
     assert not second_thread.is_alive()
 
-    assert isinstance(outcomes['first'], utils.Lock), outcomes
+    winner = outcomes['first']
+    assert isinstance(winner, utils.Lock), outcomes
     assert isinstance(outcomes['second'], portalocker.LockException), (
         'the second thread took a slot instead of hitting the guard: '
         f'{outcomes}'
     )
-    assert semaphore.lock is outcomes['first']
+    # Compared through a local so mypy does not narrow the attribute
+    # and declare the release assertions below unreachable.
+    held_after: utils.Lock | None = semaphore.lock
+    assert held_after is winner
 
     monkeypatch.undo()
     semaphore.release()
