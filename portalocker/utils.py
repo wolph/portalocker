@@ -1480,6 +1480,14 @@ def _fh_matches_path(fh: types.IO, filename: str) -> bool:  # pragma: not-posix
         # guards the path, and reporting that beats leaking the raw
         # `ValueError` through the held-lock verification.
         return False
+    except OSError as error:
+        if error.errno == errno.EBADF:
+            # The descriptor died at the OS level under a still-open
+            # file object (a reentrant release closing it between our
+            # ``fileno()`` and the ``fstat``): same verdict as the
+            # closed handle above.
+            return False
+        raise
 
 
 #: Live `TemporaryFileLock` instances (and `PidFileLock`, which inherits

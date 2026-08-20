@@ -60,9 +60,10 @@
    ``PidFileLock`` sidecar against reentrant releases: a handle a
    signal handler claimed and closed mid-acquire is retried within the
    remaining timeout budget instead of failing the inode verification,
-   and a closed handle found by the held-lock re-acquire reports the
-   documented compromised-lock ``LockException`` instead of leaking a
-   raw ``ValueError`` from ``fileno()``
+   and a closed or OS-level-dead handle found by the held-lock
+   re-acquire reports the documented compromised-lock ``LockException``
+   instead of leaking a raw ``ValueError`` from ``fileno()`` or an
+   ``EBADF`` ``OSError`` from ``fstat``
  * Behaviour change: ``Lock`` resolves its path with ``os.path.abspath``
    at construction, so the ``filename`` attribute now holds an absolute
    path. A relative path used to be resolved on every later OS call,

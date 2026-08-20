@@ -1,4 +1,6 @@
 import atexit
+import contextlib
+import errno
 import gc
 import logging
 import os
@@ -980,3 +982,40 @@ def test_temporaryfilelock_reacquire_with_closed_handle_is_compromised(
     with pytest.raises(portalocker.LockException, match='compromised'):
         lock.acquire()
     lock.release()
+
+
+@posix_inode_only
+def test_fh_matches_path_reports_dead_descriptor(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A descriptor closed at the OS level under a still-open file object
+    (``fileno()`` succeeds, ``fstat`` raises ``EBADF``) certainly no
+    longer guards the path, so the comparison must say so instead of
+    leaking the raw ``OSError``.
+    """
+    path = str(tmp_path / 'dead.fd')
+    fd: int = os.open(path, os.O_RDWR | os.O_CREAT)
+    fh = os.fdopen(fd, 'w')
+    os.close(fh.fileno())  # the descriptor dies under the object
+    assert utils._fh_matches_path(typing.cast(typing.Any, fh), path) is False
+    with contextlib.suppress(OSError):
+        fh.close()
+
+
+@posix_inode_only
+def test_fh_matches_path_propagates_other_oserrors(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the dead-descriptor errno is translated: an I/O error from
+    the stat itself is real news and must propagate.
+    """
+    with open(tmpfile, 'w') as fh:
+
+        def failing_fstat(fd: int) -> os.stat_result:
+            raise OSError(errno.EIO, 'disk on fire')
+
+        monkeypatch.setattr(os, 'fstat', failing_fstat)
+        with pytest.raises(OSError, match='disk on fire'):
+            utils._fh_matches_path(typing.cast(typing.Any, fh), tmpfile)
+        monkeypatch.undo()
