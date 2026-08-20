@@ -1271,10 +1271,27 @@ def test_read_pid_rejects_unsafe_content(tmp_path, content):
 
     Signs, underscores, fullwidth digits, zero and negatives all parse
     through a bare `int()` and the obvious consumer feeds the result to
-    `os.kill`, where -1 signals everything the user owns.
+    `os.kill`, where -1 signals everything the user owns. The write
+    pins its encoding to UTF-8 because the fullwidth-digit case cannot
+    be encoded by the cp1252 locale of a stock Windows runner.
     """
     pid_file = tmp_path / 'strict.pid'
-    pid_file.write_text(content)
+    pid_file.write_text(content, encoding='utf-8')
+    lock = utils.PidFileLock(str(pid_file))
+    assert lock.read_pid() is None
+
+
+def test_read_pid_rejects_undecodable_bytes(tmp_path):
+    """R6: bytes no text codec accepts must read as `None`, not raise.
+
+    `read_pid` promises `None` for unreadable content, but reading the
+    file as locale-encoded text let a `UnicodeDecodeError` escape for
+    byte junk (invalid UTF-8 on POSIX, undefined cp1252 bytes such as
+    0x81 on Windows). The file is now read as bytes and validated as
+    ASCII, so the junk is rejected like any other non-decimal content.
+    """
+    pid_file = tmp_path / 'binary.pid'
+    pid_file.write_bytes(b'\xff\xfe\x81123')
     lock = utils.PidFileLock(str(pid_file))
     assert lock.read_pid() is None
 
@@ -1407,11 +1424,33 @@ def test_pidfilelock_nt_release_tolerates_missing_sidecar_file(
 ) -> None:
     """The Windows release path must skip the sidecar unlink when the file
     is already gone and still finish the rest of the teardown.
+
+    The cleaner's removal is staged as a scripted `FileNotFoundError`
+    instead of a real pre-release unlink: on Windows the sidecar is held
+    open by the acquire and cannot be unlinked here (WinError 32), and
+    the release path meets the same exception either way. A really
+    removed sidecar is exercised by the POSIX-only compromised-sidecar
+    tests in this module.
     """
     pid_file = str(tmp_path / 'nt_missing.pid')
     lock = utils.PidFileLock(pid_file)
     lock.acquire()
-    os.unlink(f'{pid_file}.lock')  # a cleaner already removed the sidecar
+    sidecar = f'{pid_file}.lock'
+    real_unlink = os.unlink
+
+    def unlink_vanished_sidecar(
+        target: typing.Any,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> None:
+        if str(target) == sidecar:
+            # A cleaner already removed the sidecar.
+            raise FileNotFoundError(
+                errno.ENOENT, 'already cleaned up', sidecar
+            )
+        real_unlink(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'unlink', unlink_vanished_sidecar)
     monkeypatch.setattr(os, 'name', 'nt')
     try:
         lock.release()
@@ -1636,6 +1675,11 @@ def test_pidfilelock_exit_strict_chains_release_error_onto_body_error(
     """With ``raise_on_release_error`` set the body exception still wins
     and the release failure is attached as its ``__context__``, matching
     the `Lock.__exit__` masking guarantee.
+
+    The explanatory note only exists where ``add_note`` does (3.11+);
+    on 3.10 the release code quietly skips it, so the assertion follows
+    the same fork, mirroring the strict-context tests in
+    `test_release_errors`.
     """
     pid_file = str(tmp_path / 'mask_strict.pid')
     lock = utils.PidFileLock(pid_file)
@@ -1649,8 +1693,11 @@ def test_pidfilelock_exit_strict_chains_release_error_onto_body_error(
         raise ValueError('body failed')
     monkeypatch.undo()
     assert isinstance(exc_info.value.__context__, PermissionError)
-    notes: list[str] = getattr(exc_info.value, '__notes__', [])
-    assert any('release failed' in note for note in notes)
+    if hasattr(exc_info.value, 'add_note'):
+        notes: list[str] = getattr(exc_info.value, '__notes__', [])
+        assert any('release failed' in note for note in notes)
+    else:
+        assert not hasattr(exc_info.value, '__notes__')
 
 
 def test_pidfilelock_exit_strict_raises_release_error_with_clean_body(
@@ -1980,10 +2027,18 @@ def test_pidfilelock_losing_rollback_spares_winning_thread_state(
     published state vanished, its ``__exit__`` no-oped and garbage
     collection of the orphaned sidecar freed the OS lock mid-block. The
     gates park B inside its rollback until A has published.
+
+    Who wins is pinned down, not raced: the loser only starts once the
+    winner signals from inside ``_write_pid``, which runs with the
+    sidecar already held. The earlier version gave the winner a 10 ms
+    head start and lost it on a slow Windows runner, where the winner
+    thread had not even been scheduled yet and the whole choreography
+    deadlocked into leaked threads failing later tests.
     """
     pid_file = str(tmp_path / 'rollback_wipe.pid')
     lock = utils.PidFileLock(pid_file, fail_when_locked=True)
 
+    a_holds_sidecar = threading.Event()
     b_in_rollback = threading.Event()
     a_published = threading.Event()
     real_rollback = utils.PidFileLock._rollback_failed_acquire
@@ -1994,12 +2049,13 @@ def test_pidfilelock_losing_rollback_spares_winning_thread_state(
         inner_lock: utils.Lock,
     ) -> Exception | None:
         b_in_rollback.set()
-        assert a_published.wait(timeout=5), 'the winner never published'
+        assert a_published.wait(timeout=10), 'the winner never published'
         return real_rollback(self, inner_lock)
 
     def gated_write_pid(self: utils.PidFileLock) -> None:
         if threading.current_thread().name == 'winner':
-            assert b_in_rollback.wait(timeout=5), 'the loser never failed'
+            a_holds_sidecar.set()
+            assert b_in_rollback.wait(timeout=10), 'the loser never failed'
         real_write_pid(self)
 
     monkeypatch.setattr(
@@ -2025,10 +2081,10 @@ def test_pidfilelock_losing_rollback_spares_winning_thread_state(
     winner_thread = threading.Thread(target=winner, name='winner')
     loser_thread = threading.Thread(target=loser, name='loser')
     winner_thread.start()
-    assert b_in_rollback.wait(timeout=0.01) is False  # winner holds first
+    assert a_holds_sidecar.wait(timeout=10), 'the winner never took the lock'
     loser_thread.start()
-    winner_thread.join(timeout=5)
-    loser_thread.join(timeout=5)
+    winner_thread.join(timeout=10)
+    loser_thread.join(timeout=10)
     assert not winner_thread.is_alive()
     assert not loser_thread.is_alive()
     monkeypatch.undo()

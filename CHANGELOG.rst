@@ -51,6 +51,17 @@
    instance's state lock is reinitialized in the child via
    ``os.register_at_fork``, the way the standard library's ``logging``
    module protects its handler locks
+ * Fixed the after-fork state-lock cleanup crashing with
+   ``AttributeError`` when invoked directly on Windows: CPython only
+   compiles ``_at_fork_reinit`` into its lock types on builds with
+   ``fork``, so the hook now skips state locks without the method and
+   is a documented no-op on ``nt``, where nothing ever forks
+ * Fixed ``PidFileLock.read_pid`` raising ``UnicodeDecodeError`` for a
+   PID file whose bytes the locale encoding cannot decode (arbitrary
+   junk on a cp1252 Windows, invalid UTF-8 on POSIX). The file is read
+   as bytes and validated as ASCII digits now, so undecodable content
+   reads as ``None`` like any other unreadable value, on every platform
+   alike
  * Fixed ``RLock.release`` zeroing the count and claiming the handle in
    two separate state-lock scopes: an acquire racing into the gap saw
    the count at zero with the handle still published, took the fast

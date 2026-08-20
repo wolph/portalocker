@@ -913,16 +913,26 @@ def test_temporaryfilelock_nt_release_tolerates_vanished_file(
     tmpfile: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A lock file that is already gone is fine on the Windows path too."""
+    """A lock file that is already gone is fine on the Windows path too.
+
+    The vanished file is staged as a scripted `FileNotFoundError`
+    instead of a real pre-release unlink: on Windows the lock file is
+    held open by the acquire and cannot be unlinked here (WinError 32),
+    and the release meets the same exception either way. The genuinely
+    unlinked file is covered by the POSIX-only variants above.
+    """
     lock = portalocker.TemporaryFileLock(tmpfile)
     lock.acquire()
-    os.unlink(tmpfile)
-    attempts, sleeps = _patch_nt_release(monkeypatch, [])
+    attempts, sleeps = _patch_nt_release(
+        monkeypatch,
+        [FileNotFoundError(errno.ENOENT, 'already gone', tmpfile)],
+    )
     lock.release()
     monkeypatch.undo()
     assert len(attempts) == 1
     assert sleeps == []
     assert lock.fh is None
+    os.unlink(tmpfile)
 
 
 def test_temporaryfilelock_acquire_retries_closed_handle(
