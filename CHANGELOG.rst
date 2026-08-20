@@ -7,16 +7,17 @@
    shared holder remains, so exactly one of two non-blocking contenders
    succeeds. One pre-existing reply-staleness window around the
    uncontended fast path is disclosed rather than closed and now also
-   reaches non-blocking winners. It has only been reproduced with
-   injected scheduling, and a confirm-probe fix is left for a separate
-   issue (#143)
+   reaches non-blocking winners. It has been reproduced with injected
+   scheduling and observed once under random contention on the previous
+   code, and a confirm-probe fix is left for a separate issue (#143)
  * Fixed an elected ``RedisLock`` writer being usurped by a later writer
    with a lower holder id. Holder records now carry an ``elected`` field
    and pending writers defer to an advertised incumbent instead of
    rerunning the election against it. Because a ping reply is a
    snapshot that can predate the election it should have reported, the
-   incumbent also holds its promotion while a lower-id newcomer that
-   has not advertised seeing the election is visible, rather than
+   incumbent also holds its promotion while a lower-id newcomer whose
+   record still carries ``elected: false`` is visible, since that
+   record cannot show whether the peer saw the election, rather than
    promoting past it into a possible second exclusive holder. Records
    keep protocol version 1, 4.0 and 4.1 holders ignore the field and
    keep the old election on mixed channels, so no coordinated upgrade

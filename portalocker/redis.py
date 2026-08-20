@@ -1457,8 +1457,9 @@ class RedisLock(utils.LockBase['RedisLock']):
         One reply-staleness window is disclosed rather than closed: on
         a free channel a contender can promote on a stale reply
         answered between another writer's subscriber count and its
-        fast-path promotion, which predates this release, has only been
-        reproduced with injected scheduling, and now also applies to
+        fast-path promotion, which predates this release, has been
+        reproduced with injected scheduling, was observed once under
+        random contention on the previous code, and now also applies to
         `fail_when_locked` winners since they promote too. Closing it
         needs a confirm probe after promotion and stays a separate
         issue.
