@@ -326,6 +326,77 @@
  * ``TemporaryFileLock`` and ``PidFileLock`` now annotate ``filename`` as
    ``types.Filename`` like ``Lock`` does, so passing a ``pathlib.Path``,
    which always worked at runtime, no longer fails static type checking
+ * Documentation fix: the 4.1.0 documentation gave ``BoundedSemaphore``
+   two contradicting ``fail_when_locked`` contracts. The constructor
+   docstring promised that a full semaphore raises ``AlreadyLocked``
+   straight away, while ``acquire`` documented what the code has
+   actually done since 3.2.0: the flag is consulted only once the
+   ``timeout`` has expired. The runtime behaviour is unchanged and the
+   constructor docstring was the one corrected. A full semaphore retries
+   for the whole timeout and then raises ``AlreadyLocked``, or returns
+   ``None`` with ``fail_when_locked=False``. Both the timing and that
+   ``None`` return diverge from the other lock classes and are now
+   called out loudly in the documentation
+ * Behaviour change: acquiring a ``BoundedSemaphore`` or
+   ``NamedBoundedSemaphore`` instance that already holds a slot now
+   raises ``portalocker.LockException`` instead of ``AssertionError``.
+   The assert was the only re-acquire guard and ``python -O`` strips
+   asserts, so a second acquire silently consumed a second slot,
+   overwrote the reference to the first and starved competitors of a
+   slot nobody could release anymore
+ * Fixed the ``BoundedSemaphore`` default-name ``DeprecationWarning``
+   being attributed to portalocker's own source (``stacklevel=1``). It
+   now points at the constructing caller, so it names the code to fix
+   and deduplicates per call site instead of once globally
+ * Fixed ``TemporaryFileLock`` and ``PidFileLock`` registering one
+   ``atexit`` callback per constructed instance and never unregistering
+   it, which grew without bound in long-running processes churning
+   through short-lived locks. A single module level hook registered once
+   at import now releases whichever locks are still held at interpreter
+   exit
+ * The interpreter-exit cleanup for ``TemporaryFileLock`` and
+   ``PidFileLock`` no longer releases locks a forked child inherited
+   from its parent: the exit hook now only releases locks constructed by
+   the exiting process itself. The child inherits the live lock objects,
+   and its normal exit unlinked the parent's lock files while the parent
+   still believed it held them, breaking the classic acquire-then-fork
+   daemonize sequence. Together with 4.1.1's removal of lock teardown at
+   garbage collection time this closes that fork hole for locks acquired
+   before forking. A lock constructed in the parent but acquired inside
+   a forked child is still not cleaned up at that child's exit
+ * Behaviour change: ``portalocker.open_atomic`` now raises
+   ``FileExistsError`` when the destination already exists on entry,
+   matching its documentation and the publication-time race. It raised
+   ``AssertionError`` before
+ * Fixed a 4.0.0 regression in ``portalocker.open_atomic``: publication
+   uses a hard link on POSIX, which hard-failed on filesystems without
+   hard link support (exFAT and some SMB, NFS and FUSE mounts) where
+   3.2.0's rename worked, and the cleanup then deleted the freshly
+   written payload as well. Publication now falls back to an existence
+   check plus rename on those filesystems. The fallback still publishes
+   content atomically but cannot reliably refuse concurrent publishers,
+   so the strong no-replace guarantee continues to require hard link
+   support, as the documentation now states
+ * Behaviour change: when ``open_atomic`` fails to publish, for any
+   reason, the temporary file is now kept and the raised exception names
+   its path, where the payload was previously deleted without a trace.
+   An exception from the caller's body, on the other hand, now removes
+   the temporary file that used to be leaked, and a body that closes the
+   handle itself no longer breaks publication because the payload is
+   synchronized through a fresh descriptor
+ * Fixed ``open_atomic`` publishing destinations with the private
+   ``0o600`` permissions of its temporary file. The temporary file is
+   now created with mode ``0o666`` so the kernel applies the process
+   umask at creation, and the destination carries the permissions a
+   plain ``open`` would have produced, without portalocker ever touching
+   the process-wide umask
+ * Documented two ``BoundedSemaphore`` operational hazards: a slot file
+   deleted externally mid-hold silently admits an extra holder, and the
+   default directory is the tmp-cleaner-patrolled system temporary
+   directory, so long-running semaphores need a private directory exempt
+   from cleanup. Also documented that ``open_atomic`` does not fsync the
+   directory entry, so the published name itself is not guaranteed
+   durable across power loss
 
 4.1.0:
 

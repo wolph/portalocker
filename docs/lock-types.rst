@@ -140,6 +140,13 @@ Guarantees:
 - `BoundedSemaphore.acquire` sweeps the slots in a fixed numerical order
   on every attempt, so all contenders race for slot 0 first, then slot
   1, and so on.
+- ``fail_when_locked`` is consulted only after the ``timeout`` has
+  expired, unlike every other lock class here: a full semaphore always
+  retries for the whole timeout, even with the flag set. Running out of
+  time then raises ``AlreadyLocked`` with ``fail_when_locked=True``
+  (the default) and returns ``None`` with ``fail_when_locked=False``.
+  Both are divergences kept as they have behaved since 3.2.0, so check
+  the return value when you pass ``fail_when_locked=False``.
 - `BoundedSemaphore.release` only unlocks the held slot; the lock files
   themselves stay on disk so the same slots can be reused later.
 
@@ -149,7 +156,17 @@ Costs:
   emits a ``DeprecationWarning`` and risks colliding with unrelated
   programs; see `NamedBoundedSemaphore`.
 - Acquiring while already holding a slot is a programming error
-  (`AssertionError`); release first.
+  (``LockException``), so release first. Before 4.1.1 this guard was an
+  ``assert``, so ``python -O`` silently took a second slot instead.
+- The slot files must survive while their slots are held. A slot file
+  that is deleted externally mid-hold silently admits an extra holder
+  (the operating system lock lives on the deleted inode, invisible to
+  new acquirers), and the default ``directory`` is the system temporary
+  directory, exactly where tmp cleaners prune. Point ``directory`` at a
+  location exempt from cleanup for anything long running, and prefer a
+  private directory on multi-user systems: a slot file owned by another
+  user typically raises ``PermissionError`` out of ``acquire`` instead
+  of counting as busy.
 
 >>> import portalocker
 >>> semaphore = portalocker.BoundedSemaphore(2, name='workers', directory='')
@@ -245,6 +262,11 @@ Guarantees:
   constructor for a lock still held when the interpreter shuts down.
   Garbage collection of the lock object deliberately leaves a held lock
   and its file alone, since the caller may still be using the filehandle.
+- `TemporaryFileLock.release` unlinks the lock file. For a caller that
+  forgets to release, a single module level `atexit` hook releases any
+  lock still held when the interpreter shuts down. The hook only acts in
+  the process that constructed the lock, so a forked child exiting does
+  not unlink the file of a lock its parent still holds.
 - Releasing an instance that does not hold the lock is a no-op, so a
   stale or double-released instance cannot unlink the file out from
   under whoever holds it at that moment.

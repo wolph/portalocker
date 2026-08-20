@@ -101,6 +101,10 @@ in `release`, with one fallback for code that forgets to call it: an
 `atexit` handler registered when the lock is constructed. Neither runs
 when the process is killed outright -- ``SIGKILL``, a segfault, a lost
 VM -- so the file stays on disk.
+in `release`, and a module level `atexit` hook releases any lock still
+held at interpreter exit, in the process that constructed it. Neither
+runs when the process is killed outright -- ``SIGKILL``, a segfault, a
+lost VM -- so the file stays on disk.
 
 This is expected, and mostly harmless. The kernel releases the
 process's advisory lock the moment it dies, file present or not, so the
