@@ -517,7 +517,10 @@ def test_redis_elected_writer_reuses_subscription(
             mode=redis.RedisLockMode.SHARED,
         ),
     ]
-    subscriber_counts: list[int] = [2, 1]
+    # One count per probe round: the electing attempt sees the reader,
+    # the promoting attempt is alone, and the confirm probe recounts
+    # and settles on that same single subscriber.
+    subscriber_counts: list[int] = [2, 1, 1]
     start_calls: list[client.Redis] = []
     sentinel_pubsub: client.PubSub = typing.cast(
         'client.PubSub',
@@ -1090,6 +1093,15 @@ def test_redis_nonblocking_inconclusive_probe_retries(
                 elected=False,
             ),
         ],
+        # The confirm probe after the promotion sees only this lock's
+        # own freshly exclusive record.
+        [
+            redis.RedisLockHolder(
+                holder_id='writer',
+                mode=redis.RedisLockMode.EXCLUSIVE,
+                elected=True,
+            ),
+        ],
     ]
 
     def start_subscription(connection_: client.Redis) -> None:
@@ -1487,6 +1499,847 @@ def test_redis_stale_newcomer_soak_never_two_exclusive() -> None:
     _ensure_live_redis_available(_LIVE_REDIS)
     for _ in range(10):
         _stage_stale_newcomer_round(_live_redis_connection)
+
+
+def _probe_reply(
+    holder_id: str,
+    mode: str = 'shared',
+) -> dict[str, typing.Any]:
+    """Build one wire-shaped probe reply message for a scripted pubsub."""
+    return {
+        'type': 'message',
+        'data': json.dumps(
+            {
+                'holder_id': holder_id,
+                'mode': mode,
+                'protocol': redis.REDIS_LOCK_PROTOCOL_VERSION,
+                'elected': False,
+            }
+        ),
+    }
+
+
+class _ScriptedPubSub:
+    """Pubsub stand-in that plays back a message script.
+
+    Records the timeout of every ``get_message`` call so a test can
+    assert exactly which polls ran: the interval-long first read, the
+    buffer drains at timeout zero, and the short grace polls between
+    them.
+    """
+
+    messages: list[dict[str, typing.Any] | None]
+    timeouts: list[float]
+
+    def __init__(
+        self,
+        messages: list[dict[str, typing.Any] | None],
+    ) -> None:
+        self.messages = list(messages)
+        self.timeouts = []
+
+    def get_message(
+        self, timeout: float = 0.0
+    ) -> dict[str, typing.Any] | None:
+        self.timeouts.append(timeout)
+        if self.messages:
+            return self.messages.pop(0)
+        return None
+
+
+def test_redis_drain_probe_replies_grace_poll_collects_in_flight() -> None:
+    """A reply milliseconds away is collected in the same drain pass.
+
+    Regression test for the #145 amplifier: the follow-up reads used
+    only ``timeout=0``, which almost always misses a reply that is
+    still in flight, so nearly every multi-holder probe slept a full
+    jittered drain interval (median 116ms with three holders). After a
+    ``timeout=0`` miss the drain now polls once with a short real
+    timeout before giving the pass up.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    pubsub: _ScriptedPubSub = _ScriptedPubSub(
+        [
+            _probe_reply('holder-a'),
+            None,
+            _probe_reply('holder-b'),
+            None,
+            _probe_reply('holder-c'),
+        ]
+    )
+    holders: dict[str, redis.RedisLockHolder] = {}
+
+    lock._drain_probe_replies(
+        typing.cast('client.PubSub', pubsub),
+        holders,
+        expected_subscribers=3,
+        check_interval=0.1,
+    )
+
+    assert sorted(holders) == ['holder-a', 'holder-b', 'holder-c']
+    grace: float = redis._PROBE_REPLY_GRACE
+    assert pubsub.timeouts == [0.1, 0, grace, 0, grace]
+
+
+def test_redis_drain_probe_replies_grace_poll_miss_ends_the_pass() -> None:
+    """A missed grace poll ends the pass instead of spinning."""
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    pubsub: _ScriptedPubSub = _ScriptedPubSub(
+        [
+            _probe_reply('holder-a'),
+            None,
+            None,
+        ]
+    )
+    holders: dict[str, redis.RedisLockHolder] = {}
+
+    lock._drain_probe_replies(
+        typing.cast('client.PubSub', pubsub),
+        holders,
+        expected_subscribers=3,
+        check_interval=0.1,
+    )
+
+    assert sorted(holders) == ['holder-a']
+    assert pubsub.timeouts == [0.1, 0, redis._PROBE_REPLY_GRACE]
+
+
+def test_redis_drain_probe_replies_zero_interval_skips_grace_poll() -> None:
+    """A zero check interval keeps the drain strictly non-blocking.
+
+    ``probe`` and ``acquire`` never pass zero, but the guard keeps the
+    grace poll from turning into a busy loop if a caller ever does.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    pubsub: _ScriptedPubSub = _ScriptedPubSub(
+        [
+            _probe_reply('holder-a'),
+            None,
+        ]
+    )
+    holders: dict[str, redis.RedisLockHolder] = {}
+
+    lock._drain_probe_replies(
+        typing.cast('client.PubSub', pubsub),
+        holders,
+        expected_subscribers=3,
+        check_interval=0,
+    )
+
+    assert sorted(holders) == ['holder-a']
+    assert pubsub.timeouts == [0, 0]
+
+
+def test_redis_probe_aborts_when_count_moves_mid_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An incomplete collection stops as soon as the count moves.
+
+    A waiter that answers a ping and then backs off leaves the probe
+    expecting a reply that will never come. Waiting out the whole
+    reply timeout on it stalled the confirm probe for its entire
+    budget (#145); the count is checked each polling interval instead,
+    and a moved count ends the probe as inconclusive at once, without
+    reaping anybody, since churn is not a crashed holder.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        unavailable_timeout=5,
+        thread_sleep_time=0.01,
+    )
+    # Steady at first (the interval check passes once), then a leave.
+    counts: list[int] = [2, 2, 1]
+    monkeypatch.setattr(
+        lock,
+        '_get_subscriber_count',
+        lambda connection_: counts.pop(0),
+    )
+
+    def unexpected_reap(*args: typing.Any, **kwargs: typing.Any) -> None:
+        raise AssertionError('churn must not reap')
+
+    monkeypatch.setattr(lock, '_kill_unavailable_locks', unexpected_reap)
+
+    start: float = time.monotonic()
+    holders: list[redis.RedisLockHolder] | None = lock._collect_lock_holders(
+        connection,
+        2,
+        timeout=5,
+    )
+    elapsed: float = time.monotonic() - start
+
+    assert holders is None
+    assert not counts
+    # Nowhere near the five second reply timeout the stall used to burn.
+    assert elapsed < 2
+
+
+@pytest.mark.timeout(180)
+def test_redis_probe_collects_replies_within_one_interval() -> None:
+    """Median conclusive-probe time with three holders stays low.
+
+    Before the grace poll 57 of 60 such probes slept a full jittered
+    drain interval (median 116ms); with it the replies still in flight
+    are collected in the first pass. The bound is generous to stay
+    flake proof on loaded runners: pre-fix medians sit well above it,
+    post-fix medians well below.
+    """
+    _ensure_live_redis_available(_LIVE_REDIS)
+    channel: str = str(random.random())
+    readers: list[redis.RedisLock] = [
+        redis.RedisLock(
+            channel,
+            connection=_live_redis_connection(),
+            flags=portalocker.LockFlags.SHARED,
+        )
+        for _ in range(2)
+    ]
+    prober: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=_live_redis_connection(),
+        thread_sleep_time=0.1,
+        unavailable_timeout=1,
+    )
+    durations: list[float] = []
+    try:
+        for reader in readers:
+            reader.acquire()
+        prober._start_subscription(prober.get_connection())
+        _wait_for_subscribers(prober, 3)
+        time.sleep(0.2)
+        for _ in range(15):
+            start: float = time.perf_counter()
+            holders: list[redis.RedisLockHolder] | None = (
+                prober._collect_lock_holders(
+                    prober.get_connection(),
+                    3,
+                    prober.unavailable_timeout,
+                )
+            )
+            durations.append(time.perf_counter() - start)
+            assert holders is not None
+            assert len(holders) == 3
+    finally:
+        prober._unsubscribe()
+        for reader in readers:
+            reader.release()
+        for lock in (*readers, prober):
+            if lock.connection is not None:
+                lock.connection.close()
+
+    durations.sort()
+    median: float = durations[len(durations) // 2]
+    assert median < 0.06
+
+
+@pytest.mark.parametrize(
+    ('foreign_holders', 'expected'),
+    [
+        pytest.param([], 'confirmed', id='alone'),
+        pytest.param(
+            [
+                redis.RedisLockHolder(
+                    'reader',
+                    redis.RedisLockMode.SHARED,
+                ),
+            ],
+            'demote',
+            id='shared-holder',
+        ),
+        pytest.param(
+            [
+                redis.RedisLockHolder(
+                    'legacy-0',
+                    redis.RedisLockMode.EXCLUSIVE,
+                    legacy=True,
+                ),
+            ],
+            'demote',
+            id='legacy-exclusive',
+        ),
+        pytest.param(
+            [
+                redis.RedisLockHolder(
+                    'z-old-rival',
+                    redis.RedisLockMode.EXCLUSIVE,
+                ),
+            ],
+            'demote',
+            id='pre-42-exclusive-higher-id',
+        ),
+        pytest.param(
+            [
+                redis.RedisLockHolder(
+                    'a-rival',
+                    redis.RedisLockMode.EXCLUSIVE,
+                    elected=True,
+                ),
+            ],
+            'demote',
+            id='exclusive-lower-id',
+        ),
+        pytest.param(
+            [
+                redis.RedisLockHolder(
+                    'z-rival',
+                    redis.RedisLockMode.EXCLUSIVE,
+                    elected=False,
+                ),
+            ],
+            'confirmed',
+            id='exclusive-higher-id-42',
+        ),
+        pytest.param(
+            [
+                redis.RedisLockHolder(
+                    'a-old-peer',
+                    redis.RedisLockMode.PENDING,
+                ),
+            ],
+            'demote',
+            id='pre-42-pending-lower-id',
+        ),
+        pytest.param(
+            [
+                redis.RedisLockHolder(
+                    'a-peer',
+                    redis.RedisLockMode.PENDING,
+                    elected=False,
+                ),
+            ],
+            'retry',
+            id='undecided-pending-lower-id',
+        ),
+        pytest.param(
+            [
+                redis.RedisLockHolder(
+                    'a-peer',
+                    redis.RedisLockMode.PENDING,
+                    elected=True,
+                ),
+            ],
+            'retry',
+            id='elected-pending-lower-id',
+        ),
+        pytest.param(
+            [
+                redis.RedisLockHolder(
+                    'z-peer',
+                    redis.RedisLockMode.PENDING,
+                    elected=False,
+                ),
+            ],
+            'confirmed',
+            id='pending-higher-id',
+        ),
+        pytest.param(
+            [
+                redis.RedisLockHolder(
+                    'a-peer',
+                    redis.RedisLockMode.PENDING,
+                    elected=False,
+                ),
+                redis.RedisLockHolder(
+                    'a-rival',
+                    redis.RedisLockMode.EXCLUSIVE,
+                    elected=True,
+                ),
+            ],
+            'demote',
+            id='demote-outranks-retry',
+        ),
+    ],
+)
+def test_redis_confirm_probe_verdicts(
+    foreign_holders: list[redis.RedisLockHolder],
+    expected: str,
+) -> None:
+    """The confirm probe mirrors the deterministic forfeit rules.
+
+    A lower-id exclusive rival, any pre-4.2 exclusive rival and any
+    shared holder outrank a fresh promotion (demote). A lower-id
+    pending peer that speaks 4.2 is undecided, so the round is
+    inconclusive (retry). A higher-id 4.2 exclusive rival demotes
+    itself, and higher-id pending peers lose the sort and defer, so
+    neither blocks the confirmation.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    lock.holder_id = 'm-just-promoted'
+    holders: list[redis.RedisLockHolder] = [
+        redis.RedisLockHolder(
+            lock.holder_id,
+            redis.RedisLockMode.EXCLUSIVE,
+            elected=False,
+        ),
+        *foreign_holders,
+    ]
+
+    verdict: redis._ConfirmVerdict = lock._confirm_probe_verdict(holders)
+
+    assert verdict is redis._ConfirmVerdict(expected)
+
+
+def _promoted_writer(
+    connection: client.Redis,
+    **kwargs: typing.Any,
+) -> redis.RedisLock:
+    """Build a writer frozen at the instant right after its promotion."""
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        **kwargs,
+    )
+    lock.holder_id = 'm-just-promoted'
+    lock.mode = redis.RedisLockMode.EXCLUSIVE
+    lock.pubsub = _idle_pubsub()
+    return lock
+
+
+def test_redis_confirm_probe_count_one_confirms_without_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Alone on the channel means confirmed, at one round trip.
+
+    Ownership is the subscription, so a rival that promoted is still
+    subscribed and shows up in the count. A count of one is therefore
+    conclusive on its own and the full probe is skipped, which is what
+    keeps the uncontended fast path cheap.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = _promoted_writer(connection)
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection_: 1)
+
+    def unexpected_probe(*args: typing.Any, **kwargs: typing.Any) -> None:
+        raise AssertionError('a count of one must not probe')
+
+    monkeypatch.setattr(lock, '_collect_lock_holders', unexpected_probe)
+
+    assert lock._confirm_exclusive_promotion(connection, False)
+    assert lock.mode is redis.RedisLockMode.EXCLUSIVE
+    assert lock.pubsub is not None
+
+
+def test_redis_confirm_probe_retries_inconclusive_then_confirms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inconclusive round is noise: the confirm asks again."""
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = _promoted_writer(
+        connection,
+        unavailable_timeout=5,
+        thread_sleep_time=0.001,
+    )
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection_: 2)
+    probes: list[list[redis.RedisLockHolder] | None] = [
+        None,
+        [
+            redis.RedisLockHolder(
+                lock.holder_id,
+                redis.RedisLockMode.EXCLUSIVE,
+                elected=False,
+            ),
+            redis.RedisLockHolder(
+                'z-deferring-peer',
+                redis.RedisLockMode.PENDING,
+                elected=False,
+            ),
+        ],
+    ]
+    probe_calls: list[int] = []
+
+    def scripted_probe(
+        connection_: client.Redis,
+        expected_subscribers: int,
+        timeout: float,
+    ) -> list[redis.RedisLockHolder] | None:
+        probe_calls.append(expected_subscribers)
+        return probes.pop(0)
+
+    monkeypatch.setattr(lock, '_collect_lock_holders', scripted_probe)
+
+    assert lock._confirm_exclusive_promotion(connection, False)
+    assert probe_calls == [2, 2]
+    assert lock.mode is redis.RedisLockMode.EXCLUSIVE
+
+
+def test_redis_confirm_probe_undecided_peer_then_rival_demotes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lower-id undecided peer holds the confirm, its promotion ends it.
+
+    The peer's ``elected: false`` reply cannot show whether its own
+    probe predates this promotion, so the confirm waits it out. One
+    round later the peer is visible as exclusive, the two-incumbents
+    rule applies, and the higher id demotes back to a fresh contender.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = _promoted_writer(
+        connection,
+        unavailable_timeout=5,
+        thread_sleep_time=0.001,
+    )
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection_: 2)
+    own_record: redis.RedisLockHolder = redis.RedisLockHolder(
+        lock.holder_id,
+        redis.RedisLockMode.EXCLUSIVE,
+        elected=False,
+    )
+    probes: list[list[redis.RedisLockHolder] | None] = [
+        [
+            own_record,
+            redis.RedisLockHolder(
+                'a-rival',
+                redis.RedisLockMode.PENDING,
+                elected=False,
+            ),
+        ],
+        [
+            own_record,
+            redis.RedisLockHolder(
+                'a-rival',
+                redis.RedisLockMode.EXCLUSIVE,
+                elected=True,
+            ),
+        ],
+    ]
+
+    def scripted_probe(
+        connection_: client.Redis,
+        expected_subscribers: int,
+        timeout: float,
+    ) -> list[redis.RedisLockHolder] | None:
+        return probes.pop(0)
+
+    monkeypatch.setattr(lock, '_collect_lock_holders', scripted_probe)
+
+    assert not lock._confirm_exclusive_promotion(connection, False)
+    assert not probes
+    assert lock.mode is redis.RedisLockMode.PENDING
+    assert not lock.writer_elected
+    assert lock.pubsub is None
+
+
+def test_redis_confirm_probe_budget_exhaustion_demotes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A confirm that stays inconclusive is never concluded from noise.
+
+    When the budget runs out without one clean round the promotion is
+    given up: demoting is the safe direction, and the acquire retry
+    loop simply runs another full attempt against whatever the channel
+    turns out to hold.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = _promoted_writer(
+        connection,
+        unavailable_timeout=0.05,
+        thread_sleep_time=0.001,
+    )
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection_: 2)
+    probe_calls: list[int] = []
+
+    def inconclusive_probe(
+        connection_: client.Redis,
+        expected_subscribers: int,
+        timeout: float,
+    ) -> list[redis.RedisLockHolder] | None:
+        probe_calls.append(expected_subscribers)
+        return None
+
+    monkeypatch.setattr(lock, '_collect_lock_holders', inconclusive_probe)
+
+    assert not lock._confirm_exclusive_promotion(connection, False)
+    assert probe_calls
+    assert lock.mode is redis.RedisLockMode.PENDING
+    assert not lock.writer_elected
+    assert lock.pubsub is None
+
+
+def test_redis_confirm_probe_fail_when_locked_demotion_releases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-blocking writer demoted by its confirm raises after release.
+
+    ``fail_when_locked`` means not waiting for the rival to leave, so
+    the demotion becomes ``AlreadyLocked``, and only after the full
+    release: the instance must leave the channel and stay reusable.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = _promoted_writer(
+        connection,
+        unavailable_timeout=5,
+        thread_sleep_time=0.001,
+    )
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection_: 2)
+
+    def rival_probe(
+        connection_: client.Redis,
+        expected_subscribers: int,
+        timeout: float,
+    ) -> list[redis.RedisLockHolder] | None:
+        return [
+            redis.RedisLockHolder(
+                lock.holder_id,
+                redis.RedisLockMode.EXCLUSIVE,
+                elected=False,
+            ),
+            redis.RedisLockHolder(
+                'a-rival',
+                redis.RedisLockMode.EXCLUSIVE,
+                elected=True,
+            ),
+        ]
+
+    monkeypatch.setattr(lock, '_collect_lock_holders', rival_probe)
+
+    with pytest.raises(portalocker.AlreadyLocked):
+        lock._confirm_exclusive_promotion(connection, True)
+
+    assert lock.mode is redis.RedisLockMode.PENDING
+    assert not lock.writer_elected
+    assert lock.pubsub is None
+    assert lock.thread is None
+
+
+@pytest.mark.timeout(180)
+def test_redis_fast_path_confirm_demotes_exactly_one_writer(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #145 window-A schedule ends with exactly one holder.
+
+    Staged interleaving from the issue: a writer counts a single
+    subscriber and stalls between that count and its fast-path
+    promotion. A lower-id rival subscribes and probes inside the
+    stall, so the stalled writer's reply is snapshotted while it is
+    still pending, and the rival legitimately elects itself and
+    promotes. Without the confirm probe both acquires return; with it
+    the stalled writer's confirm sees the rival's exclusive record,
+    demotes, and acquires only after the rival releases.
+    """
+    channel: str = str(random.random())
+    kwargs: dict[str, typing.Any] = dict(
+        timeout=30,
+        check_interval=0.02,
+        unavailable_timeout=2,
+        thread_sleep_time=0.01,
+    )
+    stalled: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        **kwargs,
+    )
+    rival: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        **kwargs,
+    )
+    stalled.holder_id = 'm-stalled-writer'
+    rival.holder_id = 'a-rival-writer'
+    if isinstance(stalled.connection, fakeredis.FakeStrictRedis):
+        # fakeredis does not implement CLIENT KILL. Stale-holder cleanup
+        # is covered independently; this test isolates the confirm.
+        monkeypatch.setattr(
+            redis.RedisLock,
+            '_kill_unavailable_locks',
+            _ignore_stale_cleanup,
+        )
+    counted_alone: threading.Event = threading.Event()
+    original_count: typing.Callable[[client.Redis], int] = (
+        stalled._get_subscriber_count
+    )
+
+    def stalling_count(connection_: client.Redis) -> int:
+        count: int = original_count(connection_)
+        if count == 1 and not counted_alone.is_set():
+            counted_alone.set()
+            time.sleep(0.6)
+        return count
+
+    monkeypatch.setattr(stalled, '_get_subscriber_count', stalling_count)
+    acquired: list[str] = []
+    errors: list[BaseException] = []
+
+    def attempt(lock: redis.RedisLock, name: str) -> None:
+        try:
+            lock.acquire()
+        except BaseException as exception:  # pragma: no cover
+            errors.append(exception)
+        else:
+            acquired.append(name)
+
+    stalled_thread: threading.Thread = threading.Thread(
+        target=attempt,
+        args=(stalled, 'stalled'),
+        daemon=True,
+    )
+    stalled_thread.start()
+    assert counted_alone.wait(timeout=30)
+    rival_thread: threading.Thread = threading.Thread(
+        target=attempt,
+        args=(rival, 'rival'),
+        daemon=True,
+    )
+    rival_thread.start()
+
+    rival_deadline: float = time.monotonic() + 30
+    while (
+        'rival' not in acquired
+        and not errors
+        and time.monotonic() < rival_deadline
+    ):
+        time.sleep(0.001)
+    assert not errors
+    assert acquired == ['rival']
+
+    # The stalled writer wakes at +0.6s, promotes on its stale count,
+    # and must demote when its confirm probe shows the rival: while the
+    # rival holds, the stalled acquire may not return.
+    time.sleep(1.5)
+    assert acquired == ['rival']
+
+    rival.release()
+    stalled_thread.join(timeout=60)
+    assert not stalled_thread.is_alive()
+    assert acquired == ['rival', 'stalled']
+    stalled.release()
+    rival_thread.join(timeout=10)
+    assert not rival_thread.is_alive()
+    assert not errors
+    for lock in (stalled, rival):
+        if lock.connection is not None:
+            lock.connection.close()
+
+
+@pytest.mark.timeout(180)
+def test_redis_reader_mixed_soak_single_writer_at_a_time() -> None:
+    """Live random-contention soak: writers never overlap anybody.
+
+    The reader-mixed shape from the #145 report, where the fast-path
+    staleness window fired about once per 60 to 200 acquisitions on
+    the unfixed code: three writers and two readers churn one channel
+    at a short check interval, and every acquisition return is checked
+    against user-level accounting. The confirm probe must keep the
+    violation count at zero.
+    """
+    _ensure_live_redis_available(_LIVE_REDIS)
+    channel: str = str(random.random())
+    guard: threading.Lock = threading.Lock()
+    state: dict[str, int] = {'writers': 0, 'readers': 0}
+    violations: list[str] = []
+    errors: list[BaseException] = []
+    deadline: float = time.monotonic() + 12
+    kwargs: dict[str, typing.Any] = dict(
+        timeout=30,
+        check_interval=0.02,
+        unavailable_timeout=2,
+        thread_sleep_time=0.01,
+    )
+
+    def contend(flags: portalocker.LockFlags, kind: str) -> None:
+        while time.monotonic() < deadline:
+            lock: redis.RedisLock = redis.RedisLock(
+                channel,
+                connection=_live_redis_connection(),
+                flags=flags,
+                **kwargs,
+            )
+            try:
+                lock.acquire()
+            except portalocker.AlreadyLocked:
+                continue
+            except BaseException as exception:  # pragma: no cover
+                errors.append(exception)
+                return
+            finally:
+                if lock.pubsub is None and lock.connection is not None:
+                    lock.connection.close()
+            with guard:
+                state[kind] += 1
+                overlap: bool = state['writers'] > 1 or (
+                    state['writers'] >= 1 and state['readers'] >= 1
+                )
+                if overlap:
+                    violations.append(f'{kind}: {state!r}')
+            time.sleep(0.01 * (0.5 + random.random()))
+            with guard:
+                state[kind] -= 1
+            lock.release()
+            if lock.connection is not None:
+                lock.connection.close()
+            time.sleep(random.random() * 0.01)
+
+    threads: list[threading.Thread] = [
+        threading.Thread(
+            target=contend,
+            args=(portalocker.LockFlags.EXCLUSIVE, 'writers'),
+            daemon=True,
+        )
+        for _ in range(3)
+    ] + [
+        threading.Thread(
+            target=contend,
+            args=(portalocker.LockFlags.SHARED, 'readers'),
+            daemon=True,
+        )
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+        assert not thread.is_alive()
+    assert not errors
+    assert not violations
+
+
+def test_redis_uncontended_acquire_stays_fast() -> None:
+    """The confirm probe must not price the uncontended fast path.
+
+    A count of one settles the confirm in a single extra round trip,
+    so an uncontended acquire stays well under the latency guard. The
+    bound is generous for loaded CI runners; the local median is a few
+    milliseconds.
+    """
+    server: fakeredis.FakeServer = fakeredis.FakeServer()
+    durations: list[float] = []
+    for _ in range(10):
+        connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+            server=server,
+            decode_responses=True,
+        )
+        lock: redis.RedisLock = redis.RedisLock(
+            'uncontended-bench',
+            connection=connection,
+            check_interval=0.5,
+        )
+        start: float = time.perf_counter()
+        lock.acquire()
+        durations.append(time.perf_counter() - start)
+        lock.release()
+    durations.sort()
+    median: float = durations[len(durations) // 2]
+    assert median < 0.1
 
 
 @pytest.mark.parametrize('timeout', [None, 0, 0.001])

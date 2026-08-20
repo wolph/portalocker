@@ -68,11 +68,10 @@
    before the promotion check, so two ``fail_when_locked`` writers on a
    free channel could both fail. The winner now takes the lock when no
    shared holder remains, so exactly one of two non-blocking contenders
-   succeeds. One pre-existing reply-staleness window around the
-   uncontended fast path is disclosed rather than closed and now also
-   reaches non-blocking winners. It has been reproduced with injected
-   scheduling and observed once under random contention on the previous
-   code, and a confirm-probe fix is left for a separate issue (#143)
+   succeeds. The pre-existing reply-staleness window around the
+   uncontended fast path reached non-blocking winners too and is closed
+   for blocking and non-blocking writers alike by the confirm probe
+   added for #145 (#143)
  * Fixed an elected ``RedisLock`` writer being usurped by a later writer
    with a lower holder id. Holder records now carry an ``elected`` field
    and pending writers defer to an advertised incumbent instead of
@@ -87,6 +86,44 @@
    is needed. Protection is complete once every writer on a channel
    runs 4.2 or later, at the cost of one extra probe round whenever a
    newcomer's reply raced the incumbent's election (#143)
+ * Closed the ``RedisLock`` reply-staleness window that could yield two
+   exclusive holders. A ping reply is a snapshot that can predate the
+   answering writer's own fast-path promotion: that writer counted a
+   single subscriber moments earlier and promoted without ever probing,
+   so a contender probing inside the window saw only pending holders,
+   elected itself and promoted too. Under reader-mixed contention at
+   short check intervals this fired about once per 60 to 200
+   acquisitions. Every promoted writer, fast path and election alike,
+   now verifies its promotion with a confirm probe run while its
+   exclusive record is already visible on the wire. Two freshly
+   promoted rivals therefore see each other and resolve
+   deterministically by holder id: the lower id keeps the lock and the
+   higher id demotes back to a fresh contender, or raises
+   ``AlreadyLocked`` after a full release under ``fail_when_locked``. A
+   lower-id pending peer that may still be deciding makes the confirm
+   probe again rather than conclude from noise, and a rival that will
+   never demote itself - a pre-4.2 exclusive holder, or a reader that
+   joined on a stale view of its own - demotes the confirming writer
+   regardless of id. A subscriber count of one settles the confirm in
+   one extra round trip, keeping the uncontended acquire at a few
+   milliseconds, and the confirm also catches most promotions built on
+   count-preserving churn (#139) after the fact, since it sees the real
+   holder set instead of a count (#145)
+ * Fixed the probe-reply drain that stretched every reply-staleness
+   window in the ``RedisLock`` protocol to around a hundred
+   milliseconds: after collecting a reply the drain polled for the next
+   one with ``timeout=0``, almost always missed a reply that was
+   milliseconds away, and then slept a full jittered drain interval (57
+   of 60 three-holder probes took an interval, median 116ms). A missed
+   non-blocking read is now followed by one short real poll so replies
+   in flight are collected in the same pass, and a probe whose
+   subscriber count moves while replies are still outstanding gives up
+   at once instead of waiting out the whole reply timeout for a holder
+   that already left. The same three-holder probe now takes a couple
+   of milliseconds, the reader-mixed contention soak completes about
+   twenty times as many acquisitions in the same wall time, and every
+   staleness window the protocol still has shrinks by two orders of
+   magnitude (#145)
  * ``RedisLock`` with ``fail_when_locked`` now raises only on a
    conclusive probe showing the channel is held. Inconclusive probes
    retry within ``timeout``, which also lets a non-blocking acquire

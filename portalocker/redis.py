@@ -34,6 +34,11 @@ Asking is a ping/pong on the channel itself::
            foreign elected writer -> defer to it, back off and retry
            elected, no readers    -> take the lock exclusively
            anything else          -> unsubscribe and retry
+      +- confirm a promotion (writers only, see
+         `RedisLock._confirm_exclusive_promotion`): with the new
+         exclusive record visible, count and probe once more. A rival
+         that promoted on an equally stale view is resolved by holder
+         id and the loser demotes
 
 Shared readers hold the lock together, an exclusive writer holds it
 alone. There is no coordinator and no lock to take before taking the
@@ -141,6 +146,13 @@ DEFAULT_THREAD_SLEEP_TIME = 0.1
 #: Version stamped into every holder record. A reply that does not carry
 #: exactly this version is treated as coming from an older portalocker.
 REDIS_LOCK_PROTOCOL_VERSION = 1
+#: Seconds a probe waits for a reply that is in flight but not yet
+#: buffered. After a non-blocking read comes up empty,
+#: `RedisLock._drain_probe_replies` polls once with this timeout before
+#: giving the pass up, so a reply a few milliseconds behind its
+#: predecessor is collected in the same pass instead of after a full
+#: jittered drain interval (#145).
+_PROBE_REPLY_GRACE = 0.005
 
 
 def _keep_first_error(
@@ -312,6 +324,25 @@ class _LockState(enum.Enum):
     #: The lock was owned and was revoked from outside. Set by
     #: `RedisLock._on_worker_exception` only.
     LOST = 'lost'
+
+
+class _ConfirmVerdict(enum.Enum):
+    """Outcome of one confirm-probe round after an exclusive promotion.
+
+    Produced by `RedisLock._confirm_probe_verdict` and consumed by
+    `RedisLock._confirm_exclusive_promotion`: one clean round confirms
+    the promotion, an outranking holder demotes it, and anything
+    undecided makes the round inconclusive so the confirm asks again
+    instead of concluding from noise (#145).
+    """
+
+    #: No holder outranks the promotion and nobody is undecided.
+    CONFIRMED = 'confirmed'
+    #: A lower-id 4.2 pending peer may be promoting on a stale view of
+    #: its own, so this round proves nothing either way.
+    RETRY = 'retry'
+    #: A holder outranks the promotion and the writer gives it up.
+    DEMOTE = 'demote'
 
 
 class RedisLockMode(str, enum.Enum):
@@ -1866,8 +1897,15 @@ class RedisLock(utils.LockBase['RedisLock']):
         at one reply per interval, and a channel with more holders than
         intervals could then never be probed conclusively, so every
         probe would kill healthy holders (#138). The first read waits up
-        to `check_interval` for a reply, the follow-up reads only empty
-        the local buffer. Draining stops early once
+        to `check_interval` for a reply, the follow-up reads first empty
+        the local buffer at ``timeout=0`` and then, when that comes up
+        empty, poll once with the short `_PROBE_REPLY_GRACE` timeout.
+        Holders answer one after another, so the next reply is usually a
+        few milliseconds behind the previous one: without the grace poll
+        the ``timeout=0`` read missed it almost every time and the probe
+        slept a full jittered drain interval per reply, which is what
+        stretched every reply-staleness window in this protocol to
+        around a hundred milliseconds (#145). Draining stops early once
         `expected_subscribers` distinct holders have replied.
 
         Args:
@@ -1878,7 +1916,10 @@ class RedisLock(utils.LockBase['RedisLock']):
                 ``legacy-<n>`` id.
             expected_subscribers: Reply count at which draining stops.
             check_interval: Seconds the first read may wait for a reply.
+                Also caps the grace poll, so a zero interval keeps the
+                drain strictly non-blocking after the first read.
         """
+        grace: float = min(_PROBE_REPLY_GRACE, check_interval)
         message: dict[str, typing.Any] | None = typing.cast(
             'dict[str, typing.Any] | None',
             pubsub.get_message(timeout=check_interval),
@@ -1899,6 +1940,14 @@ class RedisLock(utils.LockBase['RedisLock']):
                 'dict[str, typing.Any] | None',
                 pubsub.get_message(timeout=0),
             )
+            if message is None and grace > 0:
+                # The buffer is empty but the next reply may be in
+                # flight, and one short real wait collects it in this
+                # pass.
+                message = typing.cast(
+                    'dict[str, typing.Any] | None',
+                    pubsub.get_message(timeout=grace),
+                )
 
     def _collect_lock_holders(
         self,
@@ -1952,11 +2001,14 @@ class RedisLock(utils.LockBase['RedisLock']):
            immediately before the ping went out. The expectation was
            already stale, so the probe is abandoned before it puts any
            traffic on the channel.
-        2. The count changed while the replies were being collected
-           (re-checked after collection). Someone joined or left, so the
-           replies describe a channel that no longer exists in that
-           shape, and a decision made from them could be wrong for
-           either party.
+        2. The count changed while the replies were being collected,
+           checked each polling interval while replies are still
+           outstanding and once more after collection. Someone joined
+           or left, so the replies describe a channel that no longer
+           exists in that shape, and a decision made from them could be
+           wrong for either party. The interval check also stops an
+           incomplete collection from waiting out the full timeout for
+           a reply whose sender already left the channel.
         3. Fewer distinct holder ids replied than there were subscribers.
            Somebody counted by Redis is not answering, which normally
            means it crashed, though a holder too slow to answer inside
@@ -1970,10 +2022,19 @@ class RedisLock(utils.LockBase['RedisLock']):
         are, so count-preserving churn between the two checks - one
         holder leaving while another joins - remains undetectable and
         such a probe passes as conclusive. Losing waiters produce exactly
-        that churn routinely, since they unsubscribe between attempts.
-        The election survives it only because losers retry: a writer that
-        promoted on a stale sample is visible as `RedisLockMode.EXCLUSIVE`
-        to every later probe, and the retrying losers back off.
+        that churn routinely, since they unsubscribe between attempts. A
+        single probe can therefore still be built on a stale sample, and
+        what contains the damage is what happens after. A writer that
+        promoted
+        on such a sample is visible as `RedisLockMode.EXCLUSIVE` to every
+        later probe, so retrying losers back off, and its own promotion
+        does not stand on this one probe either: the confirm probe in
+        `_confirm_exclusive_promotion` re-checks the channel while the
+        promotion is already on the wire and demotes when a churn-hidden
+        holder surfaces (#145). Only a rival hidden from *that* probe as
+        well - a second count-preserving join landing in the instant
+        between its count pre-check and its ping - stays unseen, on both
+        sides at once for an actual double.
 
         Args:
             connection: The connection to publish the ping on and to run
@@ -2035,6 +2096,20 @@ class RedisLock(utils.LockBase['RedisLock']):
                 )
                 if len(holders) >= expected_subscribers:
                     break
+                # Somebody joined or left while the replies were coming
+                # in: the probe is inconclusive either way (case 2), so
+                # stop waiting for replies that may never come instead
+                # of burning the whole timeout on them. A waiter that
+                # backs off right after answering used to cost exactly
+                # that stall (#145). Returning here skips the reap on
+                # purpose: a changed count is churn, not a crashed
+                # holder, and reaping is only safe when the count held
+                # steady while a subscriber stayed silent.
+                if (
+                    self._get_subscriber_count(connection)
+                    != expected_subscribers
+                ):
+                    return None
 
             current_subscribers: int = self._get_subscriber_count(connection)
             logger.debug(
@@ -2127,6 +2202,14 @@ class RedisLock(utils.LockBase['RedisLock']):
         `_collect_lock_holders` returns `None` when the subscriber count
         moved. The losers simply retry, and a loser that keeps losing is
         bounded by the caller's timeout, not by the election.
+
+        Winning here is also not the last word. A reply is a snapshot,
+        so a contender can win this sort from a reply that predates a
+        peer's own promotion - most easily the uncontended fast path,
+        which never probes at all. The promotion that follows a win is
+        therefore verified by `_confirm_exclusive_promotion` before
+        `acquire` reports success, and a winner whose view turns out
+        stale demotes there instead of standing on it (#145).
 
         The deference rule is what makes an election stick. Winning is
         remembered in `writer_elected` and advertised on every ping
@@ -2404,15 +2487,15 @@ class RedisLock(utils.LockBase['RedisLock']):
         promoting anyway is exactly the double-holder interleaving the
         #143 review reproduced.
 
-        One reply-staleness window is disclosed rather than closed: on
-        a free channel a contender can promote on a stale reply
-        answered between another writer's subscriber count and its
-        fast-path promotion, which predates this release, has been
-        reproduced with injected scheduling, was observed once under
-        random contention on the previous code, and now also applies to
-        `fail_when_locked` winners since they promote too. Closing it
-        needs a confirm probe after promotion and stays a separate
-        issue.
+        The reply-staleness window around the uncontended fast path -
+        a contender promoting on a stale reply answered between another
+        writer's subscriber count and its fast-path promotion - is not
+        this method's to close: every promotion this method makes, the
+        `fail_when_locked` winners included, is verified against the
+        live channel by `_confirm_exclusive_promotion` before `acquire`
+        reports success, and the writer whose view was stale demotes
+        there (#145). What the confirm does and does not cover is
+        documented on that method.
 
         Both promotion sites take `_mode_lock` and `writer_elected` is
         assigned under it as well, so a ping answered by the worker
@@ -2483,6 +2566,204 @@ class RedisLock(utils.LockBase['RedisLock']):
             self.writer_elected = True
         return False
 
+    def _confirm_probe_verdict(
+        self,
+        holders: list[RedisLockHolder],
+    ) -> _ConfirmVerdict:
+        """Judge one conclusive confirm probe of a freshly promoted writer.
+
+        Runs with this lock already advertising
+        `RedisLockMode.EXCLUSIVE` on the wire, so every rule reasons
+        about what a *rival* record means next to a promotion that is
+        now visible. The rules mirror `_must_forfeit`, applied to the
+        post-promotion shape of the same conflicts:
+
+        - A `RedisLockMode.SHARED` holder outranks the promotion. A
+          reader can only coexist with an exclusive writer through a
+          stale or churned sample on one of the two sides, and the
+          reader holds without probing again, so the writer is the side
+          that can still yield.
+        - A `RedisLockMode.EXCLUSIVE` rival that is legacy or pre-4.2
+          (`RedisLockHolder.elected` is `None`) outranks the promotion
+          regardless of id: such a rival never runs a confirm probe, so
+          it will not demote itself.
+        - A 4.2 `RedisLockMode.EXCLUSIVE` rival resolves by the same
+          deterministic rule two elected incumbents use: the lower id
+          keeps, the higher id demotes. Seeing a lower id is a demote.
+          A higher id is left to demote itself, which it does, because
+          its own confirm cannot conclude while this lock is visible as
+          pending (retry below) or as exclusive (this rule).
+        - A `RedisLockMode.PENDING` peer with a lower id and no
+          ``elected`` field runs portalocker 4.0 or 4.1: it wins the id
+          sort, cannot be told to defer and will promote, so the
+          promotion is given up at once, exactly like `_must_forfeit`
+          rule 3.
+        - A `RedisLockMode.PENDING` peer with a lower id that does
+          speak 4.2 is undecided, the same ambiguity the #143 hold-off
+          waits out: its reply cannot show whether its current probe
+          predates this promotion, so it may be about to promote on a
+          stale view. The round is inconclusive and the confirm asks
+          again. By the next round the peer has either deferred (gone
+          from the channel) or promoted (the exclusive rules above
+          settle it).
+        - Higher-id pending peers lose the sort against a visible
+          exclusive record and defer on their own, so they do not block
+          the confirmation.
+
+        Args:
+            holders: The holders returned by a conclusive probe,
+                including this lock's own record.
+
+        Returns:
+            The verdict, with `_ConfirmVerdict.DEMOTE` taking
+            precedence over `_ConfirmVerdict.RETRY` when both apply.
+        """
+        verdict: _ConfirmVerdict = _ConfirmVerdict.CONFIRMED
+        for holder in holders:
+            if holder.holder_id == self.holder_id:
+                continue
+            if holder.mode is RedisLockMode.SHARED:
+                return _ConfirmVerdict.DEMOTE
+            lower: bool = holder.holder_id < self.holder_id
+            if holder.mode is RedisLockMode.EXCLUSIVE:
+                if holder.legacy or holder.elected is None or lower:
+                    return _ConfirmVerdict.DEMOTE
+                continue
+            if not lower:
+                continue
+            if holder.elected is None:
+                return _ConfirmVerdict.DEMOTE
+            verdict = _ConfirmVerdict.RETRY
+        return verdict
+
+    def _confirm_exclusive_promotion(
+        self,
+        connection: redis.client.Redis,
+        fail_when_locked: bool,
+    ) -> bool:
+        """Verify a fresh exclusive promotion against the live channel.
+
+        The promotion that led here was decided from ping replies, and
+        a reply is a snapshot that can predate the peer's own fast-path
+        promotion: the peer counted ``subscribers == 1`` moments
+        earlier and promoted without ever probing, while its worker
+        still answered this lock's ping as pending. Deciding from such
+        a reply is how two writers end up exclusive at once (#145).
+        This confirm runs after *every* promotion, fast path and
+        election alike, with the new `RedisLockMode.EXCLUSIVE` record
+        already visible on the wire: that visibility is what breaks the
+        symmetry, because from now on every fresh probe any peer takes
+        shows this lock as exclusive, and two freshly promoted rivals
+        each see the other and resolve deterministically by holder id
+        through `_confirm_probe_verdict`.
+
+        A subscriber count of one confirms without probing: ownership
+        *is* the subscription, so a rival that promoted is necessarily
+        still subscribed and counted, and being alone proves there is
+        nobody to conflict with. That single ``PUBSUB NUMSUB`` round
+        trip is the entire cost on the uncontended fast path, which is
+        why the confirm is unconditional rather than gated on a
+        count-moved heuristic: the recount is the heuristic, and unlike
+        one it is conclusive when it comes back one.
+
+        Inconclusive rounds (a churning count, a silent subscriber, an
+        undecided lower-id peer) are retried within an
+        `unavailable_timeout` budget, never concluded from. A confirm
+        that cannot reach one clean round demotes when the budget runs
+        out: giving up a promotion that could not be verified is the
+        safe direction, and costs one attempt in `acquire`'s retry
+        loop.
+
+        This is a channel-level check and deliberately distinct from
+        `_confirm_held`, the worker-death handshake: this method asks
+        "is my promotion consistent with everybody else", the state
+        handshake asks "is my own subscription still alive". The caller
+        runs them in that order, so a subscription dying mid-confirm is
+        still caught before `acquire` reports success.
+
+        Two residues stay open, and they bound what "confirmed" means.
+        Count-preserving churn can still hide a subscribed rival from a
+        single conclusive probe, this one included, but only when a
+        join lands in the instant between the probe's count pre-check
+        and its ping, and producing two confirmed holders needs that
+        coincidence on both sides at once. And a pre-4.2 rival that
+        promotes on a stale view *after* this confirm concluded is not
+        seen by anybody, since it never confirms. Among 4.2.1+ writers
+        that ordering is impossible, because a rival mid-decision is
+        still subscribed and therefore visible to this confirm as
+        pending or exclusive.
+
+        Args:
+            connection: The command connection to count and probe on.
+            fail_when_locked: Forwarded to the demotion: a non-blocking
+                writer raises instead of retrying.
+
+        Returns:
+            True when the promotion stands. False when the writer
+            demoted and the attempt should be retried.
+
+        Raises:
+            AlreadyLocked: `fail_when_locked` was set and the writer
+                demoted, raised after a full `release`.
+        """
+        for _ in self._timeout_generator(self.unavailable_timeout, None):
+            subscribers: int = self._get_subscriber_count(connection)
+            if subscribers <= 1:
+                return True
+            holders: list[RedisLockHolder] | None = self._collect_lock_holders(
+                connection,
+                subscribers,
+                self.unavailable_timeout,
+            )
+            if holders is None:
+                continue
+            verdict: _ConfirmVerdict = self._confirm_probe_verdict(holders)
+            logger.debug(
+                'Redis lock %s confirm probe verdict=%s holders=%r',
+                self.holder_id,
+                verdict.value,
+                holders,
+            )
+            if verdict is _ConfirmVerdict.CONFIRMED:
+                return True
+            if verdict is _ConfirmVerdict.DEMOTE:
+                break
+        self._demote_unconfirmed_promotion(fail_when_locked)
+        return False
+
+    def _demote_unconfirmed_promotion(self, fail_when_locked: bool) -> None:
+        """Give up a promotion the confirm probe could not stand behind.
+
+        The mirror of the give-up branch in `_resolve_lock_holders`,
+        with the mode rolled back first: the lock is advertising
+        `RedisLockMode.EXCLUSIVE`, so the record returns to
+        `RedisLockMode.PENDING` (forgetting any election, exactly like
+        a forfeit) before the subscription is dropped. The next attempt
+        then rejoins as a fresh contender, and the rival that outranked
+        this promotion is visible to that attempt's ordinary probe.
+
+        Args:
+            fail_when_locked: When set, the demotion is terminal for
+                this acquisition: everything is released and
+                `AlreadyLocked` is raised, mirroring how a conclusive
+                lost election ends a non-blocking acquire.
+
+        Raises:
+            AlreadyLocked: `fail_when_locked` was set, raised after the
+                full release.
+        """
+        with self._mode_lock:
+            self.mode = RedisLockMode.PENDING
+            self.writer_elected = False
+        self._unsubscribe()
+        logger.debug(
+            'Redis lock %s demoted an unconfirmed promotion to retry',
+            self.holder_id,
+        )
+        if fail_when_locked:
+            self.release()
+            raise exceptions.AlreadyLocked()
+
     def acquire(
         self,
         timeout: float | None = None,
@@ -2502,6 +2783,11 @@ class RedisLock(utils.LockBase['RedisLock']):
            fast path and costs one round trip.
         2. Otherwise probe the channel with `_collect_lock_holders` and
            let `_resolve_lock_holders` decide.
+        3. A writer that promoted - on either path - verifies the
+           promotion against the live channel with
+           `_confirm_exclusive_promotion` and demotes when a rival
+           promoted on an equally stale view and outranks it. On the
+           fast path this costs one extra subscriber count.
 
         A failed attempt normally unsubscribes again, so the next
         iteration subscribes from scratch; an elected writer is the
@@ -2509,11 +2795,11 @@ class RedisLock(utils.LockBase['RedisLock']):
 
         Either way, success is only reported after `_confirm_held`
         verified - under the state lock the worker's failure handler
-        also takes - that the keep-alive worker is still alive and
-        recorded no error. A subscription that died in the microseconds
-        after the winning probe therefore costs one attempt instead of
-        producing a lock that is held in this process's imagination
-        only.
+        also takes, and after the channel-level confirm above - that
+        the keep-alive worker is still alive and recorded no error. A
+        subscription that died in the microseconds after the winning
+        probe therefore costs one attempt instead of producing a lock
+        that is held in this process's imagination only.
 
         `fail_when_locked` means the caller will not wait for a held
         channel: the first conclusive probe showing the lock actually
@@ -2698,21 +2984,29 @@ class RedisLock(utils.LockBase['RedisLock']):
 
         The decision half of `_acquire_attempt`, run under its rollback
         protection: takes the uncontended fast path or hands a probe to
-        `_resolve_lock_holders`, and finally confirms the win through
-        `_confirm_or_abandon`.
+        `_resolve_lock_holders`, verifies an exclusive promotion
+        against the live channel through
+        `_confirm_exclusive_promotion`, and finally confirms the win
+        through `_confirm_or_abandon`. The confirm probe runs for every
+        exclusive promotion - the fast path and both election paths -
+        because each of them decides from information that can be a
+        reply-staleness window old. A shared join needs no confirm,
+        since readers admit each other and a conclusive probe of pure
+        readers has no promotion in it to race.
 
         Args:
             connection: The command connection of this acquisition.
-            fail_when_locked: Forwarded to `_resolve_lock_holders`.
+            fail_when_locked: Forwarded to `_resolve_lock_holders` and
+                to the confirm probe's demotion.
 
         Returns:
             True when the lock is now held and confirmed, False when
             the attempt failed.
 
         Raises:
-            AlreadyLocked: Propagated from `_resolve_lock_holders` when
-                `fail_when_locked` is set and the channel is
-                conclusively held.
+            AlreadyLocked: Propagated from `_resolve_lock_holders` or
+                from a `fail_when_locked` confirm demotion when the
+                channel is conclusively held.
         """
         subscribers: int = self._get_subscriber_count(connection)
         logger.debug(
@@ -2725,21 +3019,24 @@ class RedisLock(utils.LockBase['RedisLock']):
             if self.flags == constants.LockFlags.EXCLUSIVE:
                 with self._mode_lock:
                     self.mode = RedisLockMode.EXCLUSIVE
-            return self._confirm_or_abandon()
-
-        holders: list[RedisLockHolder] | None = self._collect_lock_holders(
-            connection,
-            subscribers,
-            self.unavailable_timeout,
-        )
-        logger.debug(
-            'Redis lock %s observed holders=%r',
-            self.holder_id,
-            holders,
-        )
-        if self._resolve_lock_holders(holders, fail_when_locked):
-            return self._confirm_or_abandon()
-        return False
+        else:
+            holders: list[RedisLockHolder] | None = self._collect_lock_holders(
+                connection,
+                subscribers,
+                self.unavailable_timeout,
+            )
+            logger.debug(
+                'Redis lock %s observed holders=%r',
+                self.holder_id,
+                holders,
+            )
+            if not self._resolve_lock_holders(holders, fail_when_locked):
+                return False
+        if self.flags == constants.LockFlags.EXCLUSIVE and (
+            not self._confirm_exclusive_promotion(connection, fail_when_locked)
+        ):
+            return False
+        return self._confirm_or_abandon()
 
     def _try_subscribe(self, connection: redis.client.Redis) -> bool:
         """Subscribe for one attempt, absorbing transient failures.

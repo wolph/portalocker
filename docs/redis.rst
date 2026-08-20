@@ -56,6 +56,18 @@ protection holds once every writer on a channel runs 4.2 or later, with
 handover delayed by that one probe round when a newcomer's reply raced
 the incumbent's election.
 
+A promotion is also verified after the fact. A reply is a snapshot, so
+a probe can miss a peer's promotion by milliseconds - most easily the
+uncontended fast path, which promotes on a bare subscriber count
+without probing at all - and two writers could then promote on each
+other's stale replies. Since 4.2.0 every promoted writer runs one
+confirm probe while its new exclusive record is already visible on the
+wire, so two freshly promoted rivals see each other and resolve the
+conflict deterministically: the lower holder id keeps the lock, the
+higher id demotes and retries. On an uncontended channel the confirm
+is a single extra subscriber count, which keeps the fast path at a few
+milliseconds.
+
 Installation
 -------------
 
