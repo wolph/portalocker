@@ -798,3 +798,125 @@ def test_temporaryfilelock_constructor_accepts_raise_on_release_error(
     monkeypatch.undo()
     assert lock.fh is None
     os.unlink(tmpfile)
+
+
+def _patch_nt_release(
+    monkeypatch: pytest.MonkeyPatch,
+    unlink_errors: list[Exception],
+) -> tuple[list[str], list[float]]:
+    """Route release through the Windows path with scripted unlink errors.
+
+    Returns the list of attempted unlink paths and the recorded sleeps.
+    ``unlink_errors`` is consumed one error per attempt; once exhausted
+    the real ``os.unlink`` runs.
+    """
+    attempts: list[str] = []
+    sleeps: list[float] = []
+    real_unlink = os.unlink
+
+    def scripted_unlink(
+        target: typing.Any,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> None:
+        attempts.append(str(target))
+        if unlink_errors:
+            raise unlink_errors.pop(0)
+        real_unlink(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, 'unlink', scripted_unlink)
+    monkeypatch.setattr(utils.time, 'sleep', sleeps.append)
+    monkeypatch.setattr(os, 'name', 'nt')
+    return attempts, sleeps
+
+
+def test_temporaryfilelock_nt_release_retries_transient_denial(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Windows unlink retry must ride out a scanner holding the file
+    briefly (two denials here) and still remove it.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.acquire()
+    attempts, sleeps = _patch_nt_release(
+        monkeypatch,
+        [PermissionError('scanner holds it'), PermissionError('still held')],
+    )
+    lock.release()
+    monkeypatch.undo()
+    assert len(attempts) == 3
+    assert len(sleeps) == 2
+    assert not os.path.exists(tmpfile)
+    assert lock.fh is None
+
+
+def test_temporaryfilelock_nt_release_gives_up_without_final_sleep(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When every attempt is denied the last failure surfaces (strict
+    mode) and no sleep follows the final attempt: sleeping after giving
+    up only delays the caller for nothing.
+    """
+    lock = portalocker.TemporaryFileLock(
+        tmpfile,
+        raise_on_release_error=True,
+    )
+    lock.acquire()
+    attempts, sleeps = _patch_nt_release(
+        monkeypatch,
+        [PermissionError(f'denied {n}') for n in range(5)],
+    )
+    with pytest.raises(PermissionError, match='denied 4'):
+        lock.release()
+    monkeypatch.undo()
+    assert len(attempts) == 5
+    assert len(sleeps) == 4, 'the release slept after its final attempt'
+    assert lock.fh is None
+    os.unlink(tmpfile)
+
+
+def test_temporaryfilelock_nt_release_captures_other_oserror(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A non-retryable unlink failure must follow the flag contract like
+    the POSIX path (suppressed and logged by default) instead of escaping
+    ``release`` regardless of the flag as it did before 4.1.1. It is also
+    not worth retrying, so one attempt suffices.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.acquire()
+    attempts, sleeps = _patch_nt_release(
+        monkeypatch,
+        [IsADirectoryError('surprise directory')],
+    )
+    with caplog.at_level(logging.WARNING, logger=utils.logger.name):
+        lock.release()
+    monkeypatch.undo()
+    assert len(attempts) == 1
+    assert sleeps == []
+    assert any(
+        'suppressed error while removing' in record.message
+        for record in caplog.records
+    )
+    assert lock.fh is None
+    os.unlink(tmpfile)
+
+
+def test_temporaryfilelock_nt_release_tolerates_vanished_file(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A lock file that is already gone is fine on the Windows path too."""
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.acquire()
+    os.unlink(tmpfile)
+    attempts, sleeps = _patch_nt_release(monkeypatch, [])
+    lock.release()
+    monkeypatch.undo()
+    assert len(attempts) == 1
+    assert sleeps == []
+    assert lock.fh is None

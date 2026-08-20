@@ -1753,38 +1753,45 @@ class TemporaryFileLock(Lock):
             unlink_error,
         )
 
-    def _release_nt(
-        self, fh: types.IO
-    ) -> Exception | None:  # pragma: no cover
+    def _release_nt(self, fh: types.IO) -> Exception | None:
         """Unlock and close first, then remove the file with a short retry.
 
         A locked file cannot be unlinked on Windows, hence the ordering,
         and an AV or indexing scanner can hold the freshly closed file
-        open for a moment, hence the retry.
+        open for a moment, hence the retry. Only `PermissionError` is
+        transient in that way, so only it is retried, and the retry sleep
+        is skipped after the final attempt: sleeping after giving up only
+        delays the caller. Any other failure is captured on the first
+        attempt, like the POSIX path captures its unlink errors, so the
+        flag contract of `release` applies to it instead of the error
+        escaping regardless of the flag. Both changed in 4.1.1.
 
         Args:
             fh: The filehandle claimed by `release`.
 
         Returns:
-            The last `PermissionError` when the file still refused to go
-            after the retries, or `None` when it was removed or was
-            already gone.
+            The unlink failure for `release` to report (the last denial
+            after the retries, or the first non-retryable error), or
+            `None` when the file was removed or was already gone.
         """
         self._release_claimed_fh(fh)
-        if not os.path.isfile(self.filename):
-            return None
         unlink_error: Exception | None = None
-        for _ in range(5):
+        last_attempt: int = 4
+        for attempt in range(last_attempt + 1):
             try:
                 os.unlink(self.filename)
-                unlink_error = None
-                break
+            except FileNotFoundError:
+                # Already gone, nothing left to remove.
+                return None
             except PermissionError as error:
                 unlink_error = error
-                time.sleep(0.05)
-            except FileNotFoundError:
-                unlink_error = None
-                break
+                if attempt < last_attempt:
+                    time.sleep(0.05)
+            except Exception as error:
+                # Not a transient share violation: retrying cannot help.
+                return error
+            else:
+                return None
         return unlink_error
 
     def _release_posix(
