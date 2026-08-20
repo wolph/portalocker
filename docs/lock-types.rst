@@ -128,6 +128,12 @@ Guarantees:
 - `BoundedSemaphore.acquire` sweeps the slots in a fixed numerical order
   on every attempt, so all contenders race for slot 0 first, then slot
   1, and so on.
+- With ``fail_when_locked=True`` (the default) a full semaphore raises
+  ``AlreadyLocked`` right after the first sweep, without waiting out the
+  ``timeout``. With ``fail_when_locked=False`` the sweep repeats until
+  the timeout expires and then returns ``None`` instead of raising: a
+  divergence from every other lock in this module, kept for backward
+  compatibility, so check the return value.
 - `BoundedSemaphore.release` only unlocks the held slot; the lock files
   themselves stay on disk so the same slots can be reused later.
 
@@ -137,7 +143,17 @@ Costs:
   emits a ``DeprecationWarning`` and risks colliding with unrelated
   programs; see `NamedBoundedSemaphore`.
 - Acquiring while already holding a slot is a programming error
-  (`AssertionError`); release first.
+  (``LockException``), so release first. Before 4.1.1 this guard was an
+  ``assert``, so ``python -O`` silently took a second slot instead.
+- The slot files must survive while their slots are held. A slot file
+  that is deleted externally mid-hold silently admits an extra holder
+  (the operating system lock lives on the deleted inode, invisible to
+  new acquirers), and the default ``directory`` is the system temporary
+  directory, exactly where tmp cleaners prune. Point ``directory`` at a
+  location exempt from cleanup for anything long running, and prefer a
+  private directory on multi-user systems: a slot file owned by another
+  user typically raises ``PermissionError`` out of ``acquire`` instead
+  of counting as busy.
 
 >>> import portalocker
 >>> semaphore = portalocker.BoundedSemaphore(2, name='workers', directory='')
@@ -227,8 +243,10 @@ Guarantees:
 
 - `TemporaryFileLock.release` unlinks the lock file. Two fallbacks catch
   a caller that forgets to release: `LockBase.__del__` on garbage
-  collection, and an `atexit` handler registered by the constructor for
-  a lock still held when the interpreter shuts down.
+  collection, and a single module level `atexit` hook that releases any
+  lock still held when the interpreter shuts down. The hook only acts in
+  the process that constructed the lock, so a forked child exiting does
+  not unlink the file of a lock its parent still holds.
 - Releasing an instance that does not hold the lock is a no-op, so a
   stale or double-released instance cannot unlink the file out from
   under whoever holds it at that moment.

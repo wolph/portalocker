@@ -73,6 +73,67 @@
    losing waiters retry. Also documented that ``RedisLock`` requires a
    single standalone Redis endpoint, since ``PUBSUB NUMSUB`` is node-local
    in cluster and replica setups (#139)
+ * Behaviour change: a full ``BoundedSemaphore`` with
+   ``fail_when_locked=True`` (the default) now raises ``AlreadyLocked``
+   right after the first sweep of the slots, as its documentation always
+   promised, instead of first retrying for the whole ``timeout`` (5
+   seconds by default). With ``fail_when_locked=False`` the semaphore
+   still retries for the full timeout and then returns ``None`` rather
+   than raising. That ``None`` return is the long-documented contract of
+   this class, diverging from every other lock, and is now called out
+   explicitly in the class documentation
+ * Behaviour change: acquiring a ``BoundedSemaphore`` or
+   ``NamedBoundedSemaphore`` instance that already holds a slot now
+   raises ``portalocker.LockException`` instead of ``AssertionError``.
+   The assert was the only re-acquire guard and ``python -O`` strips
+   asserts, so a second acquire silently consumed a second slot,
+   overwrote the reference to the first and starved competitors of a
+   slot nobody could release anymore
+ * Fixed the ``BoundedSemaphore`` default-name ``DeprecationWarning``
+   being attributed to portalocker's own source (``stacklevel=1``). It
+   now points at the constructing caller, so it names the code to fix
+   and deduplicates per call site instead of once globally
+ * Fixed ``TemporaryFileLock`` and ``PidFileLock`` registering one
+   ``atexit`` callback per constructed instance and never unregistering
+   it, which grew without bound in long-running processes churning
+   through short-lived locks. A single module level hook registered once
+   at import now releases whichever locks are still held at interpreter
+   exit
+ * Fixed a forked child releasing its parent's ``TemporaryFileLock`` or
+   ``PidFileLock`` on its own normal exit. The child inherits the live
+   lock objects, and the interpreter-exit cleanup unlinked the parent's
+   lock files while the parent still believed it held them, breaking the
+   classic acquire-then-fork daemonize sequence. The exit hook now only
+   releases locks constructed by the exiting process itself
+ * Behaviour change: ``portalocker.open_atomic`` now raises
+   ``FileExistsError`` when the destination already exists on entry,
+   matching its documentation and the publication-time race. It raised
+   ``AssertionError`` before
+ * Fixed a 4.0.0 regression in ``portalocker.open_atomic``: publication
+   uses a hard link on POSIX, which hard-failed on filesystems without
+   hard link support (exFAT and some SMB, NFS and FUSE mounts) where
+   3.2.0's rename worked, and the cleanup then deleted the freshly
+   written payload as well. Publication now falls back to an existence
+   check plus rename on those filesystems, preserving the no-replace
+   guarantee up to a narrow, documented race window
+ * Behaviour change: when ``open_atomic`` fails to publish, for any
+   reason, the temporary file is now kept and the raised exception names
+   its path, where the payload was previously deleted without a trace.
+   An exception from the caller's body, on the other hand, now removes
+   the temporary file that used to be leaked, and a body that closes the
+   handle itself no longer breaks publication because the payload is
+   synchronized through a fresh descriptor
+ * Fixed ``open_atomic`` publishing destinations with the private
+   ``0o600`` permissions of its ``NamedTemporaryFile``. The destination
+   now carries the ``0o666`` minus umask mode a plain ``open`` would
+   have produced
+ * Documented two ``BoundedSemaphore`` operational hazards: a slot file
+   deleted externally mid-hold silently admits an extra holder, and the
+   default directory is the tmp-cleaner-patrolled system temporary
+   directory, so long-running semaphores need a private directory exempt
+   from cleanup. Also documented that ``open_atomic`` does not fsync the
+   directory entry, so the published name itself is not guaranteed
+   durable across power loss
 
 4.1.0:
 

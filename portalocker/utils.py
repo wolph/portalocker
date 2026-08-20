@@ -96,6 +96,46 @@ def coalesce(*args: typing.Any, test_value: typing.Any = None) -> typing.Any:
     return next((arg for arg in args if arg is not test_value), None)
 
 
+#: Errno values that mean the filesystem refused the hard link itself,
+#: rather than the specific call failing: no hard link support at all
+#: (``EPERM`` on exFAT and some FUSE mounts, ``ENOTSUP`` /
+#: ``EOPNOTSUPP`` on some SMB and NFS mounts), a cross-device link
+#: (``EXDEV``) or the link count limit (``EMLINK``). `open_atomic` reacts
+#: to these by publishing through its rename fallback instead.
+_HARD_LINK_FALLBACK_ERRNOS: frozenset[int] = frozenset(
+    (
+        errno.EPERM,
+        errno.ENOTSUP,
+        errno.EOPNOTSUPP,
+        errno.EXDEV,
+        errno.EMLINK,
+    )
+)
+
+
+def _annotate_preserved_payload(error: BaseException, temp_name: str) -> None:
+    """Record on ``error`` that the written payload survives on disk.
+
+    `open_atomic` keeps its temporary file when publication fails, so the
+    caller's data is never silently destroyed. This helper welds the
+    location of that file onto the exception the caller is about to
+    receive, since the temporary name is random and otherwise unknowable.
+
+    Args:
+        error: The exception about to be re-raised by `open_atomic`. For
+            an `OSError` carrying a ``strerror`` the note is appended
+            there, so it shows up in ``str(error)`` and the traceback.
+            Any other exception gets the note appended to its ``args``
+            for the same effect.
+        temp_name: Path of the preserved temporary file.
+    """
+    note: str = f'payload preserved at {temp_name}'
+    if isinstance(error, OSError) and error.strerror:
+        error.strerror = f'{error.strerror} ({note})'
+    else:
+        error.args = (*error.args, note)
+
+
 @contextlib.contextmanager
 def open_atomic(
     filename: Filename,
@@ -103,14 +143,40 @@ def open_atomic(
 ) -> collections.abc.Generator[types.IO]:
     """Open a new file for atomic writing without replacing an existing file.
 
-    The destination must not exist when entering or publishing the context. If
-    another actor creates it while the context is open, publication raises
-    :class:`FileExistsError` and leaves that destination untouched.
+    The destination must not exist when entering or publishing the context.
+    A destination that exists on entry raises :class:`FileExistsError`
+    straight away. If another actor creates it while the context is open,
+    publication raises :class:`FileExistsError` as well and leaves that
+    destination untouched.
 
     The implementation writes and synchronizes a temporary file in the
-    destination directory, then publishes it with an operation that refuses an
-    existing destination. Windows uses an atomic rename; POSIX uses an atomic
-    hard link, so the POSIX filesystem must support hard links.
+    destination directory, then publishes it with an operation that refuses
+    an existing destination. Windows uses an atomic rename and POSIX an
+    atomic hard link. On POSIX filesystems without hard link support (exFAT
+    and some SMB, NFS and FUSE mounts) the hard link fails with an errno in
+    `_HARD_LINK_FALLBACK_ERRNOS` and publication falls back to an existence
+    check followed by a rename. That check-then-rename pair is not atomic:
+    a destination created between the check and the rename is replaced
+    instead of detected, a narrower guarantee than the hard link gives.
+
+    The two failure directions clean up differently. When the caller's
+    body raises, the temporary file is removed: the payload is incomplete
+    and keeping it would leak one file per failed attempt. When the body
+    completed but *publication* fails, for any reason, the temporary file
+    is kept so the finished payload is not destroyed, and the raised
+    exception names its path. Publication succeeding is the only other
+    thing that removes it.
+
+    The published file carries the permissions a plain `open` would have
+    given it (``0o666`` minus the umask), not the private ``0o600`` its
+    temporary file starts with. A body that closes the handle itself is
+    fine: the file is synchronized through a fresh descriptor instead.
+
+    Note:
+        The destination *content* is synchronized to disk before
+        publication, but the directory entry is not (no ``fsync`` on the
+        directory). After a power loss the name may be missing even
+        though the context exited cleanly.
 
     https://docs.python.org/3/library/os.html#os.link
 
@@ -139,28 +205,84 @@ def open_atomic(
         path = pathlib.Path(filename)
 
     if path.exists():
-        raise AssertionError(f'{path!r} exists')
+        raise FileExistsError(
+            errno.EEXIST,
+            os.strerror(errno.EEXIST),
+            str(path),
+        )
 
     # Create the parent directory if it doesn't exist
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.NamedTemporaryFile(
+    # Not a plain `with` on this line: the handle is entered by the
+    # `with temp_fh` below, and creation is kept separate so the cleanup
+    # code can refer to the temporary name outside that block.
+    temp_fh = tempfile.NamedTemporaryFile(  # noqa: SIM115
         mode=(binary and 'wb') or 'w',
         dir=str(path.parent),
         delete=False,
-    ) as temp_fh:
-        yield temp_fh
-        temp_fh.flush()
-        os.fsync(temp_fh.fileno())
+    )
+    temp_name: str = temp_fh.name
+    try:
+        with temp_fh:
+            yield temp_fh
+            if temp_fh.closed:
+                # The body closed the handle itself, so reopen briefly to
+                # keep the payload synchronized before publication.
+                sync_fd: int = os.open(temp_name, os.O_RDWR)
+                try:
+                    os.fsync(sync_fd)
+                finally:
+                    os.close(sync_fd)
+            else:
+                temp_fh.flush()
+                os.fsync(temp_fh.fileno())
+    except BaseException:
+        # The caller's body (or the flush) failed: there is no complete
+        # payload worth keeping, so remove the temporary file instead of
+        # leaking one per failed attempt.
+        with contextlib.suppress(Exception):
+            temp_fh.close()
+        with contextlib.suppress(Exception):
+            os.remove(temp_name)
+        raise
 
     try:
+        # `NamedTemporaryFile` creates the file as 0o600 and both hard
+        # link and rename publication preserve that. Widen it to what a
+        # plain `open` would have produced, so the published file is
+        # readable by the same audience as any other file this process
+        # writes.
+        inherited_umask: int = os.umask(0)
+        os.umask(inherited_umask)
+        os.chmod(temp_name, 0o666 & ~inherited_umask)
+
         if os.name == 'nt':  # pragma: not-nt
-            os.rename(temp_fh.name, path)
+            os.rename(temp_name, path)
         else:  # pragma: not-posix
-            os.link(temp_fh.name, path)
-    finally:
-        with contextlib.suppress(Exception):
-            os.remove(temp_fh.name)
+            try:
+                os.link(temp_name, path)
+            except OSError as link_error:
+                if link_error.errno not in _HARD_LINK_FALLBACK_ERRNOS:
+                    raise
+                # No hard link support here (exFAT, some SMB/NFS/FUSE):
+                # fall back to check-then-rename. See the docstring for
+                # the narrowed race window this fallback accepts.
+                if path.exists():
+                    raise FileExistsError(
+                        errno.EEXIST,
+                        os.strerror(errno.EEXIST),
+                        str(path),
+                    ) from link_error
+                os.rename(temp_name, path)
+    except Exception as error:
+        # Keep the temporary file: deleting it here would silently
+        # destroy the payload the caller just wrote.
+        _annotate_preserved_payload(error, temp_name)
+        raise
+
+    with contextlib.suppress(Exception):
+        os.remove(temp_name)
 
 
 #: The type returned by `LockBase.acquire` and, through it, by
@@ -925,18 +1047,61 @@ def _fh_matches_path(fh: types.IO, filename: str) -> bool:  # pragma: not-posix
         return False
 
 
+#: Live `TemporaryFileLock` instances (and `PidFileLock`, which inherits
+#: the registration) that `_release_locks_at_exit` releases when the
+#: interpreter shuts down, each mapped to the pid of the process that
+#: constructed it. A `weakref.WeakKeyDictionary`, so membership never
+#: keeps a lock alive and collected locks drop out on their own.
+_exit_releases: weakref.WeakKeyDictionary[TemporaryFileLock, int] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _release_locks_at_exit() -> None:  # pragma: no cover - interpreter exit
+    """Release every still-live `TemporaryFileLock` at interpreter exit.
+
+    Registered with `atexit` exactly once, at import time, instead of once
+    per constructed lock: registering per instance and never unregistering
+    made a long-lived process accumulate one dead callback for every lock
+    it ever constructed. Releasing is a no-op for an instance that holds
+    nothing, so already-released locks cost nothing here. Errors are
+    suppressed, since the interpreter is on its way out and nobody is left
+    to handle them.
+
+    Locks constructed by another process are skipped. A forked child
+    inherits the parent's live locks (and this hook), and releasing them
+    on the child's normal exit would unlink the parent's lock files while
+    the parent still believes it holds them: the classic daemonize
+    sequence of acquire-then-fork lost its lock the moment either side
+    exited. Only the process that constructed a lock releases it here.
+    """
+    current_pid: int = os.getpid()
+    for lock, owner_pid in list(_exit_releases.items()):
+        if owner_pid != current_pid:
+            continue
+        with contextlib.suppress(Exception):
+            lock.release()
+
+
+atexit.register(_release_locks_at_exit)
+
+
 class TemporaryFileLock(Lock):
     """A `Lock` whose lock file only exists while the lock is held.
 
     Use it when the file is purely a mutex and leaving it behind would be
     litter. `release` unlinks the path, and so do the two fallbacks that
     catch a program which forgets to: `LockBase.__del__` when the object is
-    collected, and an `atexit` handler registered by the constructor when
-    the interpreter shuts down while the lock is still held.
+    collected, and a single module level `atexit` hook that releases every
+    lock still held when the interpreter shuts down.
 
-    That handler holds a `weakref.ref` rather than the lock itself, so
-    registering it does not keep the object alive; a lock that is collected
-    earlier simply leaves the handler with nothing to do.
+    That hook tracks instances through a weak mapping, so it neither
+    keeps a lock alive nor grows with the number of locks a process has
+    ever constructed. A lock that is collected earlier simply drops out of
+    the mapping and leaves the hook with nothing to do. The hook also only
+    releases locks constructed by the exiting process itself: a forked
+    child inherits the parent's live locks, and releasing them on the
+    child's exit would unlink the files of a lock the parent still holds.
 
     Releasing an instance that does not hold the lock is a no-op. Without
     that rule a stale object, released twice or finalized after a failed
@@ -992,33 +1157,14 @@ class TemporaryFileLock(Lock):
             fail_when_locked=fail_when_locked,
             flags=flags,
         )
-        # Avoid keeping a strong reference to self, otherwise GC can't
-        # collect and tests expecting deletion won't pass.
-        wr = weakref.ref(self)
-
-        def _finalize_release(
-            ref: typing.Callable[[], TemporaryFileLock | None] = wr,
-        ) -> None:  # pragma: no cover - best effort
-            """Release the lock at interpreter exit, if it still exists.
-
-            Registered with `atexit` so a process that dies with the lock
-            held still removes its lock file. The weak reference is passed
-            as a default argument instead of being closed over, keeping the
-            registration from pinning the lock in memory; once the lock has
-            been collected the reference resolves to `None` and this does
-            nothing. Errors are suppressed, since the interpreter is on its
-            way out and nobody is left to handle them.
-
-            Args:
-                ref: The weak reference to the lock. Bound at registration
-                    time; never pass this yourself.
-            """
-            obj = ref()
-            if obj is not None:
-                with contextlib.suppress(Exception):
-                    obj.release()
-
-        atexit.register(_finalize_release)
+        # Track the instance for the module level atexit hook. The weak
+        # mapping keeps no strong reference, so garbage collection stays
+        # in charge of locks that die before the interpreter does, and
+        # construction registers nothing with atexit itself. The pid pins
+        # the exit time cleanup to this process: a forked child inherits
+        # the instance but must not release the parent's lock on its own
+        # exit.
+        _exit_releases[self] = os.getpid()
 
     def acquire(
         self,
@@ -1583,6 +1729,23 @@ class BoundedSemaphore(LockBase['Lock | None']):
     `filename_pattern`, and acquiring means locking whichever one is still
     free. Releasing does not delete the files, it only unlocks them.
 
+    One behaviour diverges from every other lock in this module and is
+    kept for backward compatibility: `acquire` with
+    ``fail_when_locked=False`` returns `None` once the timeout expires,
+    where the other locks raise. Check the return value when you pass
+    ``fail_when_locked=False``.
+
+    The slot files must survive for as long as a slot is held. A slot
+    file that something else deletes mid-hold silently admits an extra
+    holder, because the operating system lock lives on the deleted inode
+    where no new acquirer can see it. The default `directory` is the
+    system temporary directory, which tmp cleaners prune on many systems,
+    so point `directory` somewhere exempt from cleanup for anything long
+    running. On a multi-user system prefer a private directory as well: a
+    slot file created by another user is typically not writable for you,
+    and `acquire` then raises `PermissionError` instead of treating the
+    slot as busy.
+
     Prefer `NamedBoundedSemaphore`, a drop-in replacement for this class.
     Without an explicit `name` this class falls back to the shared default
     name ``bounded_semaphore``, so two completely unrelated programs on the
@@ -1649,11 +1812,17 @@ class BoundedSemaphore(LockBase['Lock | None']):
         )
 
         if not name or name == 'bounded_semaphore':
+            # `stacklevel=2` attributes the warning to whoever constructed
+            # the semaphore. At the default `stacklevel=1` Python blamed
+            # this line instead, so the "once per location" filter
+            # deduplicated the warning globally and every caller after the
+            # first constructed a colliding semaphore without any warning
+            # at all.
             warnings.warn(
                 '`BoundedSemaphore` without an explicit `name` '
                 'argument is deprecated, use NamedBoundedSemaphore',
                 DeprecationWarning,
-                stacklevel=1,
+                stacklevel=2,
             )
 
     def get_filenames(self) -> typing.Sequence[pathlib.Path]:
@@ -1722,49 +1891,59 @@ class BoundedSemaphore(LockBase['Lock | None']):
 
         The slot list is built once with `get_filenames`, so every attempt
         sweeps the slots in numerical order and keeps the first one that
-        locks. The sweep repeats until a slot is free or the timeout
-        expires. That order is fixed and identical in every process, so all
+        locks. That order is fixed and identical in every process, so all
         contenders race for slot ``0`` first.
+
+        With `fail_when_locked` resolving to `True` (the default), one
+        sweep that finds every slot busy raises `AlreadyLocked` right
+        away, exactly like the other locks in this module fail fast. With
+        `False` the sweep repeats until a slot frees up or the timeout
+        expires, and running out of time returns `None` instead of
+        raising. That `None` is a documented divergence from every other
+        lock here, kept for backward compatibility. See the class
+        docstring.
 
         Args:
             timeout: Overrides `timeout` for this call. See `LockBase`.
-            check_interval: Overrides `check_interval` for this call.
+                Only meaningful when `fail_when_locked` resolves to
+                `False`, since a full semaphore fails fast otherwise.
+            check_interval: Overrides `check_interval` for this call,
+                under the same condition.
             fail_when_locked: Overrides `fail_when_locked` for this call.
-                Unlike the rest of the retry policy this one is consulted
-                only after the timeout has expired: the semaphore always
-                keeps trying for the full timeout, and this decides whether
-                running out of time raises or returns.
 
         Returns:
             The `Lock` holding the slot that was taken, which is also
             stored as the `lock` attribute. `None` when no slot became
-            free and `fail_when_locked` resolves to `False`.
+            free within the timeout and `fail_when_locked` resolves to
+            `False`.
 
         Raises:
-            ~portalocker.exceptions.AlreadyLocked: All slots stayed taken for
-                the whole timeout and `fail_when_locked` resolves to `True`.
-            AssertionError: This instance already holds a slot. Release it
-                before acquiring again.
+            ~portalocker.exceptions.AlreadyLocked: Every slot was taken and
+                `fail_when_locked` resolves to `True`.
+            ~portalocker.exceptions.LockException: This instance already
+                holds a slot. Release it before acquiring again. Changed in
+                4.1.1: this guard used to be an ``assert``, which
+                ``python -O`` strips, and a second acquire then silently
+                took a second slot and leaked the first.
             OSError: Raised straight through from `try_lock`, for instance
                 `FileNotFoundError` when `directory` does not exist. The
                 instance stays usable, so a later call can succeed once the
                 cause is fixed.
         """
-        assert not self.lock, 'Already locked'
+        if self.lock is not None:
+            raise exceptions.LockException('Already locked')
 
         filenames = self.get_filenames()
+        fail_fast: bool = bool(
+            coalesce(fail_when_locked, self.fail_when_locked),
+        )
 
         for n in self._timeout_generator(timeout, check_interval):
             logger.debug('trying lock (attempt %d) %r', n, filenames)
-            # no branch
-            if self.try_lock(filenames):  # pragma: no branch
-                return self.lock  # pragma: no cover
-
-        if fail_when_locked := coalesce(
-            fail_when_locked,
-            self.fail_when_locked,
-        ):
-            raise exceptions.AlreadyLocked()
+            if self.try_lock(filenames):
+                return self.lock
+            if fail_fast:
+                raise exceptions.AlreadyLocked()
 
         return None
 
@@ -1803,7 +1982,7 @@ class BoundedSemaphore(LockBase['Lock | None']):
                 # Any other failure (e.g. a missing directory raising
                 # `FileNotFoundError` from the underlying `open`) must not
                 # leave a half-set lock behind, otherwise the
-                # `assert not self.lock` guard in `acquire` would brick the
+                # already-locked guard in `acquire` would brick the
                 # instance on the next call. Reset and propagate.
                 self.lock = None
                 raise
@@ -1845,6 +2024,11 @@ class NamedBoundedSemaphore(BoundedSemaphore):
     don't specify a name, a random name will be generated.  This means that
     you can't use the same semaphore in multiple processes unless you pass the
     semaphore object to the other processes.
+
+    The slot files live in `directory`, the shared system temporary
+    directory by default. Prefer a private directory that no tmp cleaner
+    prunes: see `BoundedSemaphore` for how a deleted or foreign-owned slot
+    file breaks the semaphore.
 
     >>> semaphore = NamedBoundedSemaphore(2, name='test')
     >>> str(semaphore.get_filenames()[0])

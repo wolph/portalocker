@@ -1,6 +1,10 @@
+import atexit
 import gc
 import os
 import pathlib
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -197,3 +201,166 @@ def test_temporaryfilelock_release_without_ownership_keeps_file(tmpfile):
     finally:
         holder.release()
     assert not os.path.isfile(tmpfile)
+
+
+def test_lock_construction_registers_no_atexit_callbacks(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Constructing locks must not register per-instance atexit callbacks.
+
+    Every construction used to call ``atexit.register`` with a fresh
+    closure that was never unregistered, so a daemon churning through
+    short-lived locks accumulated one dead callback per lock forever.
+    """
+    registered: list[object] = []
+
+    def record_register(
+        func: object,
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        registered.append(func)
+        return func
+
+    monkeypatch.setattr(atexit, 'register', record_register)
+
+    for _ in range(10):
+        portalocker.TemporaryFileLock(tmpfile)
+        portalocker.PidFileLock(f'{tmpfile}.pid')
+
+    assert registered == []
+
+
+@pytest.mark.skipif(
+    not hasattr(atexit, '_ncallbacks'),
+    reason='atexit._ncallbacks is CPython specific',
+)
+def test_atexit_callback_count_stays_flat(tmpfile: str) -> None:
+    """N acquire/release cycles must leave the atexit callback count as is."""
+    baseline: int = atexit._ncallbacks()
+
+    for _ in range(25):
+        lock = portalocker.TemporaryFileLock(tmpfile)
+        lock.acquire()
+        lock.release()
+
+    assert atexit._ncallbacks() == baseline
+
+
+def test_atexit_hook_releases_lock_held_at_interpreter_exit(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A lock still held at interpreter exit must have its file unlinked.
+
+    The garbage collection fallback is neutralized inside the child, so
+    only the module level atexit hook can perform the cleanup.
+    """
+    lock_path: pathlib.Path = tmp_path / 'held.lock'
+    script: str = textwrap.dedent(
+        f"""\
+        import gc
+
+        import portalocker
+        from portalocker import utils
+
+        # Neutralize the garbage collection fallback so that only the
+        # atexit hook can clean up.
+        utils.LockBase.__del__ = lambda self: None
+        gc.disable()
+
+        lock = portalocker.TemporaryFileLock({str(lock_path)!r})
+        lock.acquire()
+        if lock.fh is None:
+            raise RuntimeError('acquire did not take the lock')
+        """,
+    )
+    completed: subprocess.CompletedProcess[str] = subprocess.run(
+        [sys.executable, '-c', script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout == ''
+    assert completed.stderr == ''
+    assert not lock_path.exists(), 'atexit hook did not release the lock'
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='os.fork is POSIX-only')
+def test_atexit_hook_ignores_inherited_locks_in_forked_child(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A forked child exiting normally must not release the parent's lock.
+
+    The child inherits the live lock objects and the atexit machinery, so
+    its normal exit used to unlink the parent's lock file and drop the OS
+    lock (which lives on the shared open file description). The classic
+    daemonize sequence of acquire-then-fork lost its lock the moment
+    either side exited. The exit hook must skip locks another process
+    constructed.
+    """
+    lock_path: pathlib.Path = tmp_path / 'daemon.lock'
+    script: str = textwrap.dedent(
+        f"""\
+        import os
+        import sys
+
+        import portalocker
+        from portalocker import utils
+
+        lock = portalocker.TemporaryFileLock({str(lock_path)!r})
+        lock.acquire()
+
+        pid = os.fork()
+        if pid == 0:
+            # The garbage collection fallback is neutralized in the child
+            # only, so this test isolates the atexit path.
+            utils.LockBase.__del__ = lambda self: None
+            sys.exit(0)
+
+        os.waitpid(pid, 0)
+        if not os.path.exists({str(lock_path)!r}):
+            raise RuntimeError("child's exit unlinked the parent's lock")
+
+        contender = portalocker.TemporaryFileLock(
+            {str(lock_path)!r}, timeout=0
+        )
+        try:
+            contender.acquire()
+        except portalocker.AlreadyLocked:
+            pass
+        else:
+            raise RuntimeError("child's exit released the parent's lock")
+
+        lock.release()
+        if os.path.exists({str(lock_path)!r}):
+            raise RuntimeError('parent release left the lock file behind')
+        """,
+    )
+    completed: subprocess.CompletedProcess[str] = subprocess.run(
+        [sys.executable, '-c', script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout == ''
+    assert completed.stderr == ''
+    assert not lock_path.exists()
+
+
+def test_atexit_hook_skips_collected_locks(tmpfile: str) -> None:
+    """The exit hook tracks instances weakly: a collected lock drops out.
+
+    This mirrors the old weakref based behaviour: registration must never
+    keep a lock alive, and garbage collection remains responsible for
+    locks that die before the interpreter does.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    assert lock in utils._exit_releases
+
+    del lock
+    gc.collect()
+    assert all(item.filename != tmpfile for item in utils._exit_releases)

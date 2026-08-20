@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import errno
 import os
 import pathlib
+import stat
 import subprocess
 import sys
 import textwrap
@@ -10,6 +12,14 @@ import typing
 import pytest
 
 import portalocker
+
+# The hard link publication (and therefore its rename fallback for
+# filesystems without hard links) only exists on the POSIX code path.
+# Windows always publishes with an atomic rename.
+posix_hard_link_only = pytest.mark.skipif(
+    os.name == 'nt',
+    reason='POSIX-only hard link publication',
+)
 
 
 def test_open_atomic_publishes_without_leaving_temporary_file(
@@ -70,10 +80,15 @@ def test_open_atomic_uses_platform_publication_primitive(
     assert not publication_calls[0][0].exists()
 
 
-def test_open_atomic_cleans_temporary_file_after_publication_error(
+def test_open_atomic_preserves_payload_after_publication_error(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A failed publication must keep the temporary file and say where.
+
+    Deleting the temporary file after a failed publication (as 4.0.0 did)
+    destroys the caller's payload with no way to recover it.
+    """
     target: pathlib.Path = tmp_path / 'destination.bin'
     temporary_paths: list[pathlib.Path] = []
 
@@ -86,7 +101,7 @@ def test_open_atomic_cleans_temporary_file_after_publication_error(
     monkeypatch.setattr(os, publication_function, fail_publication)
 
     with (
-        pytest.raises(OSError, match='publication failed'),
+        pytest.raises(OSError, match='publication failed') as exc_info,
         portalocker.open_atomic(target) as file_handle,
     ):
         temporary: typing.BinaryIO = typing.cast(
@@ -97,9 +112,10 @@ def test_open_atomic_cleans_temporary_file_after_publication_error(
         assert written == len(b'unpublished payload')
 
     assert len(temporary_paths) == 1
-    assert not temporary_paths[0].exists()
+    assert temporary_paths[0].exists(), 'the payload must not be destroyed'
+    assert temporary_paths[0].read_bytes() == b'unpublished payload'
+    assert str(temporary_paths[0]) in str(exc_info.value)
     assert not target.exists()
-    assert not any(tmp_path.iterdir())
 
 
 def test_open_atomic_existing_destination_check_survives_optimization(
@@ -107,14 +123,15 @@ def test_open_atomic_existing_destination_check_survives_optimization(
 ) -> None:
     target: pathlib.Path = tmp_path / 'destination.bin'
     existing: bytes = b'existing destination'
-    expected_message: str = f'{target!r} exists'
     target.write_bytes(existing)
 
     with (
-        pytest.raises(AssertionError, match='exists'),
+        pytest.raises(FileExistsError) as exc_info,
         portalocker.open_atomic(target),
     ):
         pass
+
+    assert exc_info.value.filename == str(target)
 
     script: str = textwrap.dedent(
         f"""\
@@ -124,15 +141,15 @@ def test_open_atomic_existing_destination_check_survives_optimization(
 
         target: pathlib.Path = pathlib.Path({str(target)!r})
         expected: bytes = {existing!r}
-        expected_message: str = {expected_message!r}
         try:
             with portalocker.open_atomic(target):
                 pass
-        except AssertionError as error:
-            if str(error) != expected_message:
+        except FileExistsError as error:
+            if error.filename != str(target):
                 raise
         else:
-            raise RuntimeError('missing AssertionError under optimized Python')
+            raise RuntimeError('missing FileExistsError under optimized '
+                               'Python')
         if target.read_bytes() != expected:
             raise RuntimeError('existing destination was modified')
         """,
@@ -156,7 +173,7 @@ def test_open_atomic_preserves_destination_created_before_publication(
     entries_before: set[pathlib.Path] = set(tmp_path.iterdir())
 
     with (
-        pytest.raises(FileExistsError),
+        pytest.raises(FileExistsError) as exc_info,
         portalocker.open_atomic(target) as file_handle,
     ):
         temporary: typing.BinaryIO = typing.cast(
@@ -168,4 +185,174 @@ def test_open_atomic_preserves_destination_created_before_publication(
         target.write_bytes(b'concurrent winner')
 
     assert target.read_bytes() == b'concurrent winner'
+
+    # The losing payload survives in the temporary file, and the raised
+    # exception says where to find it.
+    extras: set[pathlib.Path] = (
+        set(tmp_path.iterdir()) - entries_before - {target}
+    )
+    assert len(extras) == 1
+    preserved: pathlib.Path = extras.pop()
+    assert preserved.read_bytes() == b'temporary payload'
+    assert str(preserved) in str(exc_info.value)
+
+
+@posix_hard_link_only
+@pytest.mark.parametrize(
+    'errno_code',
+    [errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK],
+)
+def test_open_atomic_falls_back_to_rename_without_hard_links(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    errno_code: int,
+) -> None:
+    """Filesystems without hard links (exFAT, some SMB/NFS/FUSE mounts)
+    must still publish, through the rename fallback.
+    """
+    target: pathlib.Path = tmp_path / 'destination.bin'
+    entries_before: set[pathlib.Path] = set(tmp_path.iterdir())
+
+    def fail_link(source: str, destination: pathlib.Path) -> None:
+        raise OSError(errno_code, 'hard links unsupported')
+
+    monkeypatch.setattr(os, 'link', fail_link)
+
+    with portalocker.open_atomic(target) as file_handle:
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'fallback payload')
+        assert written == len(b'fallback payload')
+
+    assert target.read_bytes() == b'fallback payload'
     assert set(tmp_path.iterdir()) == entries_before | {target}
+
+
+@posix_hard_link_only
+def test_open_atomic_fallback_refuses_existing_destination(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rename fallback must keep the no-replace guarantee: an existing
+    destination raises ``FileExistsError`` and stays untouched.
+    """
+    target: pathlib.Path = tmp_path / 'destination.bin'
+
+    def fail_link(source: str, destination: pathlib.Path) -> None:
+        raise OSError(errno.ENOTSUP, 'hard links unsupported')
+
+    monkeypatch.setattr(os, 'link', fail_link)
+
+    with (
+        pytest.raises(FileExistsError) as exc_info,
+        portalocker.open_atomic(target) as file_handle,
+    ):
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'losing payload')
+        assert written == len(b'losing payload')
+        target.write_bytes(b'concurrent winner')
+
+    assert exc_info.value.filename == str(target)
+    assert target.read_bytes() == b'concurrent winner'
+    assert str(exc_info.value.__cause__) == (
+        f'[Errno {errno.ENOTSUP}] hard links unsupported'
+    )
+
+
+@posix_hard_link_only
+def test_open_atomic_fallback_failure_preserves_payload(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the fallback rename fails as well, the payload survives in the
+    temporary file and the raised exception names its path.
+    """
+    target: pathlib.Path = tmp_path / 'destination.bin'
+    temporary_paths: list[pathlib.Path] = []
+
+    def fail_link(source: str, destination: pathlib.Path) -> None:
+        raise OSError(errno.ENOTSUP, 'hard links unsupported')
+
+    def fail_rename(source: str, destination: pathlib.Path) -> None:
+        temporary_paths.append(pathlib.Path(source))
+        raise OSError(errno.EIO, 'device failed mid-rename')
+
+    monkeypatch.setattr(os, 'link', fail_link)
+    monkeypatch.setattr(os, 'rename', fail_rename)
+
+    with (
+        pytest.raises(OSError, match='device failed') as exc_info,
+        portalocker.open_atomic(target) as file_handle,
+    ):
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'surviving payload')
+        assert written == len(b'surviving payload')
+
+    assert len(temporary_paths) == 1
+    assert temporary_paths[0].exists(), 'the payload must not be destroyed'
+    assert temporary_paths[0].read_bytes() == b'surviving payload'
+    assert str(temporary_paths[0]) in str(exc_info.value)
+    assert not target.exists()
+
+
+def test_open_atomic_removes_temporary_file_when_body_raises(
+    tmp_path: pathlib.Path,
+) -> None:
+    """An exception in the caller's body must not leak the temporary file.
+
+    The exception propagates through the yield, so the publication code
+    never runs. Without explicit cleanup every failed attempt would leave
+    one orphaned temporary file behind.
+    """
+    target: pathlib.Path = tmp_path / 'destination.bin'
+
+    with (
+        pytest.raises(RuntimeError, match='body failed'),
+        portalocker.open_atomic(target) as file_handle,
+    ):
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'partial payload')
+        assert written == len(b'partial payload')
+        raise RuntimeError('body failed')
+
+    assert not target.exists()
+    assert not any(tmp_path.iterdir()), 'body failure leaked a temp file'
+
+
+def test_open_atomic_tolerates_handle_closed_in_body(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A body that closes the handle itself must still publish cleanly.
+
+    Flushing a closed handle raises ``ValueError``, so the closed case
+    has to be detected and synchronized through a fresh descriptor.
+    """
+    target: pathlib.Path = tmp_path / 'destination.bin'
+
+    with portalocker.open_atomic(target) as file_handle:
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'closed early')
+        assert written == len(b'closed early')
+        temporary.close()
+
+    assert target.read_bytes() == b'closed early'
+    assert set(tmp_path.iterdir()) == {target}
+
+
+def test_open_atomic_publishes_with_plain_open_permissions(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The published file must carry the permissions a plain ``open``
+    gives, not the private ``0o600`` of ``NamedTemporaryFile``.
+    """
+    atomic_target: pathlib.Path = tmp_path / 'atomic.bin'
+    plain_target: pathlib.Path = tmp_path / 'plain.bin'
+
+    with portalocker.open_atomic(atomic_target) as file_handle:
+        temporary: typing.BinaryIO = typing.cast(typing.BinaryIO, file_handle)
+        written: int = temporary.write(b'payload')
+        assert written == len(b'payload')
+    plain_target.write_bytes(b'payload')
+
+    atomic_mode: int = stat.S_IMODE(atomic_target.stat().st_mode)
+    plain_mode: int = stat.S_IMODE(plain_target.stat().st_mode)
+    assert atomic_mode == plain_mode
