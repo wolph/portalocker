@@ -378,6 +378,42 @@ def open_atomic(
 AcquireReturnT = typing.TypeVar('AcquireReturnT')
 
 
+#: Every live `LockBase` instance, registered at construction so
+#: `_reinit_state_locks_after_fork` can reach their state locks in a
+#: forked child. A `weakref.WeakSet`, so membership never keeps a lock
+#: alive and collected locks drop out on their own.
+_live_locks: weakref.WeakSet[LockBase[typing.Any]] = weakref.WeakSet()
+
+
+def _reinit_state_locks_after_fork() -> None:
+    """Reset every live instance's state lock in a freshly forked child.
+
+    A child forked while any thread holds an instance state lock inherits
+    that lock in its locked state, owned by a thread that does not exist
+    in the child, and the child's first `release`, `acquire` or
+    interpreter-exit cleanup then deadlocks on it forever. The window is
+    real: any state-lock scope that reaches the operating system releases
+    the GIL, so an unlucky ``os.fork`` from another thread lands inside
+    it. This is the same problem the standard library's ``logging``
+    module has with its handler locks, solved the same way: registered
+    with ``os.register_at_fork`` below, the child gets every state lock
+    reinitialized to a fresh unlocked one before it runs any Python code
+    of its own. Only the state locks are reset; which OS locks the child
+    actually holds is unchanged, since those live on file descriptors,
+    not on Python locks.
+    """
+    for lock in list(_live_locks):
+        # `_at_fork_reinit` has existed on every lock type since CPython
+        # 3.9 but is missing from typeshed, hence the ignores.
+        lock._state_lock._at_fork_reinit()  # type: ignore[attr-defined]  # pyrefly: ignore[missing-attribute]  # ty: ignore[unresolved-attribute]  # noqa: E501
+
+
+# Windows has no fork, and no `os.register_at_fork` to register with.
+_register_at_fork = getattr(os, 'register_at_fork', None)
+if _register_at_fork is not None:  # pragma: not-nt
+    _register_at_fork(after_in_child=_reinit_state_locks_after_fork)
+
+
 class LockBase(  # pragma: no cover
     abc.ABC,
     typing.Generic[AcquireReturnT],
@@ -496,6 +532,9 @@ class LockBase(  # pragma: no cover
             DEFAULT_FAIL_WHEN_LOCKED,
         )
         self._state_lock = threading.RLock()
+        # Registered so a forked child can reinitialize the state lock,
+        # see `_reinit_state_locks_after_fork`.
+        _live_locks.add(self)
 
     @abc.abstractmethod
     def acquire(
@@ -1008,9 +1047,42 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                 fh.close()
             raise
 
+        return self._publish_or_share_fh(fh)
+
+    def _publish_or_share_fh(self, fh: types.IO) -> types.IO:
+        """Publish a freshly locked handle, or share the already held one.
+
+        The read of the held handle and the publication of the new one
+        are a single state-lock scope, so two acquires racing on one
+        instance cannot both publish. The losing thread's handle is torn
+        down and the winner's handle is returned instead, matching the
+        idempotent held-lock fast path at the top of `Lock.acquire`. The
+        race is only reachable at all under per-process locker semantics
+        (POSIX ``lockf``), where both lock calls succeed; the historical
+        unconditional overwrite then orphaned the first handle, and its
+        garbage collected close dropped the process's whole ``lockf``
+        lock.
+
+        Args:
+            fh: The locked, prepared filehandle this acquire produced.
+
+        Returns:
+            ``fh`` itself when it was published, otherwise the handle
+            another thread published first, with ``fh`` unlocked and
+            closed.
+        """
+        existing_fh: types.IO | None
         with self._state_lock:
-            self.fh = fh
-        return fh
+            existing_fh = self.fh
+            if existing_fh is None:
+                self.fh = fh
+        if existing_fh is None:
+            return fh
+        with contextlib.suppress(Exception):
+            portalocker.unlock(fh)
+        with contextlib.suppress(Exception):
+            fh.close()
+        return existing_fh
 
     def _prepare_locked_fh(self, fh: types.IO) -> types.IO:
         """Run `Lock._prepare_fh`, rolling the lock back when it fails.
@@ -1385,18 +1457,22 @@ class RLock(Lock):
                 so it is reported rather than ignored, unlike the tolerant
                 `Lock.release` this eventually delegates to.
         """
-        releasing: bool
+        fh: types.IO | None
         with self._state_lock:
             if self._acquire_count == 0:
                 raise exceptions.LockException(
                     'Cannot release more times than acquired',
                 )
             self._acquire_count -= 1
-            releasing = self._acquire_count == 0
-        # The OS unlock runs outside the state lock; `Lock.release` claims
-        # the filehandle atomically on its own.
-        if releasing:
-            super().release()
+            # The count reaching zero and the claim of the filehandle
+            # must be one atomic step: with the claim in a later scope a
+            # racing acquire slipped in between, saw the count at zero
+            # with the handle still published, and its fast path handed
+            # out the very handle this thread then closed.
+            fh = self._claim_fh() if self._acquire_count == 0 else None
+        # Only the OS unlock and close run outside the state lock.
+        if fh is not None:
+            self._release_claimed_fh(fh)
 
 
 def _fh_matches_path(fh: types.IO, filename: str) -> bool:  # pragma: not-posix
@@ -1853,6 +1929,7 @@ class PidFileLock(TemporaryFileLock):
     the PID of the process that currently holds the lock.
 
     When used as a context manager:
+
     - Returns None if we successfully acquired the lock
     - Returns the PID (int) if another process holds the lock
     - Raises AlreadyLocked if another process holds the lock but its PID
@@ -2002,8 +2079,16 @@ class PidFileLock(TemporaryFileLock):
             finally:
                 inner_lock.fh = None
 
-        self._inner_lock = None
-        self._acquired_lock = False
+        # Clear the published state only when this rollback's own sidecar
+        # is the published one (a failure after publication, e.g. the
+        # exit-hook registration raising). A never-published failed
+        # sidecar leaves nothing to clear, and wiping unconditionally
+        # erased the state a *winning* thread had published on the same
+        # instance, orphaning its held sidecar.
+        with self._state_lock:
+            if self._inner_lock is inner_lock:
+                self._inner_lock = None
+                self._acquired_lock = False
         return cleanup_error
 
     def acquire(
@@ -2110,10 +2195,11 @@ class PidFileLock(TemporaryFileLock):
         # neither) leave the instance claiming a lock it never took, and
         # its release would then unlink files that belong to the actual
         # holder.
+        sidecar_fh: types.IO
         try:
             # Reuse the split-brain guard so the sidecar lock gets the same
             # inode-verification as a direct `TemporaryFileLock`.
-            self._acquire_verified(
+            sidecar_fh = self._acquire_verified(
                 inner_lock,
                 self._lockfile,
                 timeout_,
@@ -2172,10 +2258,16 @@ class PidFileLock(TemporaryFileLock):
             self._rollback_failed_acquire(inner_lock)
             raise
 
-        # No need to keep a direct fh on the PID file; return the lock's fh
-        # to satisfy the context manager typing contract.
-        assert inner_lock.fh is not None
-        return inner_lock.fh
+        # No need to keep a direct fh on the PID file; return the locally
+        # bound sidecar handle to satisfy the context manager typing
+        # contract. Deliberately not read back from the instance: a
+        # signal handler's `release()` landing between the publication
+        # above and this return claims the shared state, and an assert
+        # on it fired in exactly that window (returning `None` under
+        # ``python -O``). The local stays valid either way; after such a
+        # reentrant release it is simply already closed, as for any
+        # release-right-after-acquire.
+        return sidecar_fh
 
     def read_pid(self) -> int | None:
         """Read the PID from the lock file, if it exists and is readable.
@@ -2885,14 +2977,16 @@ class BoundedSemaphore(LockBase['Lock | None']):
 
         A single sweep with no waiting: every candidate is locked with
         ``fail_when_locked=True``, so a busy slot is skipped immediately
-        rather than waited on. The whole sweep, including the
-        already-taken guard and the publication on the `lock` attribute,
-        runs under the instance state lock. Each slot attempt is a single
-        non-blocking try, so nothing inside the sweep waits on another
-        holder, and two threads sweeping one instance cannot interleave:
-        the second sweep starts only after the first published its slot,
-        and then trips over the guard instead of taking (and leaking) a
-        second slot.
+        rather than waited on. The sweep itself runs *outside* the
+        instance state lock: each slot attempt opens and locks a file,
+        which releases the GIL, and holding the state lock across those
+        OS calls left a wide window for ``os.fork`` in another thread to
+        capture it locked and hang the child. Only the publication on
+        the `lock` attribute takes the state lock, re-checking the
+        already-taken guard in the same scope: a thread that locked a
+        slot but finds another thread published first releases its slot
+        again and raises, so two racing sweeps end with exactly one slot
+        held either way.
 
         Args:
             filenames: The candidate slot files, tried in the given order.
@@ -2904,37 +2998,46 @@ class BoundedSemaphore(LockBase['Lock | None']):
 
         Raises:
             ~portalocker.exceptions.LockException: This instance already
-                holds a slot, checked atomically with the sweep. Before
-                4.1.1 a concurrent sweep took a second slot instead and
-                the overwritten one leaked until garbage collection.
+                holds a slot, checked when the sweep starts and re-checked
+                atomically at publication. Before 4.1.1 a concurrent
+                sweep took a second slot instead and the overwritten one
+                leaked until garbage collection.
             Exception: Anything other than `AlreadyLocked` coming out of
                 `Lock.acquire`, such as `FileNotFoundError` for a missing
-                `directory`. The `lock` attribute is untouched (the guard
-                above proves it held nothing when the sweep started), so
-                the failure cannot brick the instance for later calls.
+                `directory`. The `lock` attribute is untouched, so the
+                failure cannot brick the instance for later calls.
         """
+        if self.lock is not None:
+            raise exceptions.LockException('Already locked')
         filename: Filename
-        with self._state_lock:
-            if self.lock is not None:
-                raise exceptions.LockException('Already locked')
-            for filename in filenames:
-                logger.debug('trying lock for %r', filename)
-                lock = Lock(filename, fail_when_locked=True)
-                try:
-                    lock.acquire()
-                except exceptions.AlreadyLocked:
-                    # Taken by someone else; try the next candidate file.
-                    continue
-                # Only record the lock once it is actually held. Any
-                # non-contention failure (e.g. a missing directory raising
-                # `FileNotFoundError` from the underlying `open`)
-                # propagates with `lock` still unset, so the instance
-                # stays usable.
-                self.lock = lock
+        for filename in filenames:
+            logger.debug('trying lock for %r', filename)
+            lock = Lock(filename, fail_when_locked=True)
+            try:
+                lock.acquire()
+            except exceptions.AlreadyLocked:
+                # Taken by someone else; try the next candidate file.
+                continue
+            # Only record the lock once it is actually held, and only
+            # when no other thread published a slot meanwhile. Any
+            # non-contention failure (e.g. a missing directory raising
+            # `FileNotFoundError` from the underlying `open`) propagates
+            # with `lock` still unset, so the instance stays usable.
+            published: bool = False
+            with self._state_lock:
+                if self.lock is None:
+                    self.lock = lock
+                    published = True
+            if published:
                 logger.debug('locked %r', filename)
                 return True
+            # Lost the publication race: another thread already holds a
+            # slot through this instance. Give the extra slot back and
+            # report the double acquire.
+            lock.release()
+            raise exceptions.LockException('Already locked')
 
-            return False
+        return False
 
     def release(self) -> None:
         """Give the slot back, if this instance holds one.

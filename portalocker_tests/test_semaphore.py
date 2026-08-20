@@ -207,9 +207,9 @@ def test_bounded_semaphore_concurrent_acquire_takes_one_slot(
     publishing it on ``self.lock``, which is the historical lost-update
     window: the second thread's sweep then took a second slot and its
     publication was overwritten, leaking the slot until garbage
-    collection. Now the whole sweep runs under the instance state lock,
-    so the second thread waits and then trips over the already-taken
-    guard instead.
+    collection. The publication re-checks the guard atomically now, so
+    whichever thread publishes second releases its extra slot and raises
+    instead of overwriting.
     """
     semaphore = portalocker.NamedBoundedSemaphore(
         2,
@@ -241,7 +241,10 @@ def test_bounded_semaphore_concurrent_acquire_takes_one_slot(
     outcomes: dict[str, object] = {}
 
     def first_acquire() -> None:
-        outcomes['first'] = semaphore.acquire()
+        try:
+            outcomes['first'] = semaphore.acquire()
+        except portalocker.LockException as error:
+            outcomes['first'] = error
 
     def second_acquire() -> None:
         try:
@@ -255,26 +258,30 @@ def test_bounded_semaphore_concurrent_acquire_takes_one_slot(
 
     second_thread = threading.Thread(target=second_acquire)
     second_thread.start()
-    # With the fix the second thread blocks on the state lock; without it
-    # this join gives its full sweep ample time to take a second slot.
-    second_thread.join(timeout=0.5)
+    # The second thread's whole sweep and publication run inside the
+    # parked window, so its outcome settles before the first resumes.
+    second_thread.join(timeout=5)
+    assert not second_thread.is_alive()
 
     resume.set()
     first_thread.join(timeout=5)
-    second_thread.join(timeout=5)
     assert not first_thread.is_alive()
-    assert not second_thread.is_alive()
 
-    winner = outcomes['first']
-    assert isinstance(winner, utils.Lock), outcomes
-    assert isinstance(outcomes['second'], portalocker.LockException), (
-        'the second thread took a slot instead of hitting the guard: '
-        f'{outcomes}'
+    values = [outcomes['first'], outcomes['second']]
+    winners = [value for value in values if isinstance(value, utils.Lock)]
+    losers = [
+        value
+        for value in values
+        if isinstance(value, portalocker.LockException)
+    ]
+    assert len(winners) == 1, f'expected exactly one slot holder: {outcomes}'
+    assert len(losers) == 1, (
+        f'the losing thread kept a slot instead of raising: {outcomes}'
     )
     # Compared through a local so mypy does not narrow the attribute
     # and declare the release assertions below unreachable.
     held_after: utils.Lock | None = semaphore.lock
-    assert held_after is winner
+    assert held_after is winners[0]
 
     monkeypatch.undo()
     semaphore.release()
@@ -334,3 +341,23 @@ def test_bounded_semaphore_concurrent_release_releases_once(
     releaser.join(timeout=5)
     assert not releaser.is_alive()
     assert len(calls) == 1
+
+
+def test_bounded_semaphore_try_lock_guards_direct_calls(
+    tmp_path: pathlib.Path,
+) -> None:
+    """``try_lock`` is public API, so its own entry guard must refuse a
+    second slot for an instance that already holds one even when the
+    ``acquire`` wrapper (and its identical guard) is bypassed.
+    """
+    semaphore = portalocker.NamedBoundedSemaphore(
+        2,
+        name='direct-try-lock',
+        directory=str(tmp_path),
+        timeout=0,
+    )
+    assert semaphore.try_lock(semaphore.get_filenames()) is True
+    with pytest.raises(portalocker.LockException, match='Already locked'):
+        semaphore.try_lock(semaphore.get_filenames())
+    semaphore.release()
+    assert semaphore.lock is None

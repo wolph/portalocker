@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import typing
 import weakref
@@ -1965,3 +1966,154 @@ def test_pidfilelock_nt_strict_unlock_error_chains_unlink_error(
     assert lock._inner_lock is None
     os.unlink(pid_file)
     os.unlink(f'{pid_file}.lock')
+
+
+def test_pidfilelock_losing_rollback_spares_winning_thread_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contender's rollback must not erase another thread's win.
+
+    Two threads fresh-acquire one instance: A takes the sidecar, B fails
+    with contention and rolls back. B's rollback used to wipe
+    ``_inner_lock`` and ``_acquired_lock`` unconditionally, so A's
+    published state vanished, its ``__exit__`` no-oped and garbage
+    collection of the orphaned sidecar freed the OS lock mid-block. The
+    gates park B inside its rollback until A has published.
+    """
+    pid_file = str(tmp_path / 'rollback_wipe.pid')
+    lock = utils.PidFileLock(pid_file, fail_when_locked=True)
+
+    b_in_rollback = threading.Event()
+    a_published = threading.Event()
+    real_rollback = utils.PidFileLock._rollback_failed_acquire
+    real_write_pid = utils.PidFileLock._write_pid
+
+    def gated_rollback(
+        self: utils.PidFileLock,
+        inner_lock: utils.Lock,
+    ) -> Exception | None:
+        b_in_rollback.set()
+        assert a_published.wait(timeout=5), 'the winner never published'
+        return real_rollback(self, inner_lock)
+
+    def gated_write_pid(self: utils.PidFileLock) -> None:
+        if threading.current_thread().name == 'winner':
+            assert b_in_rollback.wait(timeout=5), 'the loser never failed'
+        real_write_pid(self)
+
+    monkeypatch.setattr(
+        utils.PidFileLock,
+        '_rollback_failed_acquire',
+        gated_rollback,
+    )
+    monkeypatch.setattr(utils.PidFileLock, '_write_pid', gated_write_pid)
+
+    results: dict[str, str] = {}
+
+    def winner() -> None:
+        lock.acquire()
+        results['winner'] = 'acquired'
+        a_published.set()
+
+    def loser() -> None:
+        try:
+            lock.acquire()
+        except portalocker.AlreadyLocked:
+            results['loser'] = 'AlreadyLocked'
+
+    winner_thread = threading.Thread(target=winner, name='winner')
+    loser_thread = threading.Thread(target=loser, name='loser')
+    winner_thread.start()
+    assert b_in_rollback.wait(timeout=0.01) is False  # winner holds first
+    loser_thread.start()
+    winner_thread.join(timeout=5)
+    loser_thread.join(timeout=5)
+    assert not winner_thread.is_alive()
+    assert not loser_thread.is_alive()
+    monkeypatch.undo()
+
+    assert results == {'winner': 'acquired', 'loser': 'AlreadyLocked'}
+    assert lock._acquired_lock is True, 'the rollback erased the win'
+    assert lock._inner_lock is not None, 'the rollback erased the win'
+
+    gc.collect()
+    probe = utils.Lock(lock._lockfile, timeout=0, fail_when_locked=True)
+    with pytest.raises(portalocker.AlreadyLocked):
+        probe.acquire()
+
+    lock.release()
+    assert not os.path.exists(pid_file)
+
+
+def test_pidfilelock_rollback_clears_state_it_published(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the failure strikes after publication (the exit-hook
+    registration raising), the rollback owns the published state and must
+    clear it while rolling the sidecar back.
+    """
+    pid_file = str(tmp_path / 'rollback_published.pid')
+    lock = utils.PidFileLock(pid_file)
+
+    class ExplodingRegistry:
+        def __setitem__(
+            self,
+            key: utils.TemporaryFileLock,
+            value: int,
+        ) -> None:
+            raise RuntimeError('registry refused the lock')
+
+    monkeypatch.setattr(utils, '_exit_releases', ExplodingRegistry())
+    with pytest.raises(RuntimeError, match='registry refused'):
+        lock.acquire()
+    monkeypatch.undo()
+
+    assert lock._inner_lock is None
+    assert lock._acquired_lock is False
+    successor = utils.PidFileLock(pid_file)
+    successor.acquire()
+    assert successor.read_pid() == os.getpid()
+    successor.release()
+
+
+def test_pidfilelock_reentrant_release_during_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A handler's ``release()`` between publication and return must not
+    crash the acquire.
+
+    The exit-hook registration runs right after publication, so a
+    reentrant release there claims the freshly published state; the old
+    ``assert inner_lock.fh is not None`` then fired (and ``python -O``
+    returned ``None`` instead). The acquire must return its own locally
+    bound filehandle and leave the instance released.
+    """
+    pid_file = str(tmp_path / 'reentrant_registration.pid')
+    lock = utils.PidFileLock(pid_file)
+
+    class ReleasingRegistry:
+        def __setitem__(
+            self,
+            key: utils.TemporaryFileLock,
+            value: int,
+        ) -> None:
+            # The SIGTERM-handler shape: a release lands right after the
+            # publication and claims everything.
+            lock.release()
+
+    monkeypatch.setattr(utils, '_exit_releases', ReleasingRegistry())
+    fh = lock.acquire()
+    monkeypatch.undo()
+
+    assert fh is not None
+    assert fh.closed, 'the reentrant release should have torn the fh down'
+    assert lock._inner_lock is None
+    assert lock._acquired_lock is False
+
+    successor = utils.PidFileLock(pid_file)
+    successor.acquire()
+    assert successor.read_pid() == os.getpid()
+    successor.release()

@@ -20,9 +20,41 @@
  * Fixed two threads sharing one ``BoundedSemaphore`` instance both
    taking a slot: the second publication overwrote the first, one exit
    then released the other thread's slot and the orphaned slot stayed
-   locked until garbage collection. The already-taken guard, the slot
-   sweep and the publication are one atomic step now, so the losing
-   thread gets a ``LockException`` instead of a leaked slot
+   locked until garbage collection. The publication re-checks the
+   already-taken guard in one atomic step now, so the losing thread
+   gives its extra slot back and gets a ``LockException`` instead of
+   leaking it. The slot sweep itself deliberately runs outside the
+   instance state lock, so an ``os.fork`` in another thread cannot
+   capture the state lock held across the sweep's OS calls
+ * Fixed a child forked while any thread held an instance state lock
+   deadlocking forever on its first ``release()``, ``acquire()`` or
+   interpreter-exit cleanup: the child inherited the lock in its locked
+   state, owned by a thread that does not exist there. Every live lock
+   instance's state lock is reinitialized in the child via
+   ``os.register_at_fork``, the way the standard library's ``logging``
+   module protects its handler locks
+ * Fixed ``RLock.release`` zeroing the count and claiming the handle in
+   two separate state-lock scopes: an acquire racing into the gap saw
+   the count at zero with the handle still published, took the fast
+   path, and was handed the very filehandle the release then closed.
+   The count transition and the claim are one atomic scope now
+ * Fixed a failing ``PidFileLock.acquire`` contender's rollback wiping
+   the instance state a winning thread had published concurrently: the
+   winner's ``__exit__`` then no-oped and garbage collection of its
+   orphaned sidecar freed the OS lock in the middle of the guarded
+   block. The rollback only clears the state when its own failed
+   sidecar is the published one
+ * Fixed ``PidFileLock.acquire`` crashing with ``AssertionError`` (or
+   returning ``None`` under ``python -O``) when a signal handler's
+   ``release()`` landed between publishing the lock and returning: the
+   return value is the locally bound sidecar handle now, never re-read
+   from the shared state
+ * Fixed two acquires racing on one ``Lock`` instance both publishing
+   their filehandle when the locker grants per-process semantics (POSIX
+   ``lockf``): the overwritten handle's garbage collected close dropped
+   the process's whole ``lockf`` lock. The publication is atomic now
+   and the loser tears its own descriptor down and shares the published
+   handle, matching the idempotent re-acquire contract
  * Behaviour change: ``Lock`` resolves its path with ``os.path.abspath``
    at construction, so the ``filename`` attribute now holds an absolute
    path. A relative path used to be resolved on every later OS call,

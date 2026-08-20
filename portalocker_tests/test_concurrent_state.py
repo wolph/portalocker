@@ -19,13 +19,15 @@ scheduler hits it. The bugs they pin down:
 from __future__ import annotations
 
 import os
+import signal
 import threading
+import time
 import typing
 
 import pytest
 
 import portalocker
-from portalocker import types
+from portalocker import types, utils
 
 posix_release_ordering = pytest.mark.skipif(
     os.name == 'nt',
@@ -334,5 +336,191 @@ def test_rlock_counter_survives_interleaved_nested_acquires(
     assert lock._acquire_count == 3, 'a nested acquire was lost'
     lock.release()
     lock.release()
+    lock.release()
+    assert lock.fh is None
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='os.fork is POSIX-only')
+def test_forked_child_survives_inherited_held_state_lock(tmpfile: str) -> None:
+    """A child forked while another thread holds an instance state lock
+    must not deadlock on it.
+
+    The child inherits the locked ``RLock`` owned by a thread that does
+    not exist in the child, so without the ``os.register_at_fork`` reinit
+    every later ``release()``, ``acquire()`` or atexit-hook call in the
+    child hung forever. The window is held open deterministically by a
+    thread parked inside the state lock across the fork.
+    """
+    lock = portalocker.Lock(tmpfile, timeout=0.1)
+    lock.acquire()
+    inside = threading.Event()
+    gate = threading.Event()
+
+    def hold_state_lock() -> None:
+        with lock._state_lock:
+            inside.set()
+            gate.wait(timeout=10)
+
+    holder = threading.Thread(target=hold_state_lock, daemon=True)
+    holder.start()
+    assert inside.wait(timeout=5), 'the holder never took the state lock'
+
+    pid: int = os.fork()
+    if pid == 0:  # pragma: no cover - child process, exits via os._exit
+        lock.release()
+        os._exit(0)
+
+    deadline: float = time.monotonic() + 5
+    status: int | None = None
+    while time.monotonic() < deadline:
+        waited, waitstatus = os.waitpid(pid, os.WNOHANG)
+        if waited:
+            status = os.waitstatus_to_exitcode(waitstatus)
+            break
+        time.sleep(0.01)
+    gate.set()
+    holder.join(timeout=5)
+    if status is None:  # pragma: no cover - only reached when the bug is back
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        pytest.fail('the forked child hung on the inherited state lock')
+    assert status == 0
+    lock.release()
+
+
+def test_state_lock_reinit_hook_keeps_locks_usable(tmpfile: str) -> None:
+    """The after-fork reinit hook must leave every registered lock with a
+    working state lock. Called directly here, since a forked child's
+    coverage never reaches the parent's report.
+    """
+    lock = portalocker.Lock(tmpfile, timeout=0)
+    assert lock in utils._live_locks
+    utils._reinit_state_locks_after_fork()
+    lock.acquire()
+    lock.release()
+    assert lock.fh is None
+
+
+def test_rlock_release_claims_handle_atomically_with_count(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final release must zero the count and claim the handle in one
+    state-lock scope.
+
+    Splitting them let a racing acquire slip between the scopes: it saw
+    the count at zero, took the fast path and returned the still
+    published filehandle, which the releasing thread then claimed and
+    closed. The caller was left holding a closed handle while the OS
+    lock was free for anybody. The releaser is parked at its claim to
+    hold that window open.
+    """
+    lock = portalocker.RLock(tmpfile, timeout=5, check_interval=0.01)
+    lock.acquire()
+
+    parked = threading.Event()
+    resume = threading.Event()
+    real_claim = utils.Lock._claim_fh
+
+    def gated_claim(self: utils.Lock) -> types.IO | None:
+        if threading.current_thread().name == 'releaser':
+            parked.set()
+            assert resume.wait(timeout=5), 'the releaser was never resumed'
+        return real_claim(self)
+
+    monkeypatch.setattr(utils.Lock, '_claim_fh', gated_claim)
+
+    releaser = threading.Thread(target=lock.release, name='releaser')
+    releaser.start()
+    assert parked.wait(timeout=5), 'the release never reached its claim'
+
+    result: dict[str, typing.Any] = {}
+
+    def reacquire() -> None:
+        result['fh'] = lock.acquire()
+
+    acquirer = threading.Thread(target=reacquire)
+    acquirer.start()
+    # With the fix the acquirer blocks on the state lock the releaser
+    # still holds; without it this join gives its fast path ample time
+    # to return the handle the releaser is about to close.
+    acquirer.join(timeout=0.5)
+
+    resume.set()
+    releaser.join(timeout=5)
+    acquirer.join(timeout=5)
+    assert not releaser.is_alive()
+    assert not acquirer.is_alive()
+
+    fh = result['fh']
+    assert not fh.closed, 'acquire handed out a handle the release closed'
+    assert lock.fh is fh
+    assert lock._acquire_count == 1
+
+    probe = portalocker.Lock(tmpfile, timeout=0, fail_when_locked=True)
+    with pytest.raises(portalocker.AlreadyLocked):
+        probe.acquire()
+
+    lock.release()
+    assert fh is not None
+    assert fh.closed
+
+
+def test_lock_concurrent_acquire_shares_one_published_handle(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two threads whose acquires both succeed must share one handle.
+
+    Under ``lockf`` semantics a second lock call from the same process
+    succeeds, so both threads reached the publication and the second
+    ``self.fh = fh`` overwrote the first: the orphaned handle's garbage
+    collected close then dropped the process's whole lockf lock. The
+    publication now keeps the first handle, and the loser tears its own
+    descriptor down and returns the shared one. The per-process locker
+    semantics are simulated with a no-op lock call, and a barrier parks
+    both threads past the held-handle fast path before either publishes.
+    """
+    monkeypatch.setattr(
+        portalocker.portalocker,
+        'lock',
+        lambda fh, flags: None,
+    )
+    lock = portalocker.Lock(tmpfile, timeout=0)
+
+    barrier = threading.Barrier(2, timeout=5)
+    real_get_fh = utils.Lock._get_fh
+
+    def rendezvous_get_fh(self: utils.Lock) -> types.IO:
+        fh = real_get_fh(self)
+        # Both threads are past the fast path once both arrive here.
+        barrier.wait()
+        return fh
+
+    monkeypatch.setattr(utils.Lock, '_get_fh', rendezvous_get_fh)
+
+    results: dict[str, typing.Any] = {}
+
+    def first_acquire() -> None:
+        results['first'] = lock.acquire()
+
+    def second_acquire() -> None:
+        results['second'] = lock.acquire()
+
+    threads = [
+        threading.Thread(target=first_acquire),
+        threading.Thread(target=second_acquire),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+    assert results['first'] is results['second'], (
+        'the second acquire published a second handle instead of sharing'
+    )
+    assert not results['first'].closed
+    assert lock.fh is results['first']
     lock.release()
     assert lock.fh is None
