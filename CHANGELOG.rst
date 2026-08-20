@@ -1,5 +1,27 @@
 4.1.1:
 
+ * Made ``RedisLock`` teardown exception safe. ``release`` now runs every
+   teardown step even when an earlier one fails, clears ``thread``,
+   ``pubsub`` and a self-created connection regardless, and re-raises only
+   the first error, so a failing ``UNSUBSCRIBE`` (Redis unreachable while
+   the lock was held) no longer leaves a stale ``pubsub`` behind that made
+   every later ``acquire`` on the instance fail its
+   ``assert not self.pubsub`` guard (#140)
+ * Fixed the ``RedisLock`` rollback for a worker thread that fails to
+   start: the never-started thread is no longer joined, so the original
+   error propagates out of ``acquire`` instead of ``RuntimeError: cannot
+   join thread before it is started``, and the subscribed pubsub no longer
+   leaks. A rollback that fails as well is logged instead of replacing the
+   original error (#140)
+ * ``RedisLock.release`` no longer checks a fresh connection out of the
+   pool purely to send ``UNSUBSCRIBE`` for a subscription the worker
+   thread already discarded when it stopped. The unsubscribe now only runs
+   when the pubsub still owns a connection, which is also what made
+   ``RedisLock.__del__`` fail loudly at interpreter shutdown (#140)
+ * ``RedisLock.__del__`` is now best effort like ``LockBase.__del__`` and
+   suppresses all errors instead of surfacing them as interpreter-level
+   "Exception ignored in" messages during garbage collection or shutdown
+   (#140)
  * Fixed a contended ``RedisLock`` with a self-created connection (no
    ``connection=`` argument) killing its own worker thread and delivering a
    ``KeyboardInterrupt`` to the main thread. The release between retries

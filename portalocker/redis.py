@@ -61,6 +61,7 @@ Example:
 from __future__ import annotations
 
 import _thread
+import contextlib
 import enum
 import json
 import logging
@@ -84,6 +85,38 @@ DEFAULT_THREAD_SLEEP_TIME = 0.1
 #: Version stamped into every holder record. A reply that does not carry
 #: exactly this version is treated as coming from an older portalocker.
 REDIS_LOCK_PROTOCOL_VERSION = 1
+
+
+def _keep_first_error(
+    first_error: Exception | None,
+    error: Exception,
+) -> Exception:
+    """Pick the error a multi-step teardown should re-raise.
+
+    `RedisLock.release` and `RedisLock._unsubscribe` run every teardown
+    step even when an earlier one fails, so they can end up holding more
+    than one error. The first one describes what actually went wrong,
+    and the later ones are usually the same dead connection hitting the
+    next step. The first error is therefore kept and any later error is
+    logged instead of raised, so it cannot replace the original cause.
+
+    Args:
+        first_error: The error kept so far, or `None` when every earlier
+            step succeeded.
+        error: The error raised by the step that just failed.
+
+    Returns:
+        `error` when it is the first failure, otherwise `first_error`
+        unchanged, with `error` logged as a suppressed secondary
+        failure.
+    """
+    if first_error is None:
+        return error
+    logger.warning(
+        'Suppressed secondary error while releasing redis lock: %r',
+        error,
+    )
+    return first_error
 
 
 class RedisLockMode(str, enum.Enum):
@@ -554,7 +587,10 @@ class RedisLock(utils.LockBase['RedisLock']):
         re-raising, leaving `pubsub` as `None`. Without that rollback a
         failed `acquire` would leave half a subscription behind and the
         ``assert not self.pubsub`` at the top of `acquire` would refuse
-        every later retry on the same object.
+        every later retry on the same object. A rollback that fails as
+        well - usually the same dead Redis that broke the subscribe - is
+        logged rather than raised, so the original error is what
+        propagates out of `acquire`.
 
         Args:
             connection: The connection to subscribe on.
@@ -585,7 +621,17 @@ class RedisLock(utils.LockBase['RedisLock']):
             self.thread.start()
             time.sleep(0.01)
         except Exception:
-            self.release()
+            # The subscribe or thread start failure is the error worth
+            # reporting. A rollback that fails as well is logged so it
+            # cannot replace the original cause.
+            try:
+                self.release()
+            except Exception:
+                logger.warning(
+                    'Redis lock %s failed to roll back a broken subscription',
+                    self.holder_id,
+                    exc_info=True,
+                )
             raise
 
     def _parse_lock_response(
@@ -1272,11 +1318,37 @@ class RedisLock(utils.LockBase['RedisLock']):
     def _unsubscribe(self) -> None:
         """Drop the subscription but keep the connection.
 
-        Stops and joins the keep-alive thread, then unsubscribes and
-        closes the pubsub. This is the back-off between attempts:
-        `_resolve_lock_holders` calls it after an unsuccessful probe so
-        that a waiting lock stops being counted as a subscriber, and the
-        next attempt subscribes from scratch on the same connection.
+        Stops and joins the keep-alive thread, then closes the pubsub,
+        unsubscribing first when the pubsub still owns a connection.
+        This is the back-off between attempts: `_resolve_lock_holders`
+        calls it after an unsuccessful probe so that a waiting lock
+        stops being counted as a subscriber, and the next attempt
+        subscribes from scratch on the same connection.
+
+        The teardown is exception safe. `thread` and `pubsub` are
+        cleared before their cleanup steps run, every step runs even
+        when an earlier one fails, and only the first failure is
+        re-raised once the rest has run (see `_keep_first_error`). One
+        failed unsubscribe therefore cannot leave a stale `pubsub`
+        behind that would trip the ``assert not self.pubsub`` guard on
+        every later `acquire`.
+
+        The unsubscribe is skipped when the pubsub no longer owns a
+        connection. The worker thread closes the pubsub itself when it
+        is stopped (redis-py's ``PubSubWorkerThread.run`` behaviour), so
+        in the normal release path the subscription is already gone by
+        the time this method looks at it. Unsubscribing then would check
+        a fresh connection out of the pool and reconnect purely to
+        unsubscribe from a subscription the server already discarded.
+        Only a pubsub that still owns a connection - the
+        `_start_subscription` rollback path, where the thread never
+        ran - has anything left to unsubscribe.
+
+        A thread is only joined when its `start` succeeded. A thread
+        whose `start` raised has no ``ident`` yet, and joining it would
+        raise ``RuntimeError`` instead of the error that actually broke
+        the acquire. ``is_alive`` would be the wrong test: a thread that
+        already finished is no longer alive but can still be joined.
 
         Keeping the connection alive here is not an optimisation but a
         correctness requirement. `channel_handler` answers pings over
@@ -1287,34 +1359,72 @@ class RedisLock(utils.LockBase['RedisLock']):
         resubscribed on the stale reference while ``self.connection``
         was `None`, the handler's assert fired on the worker thread, and
         `PubSubWorkerThread.run` escalated it to the main thread.
-        """
-        if self.thread:  # pragma: no branch
-            self.thread.stop()
-            self.thread.join()
-            self.thread = None
-            time.sleep(0.01)
 
-        if self.pubsub:  # pragma: no branch
-            # `PubSub.unsubscribe()` is unannotated in redis-py
-            self.pubsub.unsubscribe(  # type: ignore[no-untyped-call]
-                self.channel,
-            )
-            self.pubsub.close()
-            self.pubsub = None
+        Raises:
+            Exception: The first error any teardown step raised,
+                re-raised after the remaining steps have run.
+        """
+        first_error: Exception | None = None
+
+        thread: PubSubWorkerThread | None = self.thread
+        self.thread = None
+        if thread is not None:
+            try:
+                thread.stop()
+                if thread.ident is not None:
+                    thread.join()
+                    time.sleep(0.01)
+            except Exception as error:
+                first_error = _keep_first_error(first_error, error)
+
+        pubsub: redis.client.PubSub | None = self.pubsub
+        self.pubsub = None
+        if pubsub is not None:
+            try:
+                # redis-py does not annotate `PubSub.connection` (the
+                # constructor assigns a plain `None`), so mypy infers the
+                # attribute as always-`None` and basedpyright sees an
+                # unknown. The cast gives both the real optional type.
+                pubsub_connection: object | None = typing.cast(
+                    'object | None',
+                    pubsub.connection,
+                )
+                if pubsub_connection is not None:
+                    # `PubSub.unsubscribe()` is unannotated in redis-py
+                    pubsub.unsubscribe(  # type: ignore[no-untyped-call]
+                        self.channel,
+                    )
+            except Exception as error:
+                first_error = _keep_first_error(first_error, error)
+            try:
+                pubsub.close()
+            except Exception as error:
+                first_error = _keep_first_error(first_error, error)
+
+        if first_error is not None:
+            raise first_error
 
     def release(self) -> None:
         """Give up the lock and undo everything `acquire` set up.
 
-        Stops and joins the keep-alive thread, unsubscribes and closes
-        the pubsub connection (see `_unsubscribe`), and forgets any
-        election this lock had won. A connection the lock created itself
-        is closed and cleared, so the next `get_connection` builds a
-        fresh one; a connection supplied by the caller is left alone.
+        Stops and joins the keep-alive thread, closes the pubsub (see
+        `_unsubscribe`), and forgets any election this lock had won. A
+        connection the lock created itself is closed and cleared, so the
+        next `get_connection` builds a fresh one. A connection supplied
+        by the caller is left alone.
 
         Dropping the subscription is not merely cleanup, it *is* the
         release: other processes learn the lock is free by no longer
         seeing this subscriber, with no key to delete and no expiry to
         wait for.
+
+        The teardown is exception safe: every step runs even when an
+        earlier one fails, `thread`, `pubsub` and a self-created
+        `connection` are cleared regardless, and only the first failure
+        is re-raised once everything has run (see `_keep_first_error`).
+        A release interrupted by a dead Redis therefore still leaves the
+        instance ready for a later `acquire` instead of permanently
+        tripping its ``assert not self.pubsub`` guard.
 
         This is the terminal teardown. The back-off between attempts is
         `_unsubscribe`, which keeps the connection so the retry loop and
@@ -1327,17 +1437,33 @@ class RedisLock(utils.LockBase['RedisLock']):
         Calling this when nothing was acquired is harmless - it still
         closes a self-created connection if one exists - which is what
         makes both that rollback and `__del__` safe.
+
+        Raises:
+            Exception: The first error any teardown step raised,
+                re-raised after the remaining steps have run.
         """
+        first_error: Exception | None = None
         self.writer_elected = False
-        self._unsubscribe()
+        try:
+            self._unsubscribe()
+        except Exception as error:
+            first_error = error
 
         # Only close connections we created ourselves; caller-supplied ones
-        # are left untouched. Clear it so a later acquire recreates it.
+        # are left untouched. Clear it even when closing fails so a later
+        # acquire recreates the connection instead of reusing a broken one.
         if self.close_connection and self.connection is not None:
-            self.connection.close()
+            connection: redis.client.Redis = self.connection
             self.connection = None
+            try:
+                connection.close()
+            except Exception as error:
+                first_error = _keep_first_error(first_error, error)
 
-    def __del__(self) -> None:  # pragma: no cover - best effort cleanup
+        if first_error is not None:
+            raise first_error
+
+    def __del__(self) -> None:
         """Release the lock when the object is garbage collected.
 
         A safety net for a lock that was never released explicitly, not a
@@ -1349,10 +1475,14 @@ class RedisLock(utils.LockBase['RedisLock']):
         That last case is harmless here, which is the advantage of
         holding a lock in a connection rather than in a key: the process
         exits, the daemon reader thread goes with it, the socket closes
-        and Redis releases the lock. Unlike
-        `utils.LockBase.__del__` this does not suppress errors, so a
-        failure during collection surfaces as the interpreter's
-        "Exception ignored in" message and cannot be caught by the code
-        that dropped the reference.
+        and Redis releases the lock.
+
+        Like `utils.LockBase.__del__` every error is suppressed. A
+        finalizer often runs during interpreter shutdown, where even the
+        import a reconnect attempt triggers can fail (``ImportError:
+        sys.meta_path is None``), and raising from here only produces an
+        "Exception ignored in" message that the code dropping the
+        reference can never catch.
         """
-        self.release()
+        with contextlib.suppress(Exception):
+            self.release()

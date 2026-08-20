@@ -56,7 +56,7 @@ class BaseLockException(Exception):  # noqa: N818
     def __init__(
         self,
         *args: typing.Any,
-        fh: types.IO | None | int | types.HasFileno = None,
+        fh: types.IO | int | types.HasFileno | None = None,
         **kwargs: typing.Any,
     ) -> None:
         """Store `fh` and extract `strerror` from `args[1]`.
