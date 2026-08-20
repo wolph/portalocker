@@ -1323,18 +1323,20 @@ def test_pidfilelock_nt_release_unlinks_pidfile_before_sidecar_unlock(
 
     events: list[str] = []
     real_unlink = os.unlink
-    real_release = utils.Lock.release
+    # The sidecar teardown claims the filehandle first and unlocks it via
+    # `_release_claimed_fh`, so that is the choke point to observe.
+    real_release_claimed = utils.Lock._release_claimed_fh
 
     def recording_unlink(path, *args, **kwargs):
         events.append(f'unlink:{os.path.basename(str(path))}')
         return real_unlink(path, *args, **kwargs)
 
-    def recording_release(self: utils.Lock) -> None:
+    def recording_release(self: utils.Lock, fh) -> None:
         events.append('sidecar-release')
-        real_release(self)
+        real_release_claimed(self, fh)
 
     monkeypatch.setattr(os, 'unlink', recording_unlink)
-    monkeypatch.setattr(utils.Lock, 'release', recording_release)
+    monkeypatch.setattr(utils.Lock, '_release_claimed_fh', recording_release)
     monkeypatch.setattr(os, 'name', 'nt')
     try:
         lock.release()

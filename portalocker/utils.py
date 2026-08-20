@@ -51,6 +51,7 @@ import os
 import pathlib
 import random
 import tempfile
+import threading
 import time
 import typing
 import warnings
@@ -435,6 +436,17 @@ class LockBase(  # pragma: no cover
         The argument wins when it is not `None`; otherwise the attribute
         set here is used.
 
+    Note:
+        A single lock instance shared across threads is synchronized for
+        state consistency only, not for granted-lock semantics: the
+        internal bookkeeping (which filehandle is held, the acquire
+        count, which semaphore slot is taken) cannot be corrupted by
+        concurrent calls, but which thread's `acquire` wins, or whether a
+        concurrent `release` makes another thread's `acquire` succeed, is
+        still scheduling. Use one instance per thread, or a
+        `threading.Lock` of your own, when you need per-thread mutual
+        exclusion.
+
     See Also:
         `Lock`: the file based implementation nearly everything else in
         this module derives from.
@@ -446,6 +458,15 @@ class LockBase(  # pragma: no cover
     check_interval: float
     #: skip the timeout and immediately fail if the initial lock fails
     fail_when_locked: bool
+    #: Guards this instance's acquire/release state transitions (claiming
+    #: the held filehandle, publishing a freshly acquired one, moving the
+    #: reentrancy count). Deliberately reentrant: a signal handler that
+    #: calls `release` while the owning thread sits inside a state
+    #: transition must claim-and-no-op instead of deadlocking against its
+    #: own thread. The scope is kept to plain attribute swaps; it is never
+    #: held around a blocking OS locking call, so `acquire` timeouts
+    #: cannot deadlock behind it.
+    _state_lock: threading.RLock
 
     def __init__(
         self,
@@ -474,6 +495,7 @@ class LockBase(  # pragma: no cover
             fail_when_locked,
             DEFAULT_FAIL_WHEN_LOCKED,
         )
+        self._state_lock = threading.RLock()
 
     @abc.abstractmethod
     def acquire(
@@ -1091,8 +1113,17 @@ class Lock(LockBase[typing.IO[typing.Any]]):
 
         Doing nothing when no lock is held is deliberate: double releases
         and the ``atexit`` fallback of `TemporaryFileLock` rely on it.
-        Unlocking and closing are both always attempted and the stored
-        handle is always cleared, even when one of the two fails.
+
+        The stored handle is claimed atomically before any OS call runs:
+        exactly one caller takes ownership and tears the lock down, every
+        concurrent or reentrant caller finds nothing and returns. Two
+        threads releasing at once therefore cannot both reach the unlock,
+        where the loser used to run it on a closed, possibly reused file
+        descriptor and silently dropped whichever lock that descriptor
+        number belonged to by then. The claim-first ordering also means an
+        interrupt escaping ``close`` (a ``KeyboardInterrupt`` during a
+        buffered flush) can no longer leave the instance believing it
+        still holds the lock.
 
         Raises:
             Exception: Only when the lock was built with
@@ -1101,36 +1132,67 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                 if both failed. By default such failures are suppressed
                 and logged at warning level instead.
         """
-        fh = self.fh
-        if fh:
-            release_errors: list[Exception] = []
-            # On Windows, closing the handle also releases the lock. Ensure we
-            # always close, even if unlock raises due to edge cases when
-            # preparing/restoring file position.
-            try:
-                try:
-                    portalocker.unlock(fh)
-                except Exception as exception:
-                    release_errors.append(exception)
-            finally:
-                try:
-                    fh.close()
-                except Exception as exception:
-                    release_errors.append(exception)
-                self.fh = None
+        fh: types.IO | None = self._claim_fh()
+        if fh is not None:
+            self._release_claimed_fh(fh)
 
-            if release_errors:
-                if self.raise_on_release_error:
-                    primary_error: Exception = release_errors[0]
-                    if len(release_errors) > 1:
-                        raise primary_error from release_errors[1]
-                    raise primary_error
-                for release_error in release_errors:
-                    logger.warning(
-                        'suppressed error while releasing lock on %r: %r',
-                        self.filename,
-                        release_error,
-                    )
+    def _claim_fh(self) -> types.IO | None:
+        """Atomically take ownership of the stored filehandle.
+
+        The swap runs under the instance state lock, so of any number of
+        concurrent callers exactly one receives the handle and everyone
+        else receives `None`. The state lock is reentrant, which makes the
+        claim signal safe: a handler that calls `release` while this
+        thread sits inside the swap claims `None` instead of deadlocking.
+
+        Returns:
+            The filehandle this instance held, now owned by the caller,
+            or `None` when another claim (or none at all) got there first.
+        """
+        fh: types.IO | None
+        with self._state_lock:
+            fh, self.fh = self.fh, None
+        return fh
+
+    def _release_claimed_fh(self, fh: types.IO) -> None:
+        """Unlock and close a filehandle claimed via `Lock._claim_fh`.
+
+        Both steps are always attempted: on Windows closing the handle is
+        what releases the lock, so a failing unlock must not skip the
+        close. The error policy is the one documented on `Lock.release`.
+
+        Args:
+            fh: The claimed filehandle. The caller owns it exclusively;
+                the instance no longer references it.
+
+        Raises:
+            Exception: Only with ``raise_on_release_error`` set, exactly
+                as documented on `Lock.release`.
+        """
+        release_errors: list[Exception] = []
+        try:
+            try:
+                portalocker.unlock(fh)
+            except Exception as exception:
+                release_errors.append(exception)
+        finally:
+            try:
+                fh.close()
+            except Exception as exception:
+                release_errors.append(exception)
+
+        if release_errors:
+            if self.raise_on_release_error:
+                primary_error: Exception = release_errors[0]
+                if len(release_errors) > 1:
+                    raise primary_error from release_errors[1]
+                raise primary_error
+            for release_error in release_errors:
+                logger.warning(
+                    'suppressed error while releasing lock on %r: %r',
+                    self.filename,
+                    release_error,
+                )
 
     def _get_fh(self) -> types.IO:
         """Open the file and return the new, still unlocked filehandle."""
@@ -1285,16 +1347,22 @@ class RLock(Lock):
             OSError: As `Lock.acquire`, on the first call only.
         """
         fh: typing.IO[typing.Any]
-        if self._acquire_count >= 1:
-            if self.fh is None:
-                raise exceptions.LockException(
-                    'RLock claims to be acquired but holds no filehandle, '
-                    'its state was corrupted. Refusing to hand out None',
-                )
-            fh = self.fh
-        else:
-            fh = super().acquire(timeout, check_interval, fail_when_locked)
-        self._acquire_count += 1
+        with self._state_lock:
+            if self._acquire_count >= 1:
+                if self.fh is None:
+                    raise exceptions.LockException(
+                        'RLock claims to be acquired but holds no '
+                        'filehandle, its state was corrupted. Refusing '
+                        'to hand out None',
+                    )
+                self._acquire_count += 1
+                return self.fh
+        # First acquire: take the OS lock outside the state lock, so a
+        # blocking or retrying acquire cannot stall another thread's
+        # nested acquire or release behind it.
+        fh = super().acquire(timeout, check_interval, fail_when_locked)
+        with self._state_lock:
+            self._acquire_count += 1
         return fh
 
     def release(self) -> None:
@@ -1306,14 +1374,18 @@ class RLock(Lock):
                 so it is reported rather than ignored, unlike the tolerant
                 `Lock.release` this eventually delegates to.
         """
-        if self._acquire_count == 0:  # pragma: no branch - covered by tests
-            raise exceptions.LockException(
-                'Cannot release more times than acquired',
-            )
-
-        if self._acquire_count == 1:  # pragma: no branch - trivial guard
+        releasing: bool
+        with self._state_lock:
+            if self._acquire_count == 0:
+                raise exceptions.LockException(
+                    'Cannot release more times than acquired',
+                )
+            self._acquire_count -= 1
+            releasing = self._acquire_count == 0
+        # The OS unlock runs outside the state lock; `Lock.release` claims
+        # the filehandle atomically on its own.
+        if releasing:
             super().release()
-        self._acquire_count -= 1
 
 
 def _fh_matches_path(fh: types.IO, filename: str) -> bool:  # pragma: not-posix
@@ -1592,7 +1664,12 @@ class TemporaryFileLock(Lock):
 
         Releasing an object that holds nothing is a no-op: a stale object
         (a double release, or a release after a failed acquire) must never
-        unlink the path out from under the current holder.
+        unlink the path out from under the current holder. The held
+        filehandle is claimed atomically before the first OS call, so a
+        release that reenters from a signal handler, or runs concurrently
+        in another thread, finds the state already claimed and removes
+        nothing: the outer release still holds the OS lock at that point,
+        and only it unlinks the path, exactly once.
 
         On POSIX the unlink also only runs when the held filehandle still
         names the path. After a third party unlinked or replaced the lock
@@ -1607,16 +1684,16 @@ class TemporaryFileLock(Lock):
                 failures are suppressed and logged at warning level, like
                 the unlock and close failures in `Lock.release`.
         """
-        fh: types.IO | None = self.fh
+        fh: types.IO | None = self._claim_fh()
         if fh is None:
             # Not holding the lock; the path (if any) belongs to another
             # holder now.
             return
         unlink_error: Exception | None
-        if os.name == 'nt':  # pragma: no cover
-            unlink_error = self._release_nt()
+        if os.name == 'nt':  # pragma: not-nt
+            unlink_error = self._release_nt(fh)
         else:  # pragma: not-posix
-            unlink_error = self._release_posix()
+            unlink_error = self._release_posix(fh)
         if unlink_error is None:
             return
         if self.raise_on_release_error:
@@ -1627,19 +1704,24 @@ class TemporaryFileLock(Lock):
             unlink_error,
         )
 
-    def _release_nt(self) -> Exception | None:  # pragma: no cover
+    def _release_nt(
+        self, fh: types.IO
+    ) -> Exception | None:  # pragma: no cover
         """Unlock and close first, then remove the file with a short retry.
 
         A locked file cannot be unlinked on Windows, hence the ordering,
         and an AV or indexing scanner can hold the freshly closed file
         open for a moment, hence the retry.
 
+        Args:
+            fh: The filehandle claimed by `release`.
+
         Returns:
             The last `PermissionError` when the file still refused to go
             after the retries, or `None` when it was removed or was
             already gone.
         """
-        Lock.release(self)
+        self._release_claimed_fh(fh)
         if not os.path.isfile(self.filename):
             return None
         unlink_error: Exception | None = None
@@ -1656,7 +1738,9 @@ class TemporaryFileLock(Lock):
                 break
         return unlink_error
 
-    def _release_posix(self) -> Exception | None:  # pragma: not-posix
+    def _release_posix(
+        self, fh: types.IO
+    ) -> Exception | None:  # pragma: not-posix
         """Unlink while the lock is still held, then unlock and close.
 
         The ordering closes the split-brain window: a competing acquirer
@@ -1665,19 +1749,22 @@ class TemporaryFileLock(Lock):
         a `PermissionError` from a read-only directory), otherwise the
         error would leave the lock held forever.
 
+        Args:
+            fh: The filehandle claimed by `release`. It still carries the
+                OS lock while the unlink runs.
+
         Returns:
             The unlink failure for the caller to report, or `None` when
             the file was removed or was already gone.
 
         Raises:
-            Exception: Whatever `Lock.release` raises, which it only does
-                with ``raise_on_release_error`` set. A failed unlink is
-                kept visible by chaining it onto that error.
+            Exception: Whatever `Lock._release_claimed_fh` raises, which
+                it only does with ``raise_on_release_error`` set. A failed
+                unlink is kept visible by chaining it onto that error.
         """
         unlink_error: Exception | None = None
-        fh: types.IO | None = self.fh
         try:
-            if fh is not None and not _fh_matches_path(fh, self.filename):
+            if not _fh_matches_path(fh, self.filename):
                 # After a third party unlinked or replaced the lock file
                 # the path belongs to whoever recreated it, so removing
                 # it would destroy that holder's lock.
@@ -1694,7 +1781,7 @@ class TemporaryFileLock(Lock):
         except Exception as error:
             unlink_error = error
         try:
-            Lock.release(self)
+            self._release_claimed_fh(fh)
         except Exception as release_error:
             if unlink_error is not None:
                 raise release_error from unlink_error
@@ -2184,7 +2271,12 @@ class PidFileLock(TemporaryFileLock):
         the current holder. The same applies to an object whose sidecar
         `Lock` no longer holds a filehandle, for instance after an acquire
         interrupted while waiting: the files belong to whoever holds the
-        sidecar lock now.
+        sidecar lock now. Both the sidecar lock and its filehandle are
+        claimed atomically before the first OS call, so a release that
+        reenters from a signal handler, or runs concurrently in another
+        thread, finds the state already claimed and removes nothing: the
+        outer release still holds the sidecar lock at that point, and only
+        it unlinks the two files, exactly once.
 
         On POSIX the unlinks also only run when the held sidecar handle
         still names the sidecar path. After a third party unlinked or
@@ -2192,23 +2284,26 @@ class PidFileLock(TemporaryFileLock):
         compromised holder frees its OS lock but leaves both paths alone,
         with a warning in the log instead of a deleted competitor lock.
         """
-        inner_lock = self._inner_lock
-        sidecar_fh: types.IO | None = (
-            None if inner_lock is None else inner_lock.fh
-        )
-        if inner_lock is None or sidecar_fh is None:
+        inner_lock: Lock | None
+        with self._state_lock:
+            inner_lock, self._inner_lock = self._inner_lock, None
+            self._acquired_lock = False
+        if inner_lock is None:
             # Not holding the sidecar lock, so the PID and sidecar files
-            # belong to whoever holds it now. A non-None `inner_lock`
-            # whose `fh` is `None` means the OS lock is already gone, and
-            # unlinking the paths would destroy the current holder's lock.
-            self._inner_lock = None
+            # belong to whoever holds it now.
+            return
+        sidecar_fh: types.IO | None = inner_lock._claim_fh()
+        if sidecar_fh is None:
+            # The sidecar `Lock` holds no filehandle (an acquire
+            # interrupted while waiting, or a concurrent claim won): the
+            # OS lock is already gone and unlinking the paths would
+            # destroy the current holder's lock.
             return
         if os.name == 'nt':
-            self._inner_lock = None
             with contextlib.suppress(Exception):
                 os.unlink(self.filename)
             with contextlib.suppress(Exception):
-                inner_lock.release()
+                inner_lock._release_claimed_fh(sidecar_fh)
             with contextlib.suppress(Exception):
                 if os.path.isfile(self._lockfile):
                     os.unlink(self._lockfile)
@@ -2220,10 +2315,7 @@ class PidFileLock(TemporaryFileLock):
             # that holder's lock. The sidecar unlock must run even when an
             # unlink fails (e.g. a PermissionError from a read-only
             # directory), otherwise the error would leave the sidecar held
-            # forever. `_inner_lock` is always cleared in the same breath:
-            # the unlock is attempted right after and its errors are
-            # suppressed, so keeping the reference would only invite a
-            # second release to unlink files it no longer owns.
+            # forever.
             try:
                 if _fh_matches_path(sidecar_fh, self._lockfile):
                     with contextlib.suppress(FileNotFoundError):
@@ -2239,9 +2331,8 @@ class PidFileLock(TemporaryFileLock):
                         self._lockfile,
                     )
             finally:
-                self._inner_lock = None
                 with contextlib.suppress(Exception):
-                    inner_lock.release()
+                    inner_lock._release_claimed_fh(sidecar_fh)
 
 
 class _PidFileLockFailClosedContext(
