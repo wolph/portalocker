@@ -2,6 +2,7 @@ import gc
 import logging
 import os
 import pathlib
+import time
 
 import pytest
 
@@ -389,3 +390,144 @@ def test_temporaryfilelock_strict_context_chain_has_no_cycle(
         link = link.__cause__ or link.__context__
         hops += 1
     assert link is None, 'exception chain does not terminate (cycle)'
+def test_temporaryfilelock_reacquire_while_held_is_noop(tmpfile):
+    """Re-acquiring a held lock with an intact path must be an idempotent
+    no-op: the same filehandle comes back, open and locked, and the lock
+    is never released in between.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    first_fh = lock.acquire()
+    second_fh = lock.acquire()
+    assert second_fh is first_fh
+    assert not first_fh.closed
+    lock.release()
+    assert not os.path.isfile(tmpfile)
+
+
+@posix_inode_only
+@pytest.mark.parametrize('timeout', [0, None])
+def test_temporaryfilelock_external_unlink_compromises_held_lock(
+    tmpfile,
+    timeout,
+):
+    """T10a/T10b: when a third party unlinked the path of a held lock
+    (tmpwatch cleaning /tmp is enough), re-acquire must raise and leave the
+    held filehandle untouched, for both the fail-fast (timeout=0) and the
+    retrying (default timeout) forms. It must never release the held lock,
+    close the caller's filehandle or silently swap to a new inode.
+    """
+    kwargs = {} if timeout is None else {'timeout': timeout}
+    lock = portalocker.TemporaryFileLock(tmpfile, **kwargs)
+    held_fh = lock.acquire()
+    os.unlink(tmpfile)  # a third party cleans up the "stale" lock file
+
+    with pytest.raises(portalocker.LockException, match='unlink'):
+        lock.acquire()
+
+    assert not held_fh.closed, 'the held filehandle was closed'
+    assert lock.fh is held_fh, 'the instance dropped the lock it held'
+    lock.release()
+
+
+@posix_inode_only
+def test_temporaryfilelock_external_replace_compromises_held_lock(tmpfile):
+    """Same as the unlink case, but the path was recreated as well: the
+    held lock must not silently migrate to the new inode.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    held_fh = lock.acquire()
+    os.unlink(tmpfile)
+    pathlib.Path(tmpfile).write_text('')
+
+    with pytest.raises(portalocker.LockException, match='unlink'):
+        lock.acquire()
+
+    assert not held_fh.closed
+    assert lock.fh is held_fh
+    lock.release()
+
+
+@posix_inode_only
+def test_temporaryfilelock_retry_passes_remaining_timeout(
+    tmpfile,
+    monkeypatch,
+):
+    """A fresh acquire whose verification keeps failing must fit one
+    timeout budget: every retry is handed the remaining deadline instead of
+    the full timeout again (which compounded to timeout^2/check_interval).
+    """
+    recorded: list[float | None] = []
+    real_acquire = utils.Lock.acquire
+
+    def spy_acquire(
+        self,
+        timeout=None,
+        check_interval=None,
+        fail_when_locked=None,
+    ):
+        recorded.append(timeout)
+        return real_acquire(self, timeout, check_interval, fail_when_locked)
+
+    monkeypatch.setattr(utils.Lock, 'acquire', spy_acquire)
+    monkeypatch.setattr(utils, '_fh_matches_path', lambda fh, filename: False)
+
+    lock = portalocker.TemporaryFileLock(
+        tmpfile,
+        timeout=0.5,
+        check_interval=0.1,
+    )
+    start = time.perf_counter()
+    with pytest.raises(portalocker.AlreadyLocked):
+        lock.acquire()
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 1.5, f'a single 0.5s budget took {elapsed:.3f}s'
+    assert len(recorded) >= 2, 'expected at least one verification retry'
+    for passed_timeout in recorded[1:]:
+        assert passed_timeout is not None, 'retry got the full timeout again'
+        assert passed_timeout <= 0.5
+
+
+def test_temporaryfilelock_accepts_pathlib_path(tmp_path):
+    """`filename` is `types.Filename`: a `pathlib.Path` must work end to
+    end and satisfy the type checkers.
+    """
+    path = tmp_path / 'pathlib.lock'
+    lock = portalocker.TemporaryFileLock(path)
+    lock.acquire()
+    assert path.is_file()
+    lock.release()
+    assert not path.exists()
+
+
+@posix_inode_only
+def test_temporaryfilelock_compromised_release_spares_competitor_file(
+    tmpfile,
+    caplog,
+):
+    """Releasing a compromised holder must free its OS lock without
+    unlinking the path: after the external swap the path belongs to the
+    competitor, and unlinking it would destroy that holder's lock.
+    """
+    holder = portalocker.TemporaryFileLock(tmpfile)
+    held_fh = holder.acquire()
+    os.unlink(tmpfile)  # a third party cleans up the "stale" lock file
+
+    competitor = portalocker.TemporaryFileLock(tmpfile)
+    competitor.acquire()
+    try:
+        with pytest.raises(portalocker.LockException, match='unlink'):
+            holder.acquire()
+        with caplog.at_level(logging.WARNING, logger='portalocker.utils'):
+            holder.release()
+        assert os.path.isfile(tmpfile), (
+            'the compromised release unlinked the competitor file'
+        )
+        assert held_fh.closed, 'the OS lock was not freed'
+        assert holder.fh is None
+        assert any(
+            'not unlinking' in record.getMessage() for record in caplog.records
+        ), 'expected a warning about the skipped unlink'
+    finally:
+        competitor.release()
+    assert not os.path.isfile(tmpfile)

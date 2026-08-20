@@ -202,10 +202,13 @@ it.
 
 Guarantees:
 
-- Used as a context manager, entering the ``with`` block never raises on
-  contention: it returns `None` when this process took the lock, or the
-  competing PID (an `int`) when it did not. The block runs either way,
-  so the body has to check the value.
+- Used as a context manager, entering the ``with`` block does not raise
+  on ordinary contention: it returns `None` when this process took the
+  lock, or the competing PID (an `int`) when it did not. The block runs
+  either way, so the body has to check the value. The one exception is a
+  holder whose PID cannot be read (a missing, unreadable or corrupt PID
+  file): that raises ``AlreadyLocked`` instead of returning `None`,
+  because `None` would falsely report this process as the holder.
 - Every plain ``LockException`` raised while acquiring the sidecar is
   normalized to ``AlreadyLocked``, so `PidFileLock.acquire` has a single
   exception to catch regardless of whether it came from
@@ -213,8 +216,8 @@ Guarantees:
 
 Costs:
 
-- The "never raises on entry" behaviour is a deliberate departure from
-  every other lock on this page. Use `PidFileLock.fail_closed` instead of
+- The fail-open entry behaviour is a deliberate departure from every
+  other lock on this page. Use `PidFileLock.fail_closed` instead of
   the plain context manager when a contended lock should abort the block
   rather than run it with a competing PID in hand.
 - Two files on disk instead of one.
