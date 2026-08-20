@@ -1171,6 +1171,122 @@ def test_redis_collect_holders_kills_only_unresponsive_holder(
     assert killed == ['stale-client']
 
 
+def test_redis_probe_drains_buffered_replies_from_many_holders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe against many holders must read every buffered reply.
+
+    Regression test for #138. The reply loop used to read one message per
+    ``_timeout_generator`` interval, which capped a probe at roughly the
+    number of intervals that fit in ``unavailable_timeout``, no matter how
+    fast the holders answered. With more holders than intervals every
+    probe came up short and ``_kill_unavailable_locks`` killed healthy
+    holders whose replies were sitting unread in the prober's own buffer.
+    """
+    server: fakeredis.FakeServer = fakeredis.FakeServer()
+
+    def connect() -> client.Redis:
+        return fakeredis.FakeStrictRedis(server=server, decode_responses=True)
+
+    channel: str = str(random.random())
+    holder_count: int = 25
+    holders: list[redis.RedisLock] = [
+        redis.RedisLock(
+            channel,
+            connection=connect(),
+            flags=portalocker.LockFlags.SHARED,
+            thread_sleep_time=0.01,
+        )
+        for _ in range(holder_count)
+    ]
+    # The default timings reproduce the bug deterministically: with
+    # ``check_interval = min(0.1, 1 / 10)`` the generator yields at most
+    # 21 times inside the one second timeout, so a one-message-per-yield
+    # loop can never collect the 26 replies this probe needs.
+    prober: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=connect(),
+        thread_sleep_time=0.1,
+        unavailable_timeout=1,
+    )
+    kill_calls: list[list[redis.RedisLockHolder]] = []
+
+    def record_kill(
+        connection_: client.Redis,
+        responding_holders: typing.Iterable[redis.RedisLockHolder],
+    ) -> None:
+        kill_calls.append(list(responding_holders))
+
+    monkeypatch.setattr(prober, '_kill_unavailable_locks', record_kill)
+
+    try:
+        for holder in holders:
+            holder._start_subscription(holder.get_connection())
+        prober._start_subscription(prober.get_connection())
+        _wait_for_subscribers(prober, holder_count + 1)
+
+        probe: list[redis.RedisLockHolder] | None = (
+            prober._collect_lock_holders(
+                prober.get_connection(),
+                expected_subscribers=holder_count + 1,
+                timeout=prober.unavailable_timeout,
+            )
+        )
+    finally:
+        prober.release()
+        for holder in holders:
+            holder.release()
+
+    assert kill_calls == []
+    assert probe is not None
+    assert len(probe) == holder_count + 1
+
+
+def test_redis_collect_holders_skips_control_frames_while_draining(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stray control frame between replies is skipped, not counted.
+
+    The drain loop reads every buffered frame within one polling
+    interval, so it can run into control frames such as a late
+    confirmation. Those must be skipped without ending the drain or
+    being counted as replies.
+    """
+    connection: fakeredis.FakeStrictRedis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(),
+        decode_responses=True,
+    )
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+        thread_sleep_time=0.001,
+    )
+    response: str = json.dumps(
+        {
+            'holder_id': 'responding',
+            'mode': 'shared',
+            'protocol': 1,
+        }
+    )
+    pubsub: _ResponsePubSub = _ResponsePubSub(
+        [response],
+        confirmations=[{'type': 'subscribe'}, {'type': 'unsubscribe'}],
+    )
+    monkeypatch.setattr(lock, '_get_pubsub', lambda connection: pubsub)
+    monkeypatch.setattr(lock, '_get_subscriber_count', lambda connection: 1)
+    monkeypatch.setattr(connection, 'publish', lambda channel, message: 1)
+
+    holders: list[redis.RedisLockHolder] | None = lock._collect_lock_holders(
+        connection,
+        expected_subscribers=1,
+        timeout=0.01,
+    )
+
+    assert holders == [
+        redis.RedisLockHolder('responding', redis.RedisLockMode.SHARED)
+    ]
+
+
 def test_redis_check_or_kill_lock_kills_unresponsive_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

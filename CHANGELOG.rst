@@ -8,6 +8,14 @@
    and the failure was escalated to the main thread. Retries now drop only
    the subscription and keep the connection; the connection is closed on
    final release or when ``acquire`` gives up (#136)
+ * Fixed a ``RedisLock`` probe reading at most one reply per polling
+   interval, which capped a probe at roughly ten replies inside the default
+   one second ``unavailable_timeout`` no matter how fast the holders
+   answered. On a channel with more holders than that every probe came up
+   short and killed healthy holders whose replies were sitting unread in
+   the prober's own buffer. The reply loop now drains all buffered replies
+   within each interval, so the interval paces the polling instead of
+   capping the throughput (#138)
 
 4.1.0:
 

@@ -731,7 +731,12 @@ class RedisLock(utils.LockBase['RedisLock']):
 
         Answers are keyed by holder id, so a holder that answers twice is
         counted once, and collection stops as soon as
-        `expected_subscribers` distinct holders have replied.
+        `expected_subscribers` distinct holders have replied. Every
+        polling interval drains all the replies that are already buffered
+        instead of reading a single one, so the interval paces the
+        polling rather than capping the reply throughput. A channel with
+        more holders than the timeout has intervals can therefore still
+        be probed conclusively.
 
         Returning `None` is not the same as returning an empty list, and
         the difference is the reason `_resolve_lock_holders` guards every
@@ -804,19 +809,33 @@ class RedisLock(utils.LockBase['RedisLock']):
             )
 
             for _ in self._timeout_generator(timeout, check_interval):
+                # Drain every buffered reply before sleeping again. Reading
+                # a single message per interval would cap the throughput at
+                # one reply per interval, and a channel with more holders
+                # than intervals could then never be probed conclusively,
+                # so every probe would kill healthy holders (#138). The
+                # first read waits up to `check_interval` for a reply, the
+                # follow-up reads only empty the local buffer.
                 message: dict[str, typing.Any] | None = typing.cast(
                     'dict[str, typing.Any] | None',
                     pubsub.get_message(timeout=check_interval),
                 )
-                if message and message.get('type') == 'message':
-                    holder: RedisLockHolder = self._parse_lock_response(
-                        message.get('data'),
-                        legacy_index,
+                while message is not None:
+                    if message.get('type') == 'message':
+                        holder: RedisLockHolder = self._parse_lock_response(
+                            message.get('data'),
+                            legacy_index,
+                        )
+                        holders[holder.holder_id] = holder
+                        legacy_index += int(holder.legacy)
+                        if len(holders) >= expected_subscribers:
+                            break
+                    message = typing.cast(
+                        'dict[str, typing.Any] | None',
+                        pubsub.get_message(timeout=0),
                     )
-                    holders[holder.holder_id] = holder
-                    legacy_index += int(holder.legacy)
-                    if len(holders) >= expected_subscribers:
-                        break
+                if len(holders) >= expected_subscribers:
+                    break
 
             current_subscribers: int = self._get_subscriber_count(connection)
             logger.debug(
