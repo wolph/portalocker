@@ -88,6 +88,14 @@ def test_open_atomic_preserves_payload_after_publication_error(
 
     Deleting the temporary file after a failed publication (as 4.0.0 did)
     destroys the caller's payload with no way to recover it.
+
+    The location note is asserted against the exception's ``args``, not
+    its ``str()``: the staged error is a bare `OSError` without a
+    ``strerror``, so the note is appended as an extra argument and a
+    multi-argument exception stringifies as the repr of its args tuple.
+    On Windows that repr escapes every path backslash, so substring
+    matching the raw path against ``str()`` fails there while the note
+    itself is present and correct.
     """
     target: pathlib.Path = tmp_path / 'destination.bin'
     temporary_paths: list[pathlib.Path] = []
@@ -114,7 +122,8 @@ def test_open_atomic_preserves_payload_after_publication_error(
     assert len(temporary_paths) == 1
     assert temporary_paths[0].exists(), 'the payload must not be destroyed'
     assert temporary_paths[0].read_bytes() == b'unpublished payload'
-    assert str(temporary_paths[0]) in str(exc_info.value)
+    note: str = f'payload preserved at {temporary_paths[0]}'
+    assert note in exc_info.value.args
     assert not target.exists()
 
 

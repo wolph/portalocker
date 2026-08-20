@@ -391,7 +391,10 @@ def test_forked_child_survives_inherited_held_state_lock(tmpfile: str) -> None:
 def test_state_lock_reinit_hook_keeps_locks_usable(tmpfile: str) -> None:
     """The after-fork reinit hook must leave every registered lock with a
     working state lock. Called directly here, since a forked child's
-    coverage never reaches the parent's report.
+    coverage never reaches the parent's report. The call must also
+    succeed on Windows, where CPython's lock types lack
+    ``_at_fork_reinit`` (it only exists on builds with ``fork``) and the
+    hook is a documented no-op.
     """
     lock = portalocker.Lock(tmpfile, timeout=0)
     assert lock in utils._live_locks
@@ -399,6 +402,25 @@ def test_state_lock_reinit_hook_keeps_locks_usable(tmpfile: str) -> None:
     lock.acquire()
     lock.release()
     assert lock.fh is None
+
+
+def test_state_lock_reinit_hook_tolerates_missing_reinit(
+    tmpfile: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reinit hook must skip state locks without ``_at_fork_reinit``.
+
+    CPython only compiles ``_at_fork_reinit`` into its lock types on
+    platforms with ``fork``, so on Windows the method does not exist at
+    all. The registered hook can never fire there (nothing forks), but a
+    direct call must be a quiet no-op instead of an ``AttributeError``.
+    The Windows shape is staged on every platform by giving one
+    registered lock a state lock without the method.
+    """
+    lock = portalocker.Lock(tmpfile, timeout=0)
+    assert lock in utils._live_locks
+    monkeypatch.setattr(lock, '_state_lock', object())
+    utils._reinit_state_locks_after_fork()
 
 
 def test_rlock_release_claims_handle_atomically_with_count(

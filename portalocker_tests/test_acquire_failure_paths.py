@@ -22,6 +22,16 @@ import pytest
 import portalocker
 from portalocker import exceptions, utils
 
+# `os.chflags` only exists on BSD-family platforms, and recent typeshed
+# only declares it there, so a direct `os.chflags(...)` call fails the
+# type checkers on the Linux CI runners. The `getattr` alias mirrors the
+# runtime `skipif` guard at the type level.
+_chflags: typing.Callable[[str, int], None] | None = getattr(
+    os,
+    'chflags',
+    None,
+)
+
 
 def test_prepare_fh_failure_releases_lock(
     tmpfile: str,
@@ -61,7 +71,7 @@ def test_prepare_fh_failure_releases_lock(
 
 
 @pytest.mark.skipif(
-    not hasattr(os, 'chflags'),
+    _chflags is None,
     reason='os.chflags is not available on this platform',
 )
 def test_prepare_fh_failure_append_only_file(tmpfile: str) -> None:
@@ -71,9 +81,10 @@ def test_prepare_fh_failure_append_only_file(tmpfile: str) -> None:
     truncate fails with ``EPERM``. The failed acquire must not leave the
     file locked behind the escaping traceback.
     """
+    assert _chflags is not None  # the skipif above guarantees it
     pathlib.Path(tmpfile).write_text('precious append-only data')
     try:
-        os.chflags(tmpfile, stat.UF_APPEND)
+        _chflags(tmpfile, stat.UF_APPEND)
     except OSError:  # pragma: no cover - filesystem dependent
         pytest.skip('filesystem does not support chflags uappnd')
 
@@ -96,7 +107,7 @@ def test_prepare_fh_failure_append_only_file(tmpfile: str) -> None:
         contender.acquire()
         contender.release()
     finally:
-        os.chflags(tmpfile, 0)
+        _chflags(tmpfile, 0)
 
 
 def test_non_contention_error_fails_fast(

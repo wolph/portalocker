@@ -401,11 +401,26 @@ def _reinit_state_locks_after_fork() -> None:
     of its own. Only the state locks are reset; which OS locks the child
     actually holds is unchanged, since those live on file descriptors,
     not on Python locks.
+
+    On Windows this function is a quiet no-op. CPython only compiles
+    ``_at_fork_reinit`` into its lock types on platforms with ``fork``
+    (the method sits behind ``#ifdef HAVE_FORK`` in
+    ``Modules/_threadmodule.c``), so ``nt`` builds lack it entirely.
+    Nothing is lost by skipping such locks: without ``fork`` there is no
+    inherited-lock problem to repair, but a direct call (tests, embedders
+    running platform-neutral cleanup) must not explode either.
     """
     for lock in list(_live_locks):
         # `_at_fork_reinit` has existed on every lock type since CPython
-        # 3.9 but is missing from typeshed, hence the ignores.
-        lock._state_lock._at_fork_reinit()  # type: ignore[attr-defined]  # pyrefly: ignore[missing-attribute]  # ty: ignore[unresolved-attribute]  # noqa: E501
+        # 3.9, but only on builds with `fork`, and it is missing from
+        # typeshed everywhere. The `getattr` covers both.
+        reinit: typing.Callable[[], None] | None = getattr(
+            lock._state_lock,  # pyright: ignore[reportPrivateUsage]
+            '_at_fork_reinit',
+            None,
+        )
+        if reinit is not None:
+            reinit()  # pragma: not-posix
 
 
 # Windows has no fork, and no `os.register_at_fork` to register with. The
@@ -2290,8 +2305,15 @@ class PidFileLock(TemporaryFileLock):
             all treated as unreadable. `int` happily parses ``-1`` or
             ``1_000``, and the obvious consumer feeds the result straight
             to ``os.kill``, where ``-1`` signals every process the user
-            owns. Note that a returned PID only says who *wrote* the
-            file, the process may since have died.
+            owns. The file is read as bytes and validated as ASCII, so
+            content the locale encoding cannot decode also comes back as
+            `None` instead of raising ``UnicodeDecodeError`` as it did
+            before 4.1.1. Digit runs longer than 20 characters are junk
+            by the same rule (no real PID needs them), and rejecting
+            them before the `int` call keeps CPython's 4300-digit
+            conversion limit from escaping as a ``ValueError``. Note
+            that a returned PID only says who *wrote* the file, the
+            process may since have died.
         """
         pid, _error = self._read_pid()
         return pid
@@ -2313,11 +2335,25 @@ class PidFileLock(TemporaryFileLock):
             not validate).
         """
         try:
-            with open(self.filename) as f:
-                content: str = f.read().strip()
+            with open(self.filename, 'rb') as f:
+                raw: bytes = f.read()
         except OSError as error:
             return None, error
+        # A valid PID is ASCII digits, so the file is read as bytes and
+        # decoded as ASCII with undecodable bytes replaced: the
+        # replacement characters fail the digit validation below exactly
+        # like any other junk. Reading text with the locale encoding
+        # instead let bytes the locale cannot decode (arbitrary junk on
+        # a cp1252 Windows, invalid UTF-8 on POSIX) escape as a
+        # `UnicodeDecodeError` where the contract promises `None`.
+        content: str = raw.decode('ascii', errors='replace').strip()
         if not (content.isascii() and content.isdigit()):
+            return None, None
+        if len(content) > 20:
+            # CPython refuses `int` conversions past 4300 digits with a
+            # `ValueError` (see `sys.set_int_max_str_digits`), and no
+            # real PID comes close anyway: a 64-bit ``pid_max`` is 20
+            # digits. Longer content is junk, reported like any other.
             return None, None
         pid: int = int(content)
         if pid > 0:
