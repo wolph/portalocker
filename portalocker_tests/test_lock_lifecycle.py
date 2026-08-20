@@ -137,7 +137,9 @@ def test_descriptor_delete_releases_class_attribute_lock(
     owner: Owner = Owner()
     fh: typing.IO[typing.Any] = Owner.lock.acquire()
 
-    del owner.lock
+    # Runtime-legal through the descriptor's `__delete__`; pyrefly types
+    # the class attribute as read-only from an instance.
+    del owner.lock  # pyrefly: ignore[read-only]
 
     assert shared_lock.fh is None, 'descriptor deletion left the lock held'
     assert fh.closed, 'descriptor deletion left the filehandle open'
