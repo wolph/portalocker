@@ -226,10 +226,13 @@ Guarantees:
   holder whose PID cannot be read (a missing, unreadable or corrupt PID
   file): that raises ``AlreadyLocked`` instead of returning `None`,
   because `None` would falsely report this process as the holder.
-- Every plain ``LockException`` raised while acquiring the sidecar is
-  normalized to ``AlreadyLocked``, so `PidFileLock.acquire` has a single
-  exception to catch regardless of whether it came from
-  ``fail_when_locked`` or from an expired timeout.
+- The exception surface follows the retry contract: ``AlreadyLocked``
+  means contention and nothing else, whether it surfaced through
+  ``fail_when_locked`` or an expired timeout. A plain ``LockException``
+  is a terminal backend failure (``ENOLCK``, an unsupported filesystem)
+  and propagates as itself, since retrying it cannot help. Before 4.1.1
+  every plain ``LockException`` from the sidecar was dressed up as
+  ``AlreadyLocked``.
 
 Costs:
 

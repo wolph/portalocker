@@ -2038,15 +2038,19 @@ class PidFileLock(TemporaryFileLock):
 
         Raises:
             ~portalocker.exceptions.AlreadyLocked: Somebody else holds the
-                lock. Every plain `LockException` from acquiring the sidecar
-                is normalized to this, so callers have a single exception to
-                catch whether the failure came from `fail_when_locked` or
-                from an expired timeout.
-            ~portalocker.exceptions.LockException: The instance already
-                holds the lock, but the sidecar lock file was unlinked or
-                replaced externally in the meantime. This is not
-                contention, so it is deliberately not normalized to
-                `AlreadyLocked`.
+                lock, whether the contention surfaced through
+                `fail_when_locked` or through an expired timeout.
+                Contention is the only thing this type means here.
+            ~portalocker.exceptions.LockException: A terminal, retry-proof
+                failure. Either the sidecar backend cannot lock at all
+                (``ENOLCK``, an unsupported filesystem), or the instance
+                already holds the lock but the sidecar lock file was
+                unlinked or replaced externally in the meantime. Neither
+                is contention, so neither is dressed up as
+                `AlreadyLocked`. Changed in 4.1.1: plain lock exceptions
+                from the sidecar used to be normalized to
+                `AlreadyLocked`, which told callers to retry failures
+                retrying cannot fix.
             Exception: Anything else the sidecar `Lock` raises, such as an
                 `OSError` from opening it, propagates unchanged. So does a
                 failure to publish the PID, for instance because the
@@ -2114,34 +2118,21 @@ class PidFileLock(TemporaryFileLock):
                 check_interval_,
                 fail_when_locked_,
             )
-        except Exception as exc:
+        except BaseException:
             # Roll the sidecar back on every failed verified acquire. On
             # plain contention the sidecar `Lock` already cleaned itself
             # up and the rollback is a no-op, but an error raised *after*
             # the sidecar lock was taken (an `OSError` from the inode
-            # verification, say) must not strand the OS lock on a
-            # traceback-pinned local.
-            self._rollback_failed_acquire(inner_lock)
-            # `fail_when_locked=True` raises `AlreadyLocked` on the first
-            # contention, while a timed-out `fail_when_locked=False` acquire
-            # re-raises the last plain `LockException` - from contention or
-            # from repeated lock failures (e.g. ENOLCK, NFS quirks). Normalize
-            # any plain `LockException` to `AlreadyLocked` so `__enter__` and
-            # callers see one predictable surface; anything else propagates.
-            if isinstance(exc, exceptions.LockException) and not isinstance(
-                exc,
-                exceptions.AlreadyLocked,
-            ):
-                raise exceptions.AlreadyLocked(*exc.args) from exc
-            raise
-        except BaseException:
-            # An interrupt (`KeyboardInterrupt`, `SystemExit`) landing
-            # after the sidecar lock was taken but before this method
-            # publishes it would otherwise strand the OS lock exactly
-            # like the publication interrupt handled below: the pinned
-            # traceback keeps the sidecar `Lock` alive and refcounting
-            # never frees it. Roll it back and let the interrupt
-            # propagate.
+            # verification, or an interrupt such as `KeyboardInterrupt`
+            # landing before this method publishes the lock) must not
+            # strand the OS lock on a traceback-pinned local, where
+            # refcounting would never free it. The exception itself
+            # propagates unchanged: `AlreadyLocked` already means
+            # contention, and a plain `LockException` is a terminal
+            # backend failure (`ENOLCK`, an unsupported filesystem) that
+            # 4.1.1 no longer dresses up as `AlreadyLocked`, because
+            # telling callers to retry a permanent failure contradicts
+            # the retry contract.
             self._rollback_failed_acquire(inner_lock)
             raise
 
@@ -2242,15 +2233,15 @@ class PidFileLock(TemporaryFileLock):
             only runs while this process owns the lock.
 
         Raises:
-            ~portalocker.exceptions.AlreadyLocked: On entry, when the lock
-                could not be taken. Usually another process holds it, but
-                `PidFileLock.acquire` also collapses every other plain
-                `LockException` from the sidecar onto this type. Its
-                ``holder_pid`` attribute carries the competing PID when it
-                could be read.
+            ~portalocker.exceptions.AlreadyLocked: On entry, when another
+                process holds the lock. Its ``holder_pid`` attribute
+                carries the competing PID when it could be read.
             Exception: On entry, anything else `PidFileLock.acquire`
-                raises, unchanged; the same pass-through class documented
-                on `PidFileLock.__enter__`.
+                raises, unchanged: a terminal
+                `~portalocker.exceptions.LockException` from a backend
+                that cannot lock at all, an `OSError` from opening the
+                sidecar, or a failed PID publication; the same
+                pass-through class documented on `PidFileLock.__enter__`.
 
         Example:
             >>> import portalocker
@@ -2607,17 +2598,16 @@ class _PidFileLockFailClosedContext(
             itself the confirmation that this process holds the lock.
 
         Raises:
-            ~portalocker.exceptions.AlreadyLocked: The lock could not be taken.
-                Usually another process holds it, but `PidFileLock.acquire`
-                also collapses every other plain `LockException` from the
-                sidecar onto this type, so a single ``except`` clause covers
-                both. The ``holder_pid`` attribute is filled in with the
-                competing PID first, or with `None` when the PID file could not
-                be read.
+            ~portalocker.exceptions.AlreadyLocked: Another process holds
+                the lock. The ``holder_pid`` attribute is filled in with
+                the competing PID first, or with `None` when the PID file
+                could not be read.
             Exception: Anything else `PidFileLock.acquire` raises passes
-                through untouched: an `OSError` from opening the sidecar
-                file, or a failure to publish the PID, with the rollback
-                error chained onto it.
+                through untouched: a terminal
+                `~portalocker.exceptions.LockException` from a backend
+                that cannot lock at all, an `OSError` from opening the
+                sidecar file, or a failure to publish the PID, with the
+                rollback error chained onto it.
         """
         try:
             self._lock.acquire()

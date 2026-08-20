@@ -444,13 +444,16 @@ def test_pidfilelock_timeout_waits_when_not_fail_when_locked(tmp_path):
         holder.release()
 
 
-def test_pidfilelock_normalizes_plain_lockexception(tmp_path, monkeypatch):
-    """A1: when a timed-out sidecar acquire re-raises a plain ``LockException``
-    (rather than ``AlreadyLocked``, as can happen on Windows), ``acquire`` must
-    normalize it to ``AlreadyLocked`` so ``__enter__`` and callers see one
-    predictable surface.
+def test_pidfilelock_terminal_lockexception_propagates(tmp_path, monkeypatch):
+    """A plain ``LockException`` from the sidecar is terminal (a backend
+    that cannot lock at all: ``ENOLCK``, an unsupported filesystem), not
+    contention, so ``acquire`` must let it propagate as itself. It used
+    to be normalized to ``AlreadyLocked``, which told callers to retry a
+    failure retrying cannot fix and contradicted the retry contract
+    (``AlreadyLocked`` means contention, a plain ``LockException`` is
+    permanent).
     """
-    lock_file = tmp_path / 'pidfilelock_normalize.pid'
+    lock_file = tmp_path / 'pidfilelock_terminal.pid'
 
     def boom(self, *args, **kwargs):
         raise portalocker.LockException('boom')
@@ -460,10 +463,47 @@ def test_pidfilelock_normalizes_plain_lockexception(tmp_path, monkeypatch):
     monkeypatch.setattr(utils.Lock, 'acquire', boom)
 
     lock = utils.PidFileLock(str(lock_file))
-    with pytest.raises(portalocker.AlreadyLocked):
+    with pytest.raises(portalocker.LockException, match='boom') as exc_info:
         lock.acquire()
+    assert not isinstance(exc_info.value, portalocker.AlreadyLocked)
     # The failed sidecar reference must not leak.
     assert lock._inner_lock is None
+
+
+def test_pidfilelock_enter_propagates_terminal_lockexception(
+    tmp_path,
+    monkeypatch,
+):
+    """``__enter__`` turns readable contention into a returned PID, but a
+    terminal ``LockException`` is not contention and must propagate: there
+    is no holder to report and running the block would be wrong.
+    """
+    lock_file = tmp_path / 'pidfilelock_terminal_enter.pid'
+
+    def boom(self, *args, **kwargs):
+        raise portalocker.LockException('boom')
+
+    monkeypatch.setattr(utils.Lock, 'acquire', boom)
+
+    lock = utils.PidFileLock(str(lock_file))
+    with pytest.raises(portalocker.LockException, match='boom') as exc_info:
+        lock.__enter__()
+    assert not isinstance(exc_info.value, portalocker.AlreadyLocked)
+
+
+def test_pidfilelock_contention_still_raises_already_locked(tmp_path):
+    """Genuine contention keeps its ``AlreadyLocked`` surface after the
+    terminal ``LockException`` change.
+    """
+    lock_file = str(tmp_path / 'pidfilelock_contention.pid')
+    holder = utils.PidFileLock(lock_file)
+    holder.acquire()
+    contender = utils.PidFileLock(lock_file, timeout=0)
+    try:
+        with pytest.raises(portalocker.AlreadyLocked):
+            contender.acquire()
+    finally:
+        holder.release()
 
 
 @pytest.mark.skipif(
