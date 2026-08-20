@@ -212,6 +212,24 @@ def test_temporaryfilelock_release_tolerates_vanished_file(tmpfile):
 
 
 @posix_release_only
+def test_temporaryfilelock_release_tolerates_race_vanished_file(
+    tmpfile,
+    monkeypatch,
+):
+    """A lock file that vanishes between the ownership check and the
+    unlink must still release without complaint.
+    """
+    lock = portalocker.TemporaryFileLock(tmpfile)
+    lock.acquire()
+    monkeypatch.setattr(utils, '_fh_matches_path', lambda fh, path: True)
+    os.unlink(tmpfile)
+
+    lock.release()
+
+    assert lock.fh is None
+
+
+@posix_release_only
 def test_temporaryfilelock_strict_unlock_error_wins_over_unlink_error(
     tmpfile,
     monkeypatch,
