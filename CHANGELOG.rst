@@ -6,7 +6,11 @@
    holder name set at the connection level, RESP2 with maintenance
    notifications disabled), derived per attempt from the command
    connection's pool and inheriting that connection's
-   ``health_check_interval``. Previously a killed or dropped holder connection
+   ``health_check_interval`` (a supplied connection left at the redis-py
+   default of 0 therefore gets no health-check ping on the subscription
+   either, so a silently partitioned link is only noticed through the
+   socket, as the module documentation has always advised setting it).
+   Previously a killed or dropped holder connection
    was silently resurrected by redis-py's retry machinery: the holder
    resubscribed *without its name*, kept believing it held the lock
    while the channel had already released it, inflated the subscriber
