@@ -6625,7 +6625,10 @@ def test_redis_self_check_passes_while_healthy(
         str(random.random()),
         connection=redis_connection(),
         thread_sleep_time=0.01,
-        self_check_interval=0.05,
+        # A generous interval: the echo deadline is min(interval,
+        # unavailable_timeout), and a loaded CI runner can miss a tight
+        # one, failing a perfectly healthy check.
+        self_check_interval=0.25,
         interrupt_on_lost=False,
     )
     outcomes: list[str] = _record_self_check_outcomes(monkeypatch, lock)
@@ -6873,7 +6876,7 @@ def test_redis_self_check_skips_other_holders_replies() -> None:
     """The reply wait ignores everything that is not this holder's echo.
 
     A self-check ping is an ordinary probe ping, so every other holder
-    on the channel answers it too, and unparseable noise can land on
+    on the channel answers it too, and unparsable noise can land on
     the response channel as well. Only this holder's own record may
     conclude the check, and the held subscription is serviced while
     the wait polls.
@@ -6888,7 +6891,7 @@ def test_redis_self_check_skips_other_holders_replies() -> None:
         [
             None,  # first poll comes up empty: the held side is serviced
             _probe_reply('0' * 32),  # another holder's answer
-            {'type': 'message', 'data': 'junk'},  # unparseable noise
+            {'type': 'message', 'data': 'junk'},  # unparsable noise
             _probe_reply(lock.holder_id),  # this holder's own echo
         ]
     )
