@@ -611,7 +611,7 @@ def test_atexit_hook_releases_lock_held_at_interpreter_exit(
 ) -> None:
     """A lock still held at interpreter exit must have its file unlinked.
 
-    `LockBase` has no garbage collection finalizer (4.1.1 removed it)
+    `LockBase` has no garbage collection finalizer (4.2.0 removed it)
     and the subprocess disables the cycle collector besides, so only
     the module level atexit hook can perform the cleanup.
     """
@@ -622,7 +622,7 @@ def test_atexit_hook_releases_lock_held_at_interpreter_exit(
 
         import portalocker
 
-        # `LockBase` has no finalizer (4.1.1 removed it) and the cycle
+        # `LockBase` has no finalizer (4.2.0 removed it) and the cycle
         # collector is off besides, so only the atexit hook can clean
         # up.
         gc.disable()
@@ -672,7 +672,7 @@ def test_atexit_hook_ignores_inherited_locks_in_forked_child(
         pid = os.fork()
         if pid == 0:
             # The child exits immediately: `LockBase` has no garbage
-            # collection finalizer (4.1.1 removed it), so its normal
+            # collection finalizer (4.2.0 removed it), so its normal
             # exit exercises the atexit path alone.
             sys.exit(0)
 
@@ -748,7 +748,7 @@ def test_atexit_hook_releases_lock_acquired_in_forked_child(
 
         pid = os.fork()
         if pid == 0:
-            # `LockBase` has no finalizer (4.1.1 removed it) and the
+            # `LockBase` has no finalizer (4.2.0 removed it) and the
             # cycle collector is off besides: the atexit path alone
             # must clean up after the child.
             gc.disable()
@@ -886,7 +886,7 @@ def test_temporaryfilelock_nt_release_captures_other_oserror(
 ) -> None:
     """A non-retryable unlink failure must follow the flag contract like
     the POSIX path (suppressed and logged by default) instead of escaping
-    ``release`` regardless of the flag as it did before 4.1.1. It is also
+    ``release`` regardless of the flag as it did before 4.2.0. It is also
     not worth retrying, so one attempt suffices.
     """
     lock = portalocker.TemporaryFileLock(tmpfile)

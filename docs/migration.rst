@@ -225,7 +225,7 @@ ValueError: I/O operation on closed file
 .. note::
    The 4.0.0 changelog originally described this as ``release()``
    "continuing" to suppress these errors. That was wrong: 3.x propagated
-   them, so the suppression is a 4.0.0 behaviour change. Since 4.1.1 a
+   them, so the suppression is a 4.0.0 behaviour change. Since 4.2.0 a
    suppressed release error is logged at warning level on the
    ``portalocker.utils`` logger instead of vanishing entirely.
 

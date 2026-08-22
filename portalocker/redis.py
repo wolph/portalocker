@@ -3216,7 +3216,7 @@ class RedisLock(utils.LockBase['RedisLock']):
                 instance, which gets its own `holder_id`. A single
                 instance is not thread-safe either: two threads racing
                 `acquire` on one instance can both pass this guard.
-                Before 4.1.1 this misuse raised `AssertionError`, which
+                Before 4.2.0 this misuse raised `AssertionError`, which
                 ``python -O`` strips.
 
         Example:

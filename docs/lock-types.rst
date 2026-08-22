@@ -156,7 +156,7 @@ Costs:
   emits a ``DeprecationWarning`` and risks colliding with unrelated
   programs; see `NamedBoundedSemaphore`.
 - Acquiring while already holding a slot is a programming error
-  (``LockException``), so release first. Before 4.1.1 this guard was an
+  (``LockException``), so release first. Before 4.2.0 this guard was an
   ``assert``, so ``python -O`` silently took a second slot instead.
 - The slot files must survive while their slots are held. A slot file
   that is deleted externally mid-hold silently admits an extra holder
@@ -230,7 +230,7 @@ Guarantees:
   means contention and nothing else, whether it surfaced through
   ``fail_when_locked`` or an expired timeout. A plain ``LockException``
   is a terminal backend failure (``ENOLCK``, an unsupported filesystem)
-  and propagates as itself, since retrying it cannot help. Before 4.1.1
+  and propagates as itself, since retrying it cannot help. Before 4.2.0
   every plain ``LockException`` from the sidecar was dressed up as
   ``AlreadyLocked``.
 

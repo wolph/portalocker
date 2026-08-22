@@ -1,6 +1,6 @@
 """``portalocker.RedisLock`` without the optional ``redis`` package.
 
-The ``redis`` dependency is optional. Before 4.1.1 the fallback bound
+The ``redis`` dependency is optional. Before 4.2.0 the fallback bound
 ``RedisLock`` to `None`, so constructing it failed with the baffling
 ``TypeError: 'NoneType' object is not callable``. The fallback is now a
 stub class whose constructor raises an ``ImportError`` naming the missing
@@ -38,7 +38,7 @@ sys.meta_path.insert(0, Blocker())
 import portalocker
 
 # The attribute still imports, is truthy, and is a class rather than the
-# pre-4.1.1 ``None`` placeholder.
+# pre-4.2.0 ``None`` placeholder.
 assert portalocker.RedisLock is not None
 assert isinstance(portalocker.RedisLock, type), portalocker.RedisLock
 

@@ -46,7 +46,7 @@ try:
 except ImportError:
     # `redis` is an optional dependency; keep the attribute importable so
     # the missing dependency surfaces at use time, not import time. Before
-    # 4.1.1 the fallback was `None`, so constructing it failed with the
+    # 4.2.0 the fallback was `None`, so constructing it failed with the
     # baffling "TypeError: 'NoneType' object is not callable".
 
     class RedisLock:  # type: ignore[no-redef]
@@ -118,7 +118,7 @@ LOCK_SH: constants.LockFlags = constants.LockFlags.SHARED
 LOCK_NB: constants.LockFlags = constants.LockFlags.NON_BLOCKING
 
 #: Flag used internally by `unlock` to release a held lock. Passing it
-#: to `lock` raises ``RuntimeError`` since 4.1.1 - call `unlock` instead.
+#: to `lock` raises ``RuntimeError`` since 4.2.0 - call `unlock` instead.
 LOCK_UN: constants.LockFlags = constants.LockFlags.UNBLOCK
 
 #: Locking flags enum

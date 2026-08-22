@@ -311,7 +311,7 @@ class FileToLarge(LockException):
     exactly as-is instead of being silently renamed, which would break
     `except FileToLarge` in existing code.
 
-    .. deprecated:: 4.1.1
+    .. deprecated:: 4.2.0
         Will be removed in a future major release.
     """
 

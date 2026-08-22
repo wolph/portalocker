@@ -6020,7 +6020,7 @@ def test_redis_forked_child_survives_inherited_held_mode_lock() -> None:
     held open deterministically by a thread parked inside the mode
     lock across the fork; the child's ``release()`` must return
     promptly instead of deadlocking on the inherited lock, exactly as
-    the state lock has been guaranteed since 4.1.1.
+    the state lock has been guaranteed since 4.2.0.
     """
     server: fakeredis.FakeServer = fakeredis.FakeServer()
     lock: redis.RedisLock = redis.RedisLock(

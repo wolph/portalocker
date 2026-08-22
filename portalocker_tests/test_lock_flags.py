@@ -143,7 +143,7 @@ def test_lock_rejects_unblock_flag(tmpdir, flags):
 def test_lock_with_unblock_does_not_release(tmpdir):
     """A held lock must survive a rejected ``lock(fh, UNBLOCK)`` call.
 
-    Before 4.1.1 that call silently *released* the lock on POSIX, because
+    Before 4.2.0 that call silently *released* the lock on POSIX, because
     the UNBLOCK bit went straight through to ``fcntl.flock``.
     """
     tmpfile = tmpdir.join('test_unblock_no_release.lock')

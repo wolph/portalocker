@@ -6,10 +6,10 @@ for any constant the running interpreter's ``msvcrt`` does not expose.
 Two properties matter and are pinned here:
 
 * The fallback values are the documented ``<sys/locking.h>`` numbers. The
-  pre-4.1.1 table was wrong (``LK_LOCK`` fell back to 0, which is
+  pre-4.2.0 table was wrong (``LK_LOCK`` fell back to 0, which is
   ``LK_UNLCK``), so a "blocking lock" through the fallback would have
   issued an *unlock*.
-* Resolving never mutates the passed module. The pre-4.1.1 code called
+* Resolving never mutates the passed module. The pre-4.2.0 code called
   ``setattr`` on the shared stdlib ``msvcrt`` module instead.
 
 The resolver is platform-independent (it takes the module as an

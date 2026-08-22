@@ -260,7 +260,7 @@ def _resolve_msvcrt_lock_modes(msvcrt_module: object) -> dict[str, int]:
 
     Prefers the constants the module itself defines and falls back to
     `_MSVCRT_LOCK_MODE_DEFAULTS` for any it lacks. The module is never
-    mutated: before 4.1.1 the fallbacks were ``setattr``'d onto the
+    mutated: before 4.2.0 the fallbacks were ``setattr``'d onto the
     shared stdlib ``msvcrt`` module, and the fallback table itself was
     wrong (``LK_LOCK`` fell back to 0, which is ``LK_UNLCK``, so a
     "blocking lock" through it would have issued an unlock).
@@ -590,7 +590,7 @@ if os.name == 'nt':  # pragma: not-nt
 
             The ``LK_*`` locking modes are resolved once, via
             `_resolve_msvcrt_lock_modes`, and stored on the instance.
-            Before 4.1.1 any missing constant was ``setattr``'d onto the
+            Before 4.2.0 any missing constant was ``setattr``'d onto the
             shared stdlib ``msvcrt`` module instead, with a fallback
             table whose values were wrong: ``LK_LOCK`` fell back to 0,
             which is ``LK_UNLCK``, so a "blocking lock" through the
@@ -1045,7 +1045,7 @@ else:  # pragma: not-posix
                     that ``fcntl`` raised, or the ``EOFError`` some NFS
                     setups produce, just like `lock` does.
 
-            .. versionchanged:: 4.1.1
+            .. versionchanged:: 4.2.0
                 Previously the raw ``OSError`` propagated unchanged,
                 unlike on Windows where unlock failures have always been
                 wrapped in `LockException`.
@@ -1172,7 +1172,7 @@ else:  # pragma: not-posix
                 owns its own error translation and can leak an
                 untranslated ``OSError`` instead.
 
-        .. versionchanged:: 4.1.1
+        .. versionchanged:: 4.2.0
             Previously a failing unlock raised the raw ``OSError``.
 
         Example:

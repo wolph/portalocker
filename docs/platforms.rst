@@ -194,7 +194,7 @@ is platform-independent:
 lock EXCLUSIVE
 unlock
 
-Since 4.1.1 the module-level ``lock()`` also validates its flags on
+Since 4.2.0 the module-level ``lock()`` also validates its flags on
 every platform, before any system call reads them. Three combinations
 raise ``RuntimeError``:
 
@@ -303,7 +303,7 @@ before trusting a mount. After a server or client restart there is a
 recovery grace period during which locks may be lost. Some NFS setups
 also make ``fcntl`` raise ``EOFError``; portalocker translates that into
 ``LockException`` so it is at least catchable alongside every other lock
-failure. Since 4.1.1 that translated ``EOFError``, like ``ENOLCK`` and
+failure. Since 4.2.0 that translated ``EOFError``, like ``ENOLCK`` and
 every other non-contention failure, is terminal: `Lock.acquire` raises
 it on the first attempt instead of retrying it for the whole timeout,
 because retrying cannot make a filesystem grow locking support, and a

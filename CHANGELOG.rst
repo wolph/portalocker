@@ -138,7 +138,7 @@
    no longer replace an exception already leaving the ``with`` body -
    it is chained onto the body's exception as its ``__context__`` with
    a note attached, the same discipline ``Lock.__exit__`` has carried
-   since 4.1.1
+   since 4.2.0
  * Allowed an ``on_lost`` callback to call ``release()`` on the lock it
    is told about: the callback runs on the keep-alive worker thread and
    the teardown joined that same thread, so the obvious reaction to a
@@ -198,9 +198,6 @@
    fencing-enabled lock is never held without a token. Only
    fencing-enabled 4.2+ writers bump the counter, so mixed channels
    narrow the guarantee to the writers that opted in (#146)
-
-4.1.1:
-
  * Made the 100% coverage gate measure what it claims: the entire
    Windows locking implementation, the ``LockBase`` base class (the
    timeout generator, the context manager protocol and the retry
@@ -719,7 +716,7 @@
    the exiting process itself. The child inherits the live lock objects,
    and its normal exit unlinked the parent's lock files while the parent
    still believed it held them, breaking the classic acquire-then-fork
-   daemonize sequence. Together with 4.1.1's removal of lock teardown at
+   daemonize sequence. Together with 4.2.0's removal of lock teardown at
    garbage collection time this closes that fork hole for locks acquired
    before forking. A lock constructed in the parent but acquired inside
    a forked child belongs to the child: ownership is re-recorded on

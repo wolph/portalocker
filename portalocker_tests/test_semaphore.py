@@ -355,7 +355,7 @@ def test_bounded_semaphore_interrupt_after_slot_lock_releases_slot(
     Without the rollback the OS lock is stranded on a local that only
     refcount garbage collection releases, and a pinned traceback (this
     test keeps the ExceptionInfo alive) blocks the slot indefinitely -
-    the same window ``PidFileLock`` closed for its sidecar in 4.1.1.
+    the same window ``PidFileLock`` closed for its sidecar in 4.2.0.
     The interrupt is staged at the acquire return, the first bytecode
     of the window.
     """

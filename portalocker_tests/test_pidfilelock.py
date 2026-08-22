@@ -1604,7 +1604,7 @@ def test_pidfilelock_atexit_releases_lock_acquired_in_forked_child(
 
         pid = os.fork()
         if pid == 0:
-            # `LockBase` has no finalizer (4.1.1 removed it) and the
+            # `LockBase` has no finalizer (4.2.0 removed it) and the
             # cycle collector is off besides: the atexit path alone
             # must clean up after the child.
             gc.disable()
@@ -1905,7 +1905,7 @@ def test_pidfilelock_nt_strict_release_raises_pid_unlink_error(
 ) -> None:
     """The Windows release path must report a failing PID file unlink
     through the ``raise_on_release_error`` contract instead of silently
-    swallowing it as it did before 4.1.1.
+    swallowing it as it did before 4.2.0.
     """
     pid_file = str(tmp_path / 'nt_strict.pid')
     lock = utils.PidFileLock(pid_file, raise_on_release_error=True)

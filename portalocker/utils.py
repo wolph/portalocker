@@ -460,7 +460,7 @@ class LockBase(
     alone. Portalocker 4.0.0 released held locks from a ``__del__``
     finalizer, which tore down locks whose filehandle the caller was still
     using (``fh = Lock(...).acquire()`` keeps the filehandle alive, not
-    the lock object). 4.1.1 removed that finalizer and restored the 3.2.0
+    the lock object). 4.2.0 removed that finalizer and restored the 3.2.0
     behaviour.
 
     The class is generic over `AcquireReturnT`, the type `acquire` returns
@@ -926,7 +926,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                 acquire and release (the daemonize idiom does
                 ``chdir('/')``) cannot redirect the release, or the
                 interpreter-exit cleanup of the subclasses, at another
-                process's equally-named lock files. Changed in 4.1.1;
+                process's equally-named lock files. Changed in 4.2.0;
                 the ``filename`` attribute used to keep the path as
                 given.
             mode: Open mode for the file. Use ``'a'`` or ``'ab'`` to write.
@@ -1692,7 +1692,7 @@ class TemporaryFileLock(Lock):
             flags: Locking flags, see `Lock`.
             raise_on_release_error: Report errors from `release`, the
                 unlink included, instead of suppressing and logging
-                them. See `Lock`. Accepted here since 4.1.1; strict mode
+                them. See `Lock`. Accepted here since 4.2.0; strict mode
                 used to require setting the attribute after
                 construction.
 
@@ -1916,7 +1916,7 @@ class TemporaryFileLock(Lock):
         delays the caller. Any other failure is captured on the first
         attempt, like the POSIX path captures its unlink errors, so the
         flag contract of `release` applies to it instead of the error
-        escaping regardless of the flag. Both changed in 4.1.1.
+        escaping regardless of the flag. Both changed in 4.2.0.
 
         Args:
             fh: The filehandle claimed by `release`.
@@ -2066,7 +2066,7 @@ class PidFileLock(TemporaryFileLock):
             raise_on_release_error: Report errors from `release`, the
                 PID file and sidecar unlinks included, instead of
                 suppressing and logging them. See `Lock`. Accepted here
-                since 4.1.1; strict mode used to require setting the
+                since 4.2.0; strict mode used to require setting the
                 attribute after construction.
 
         Note:
@@ -2210,7 +2210,7 @@ class PidFileLock(TemporaryFileLock):
                 already holds the lock but the sidecar lock file was
                 unlinked or replaced externally in the meantime. Neither
                 is contention, so neither is dressed up as
-                `AlreadyLocked`. Changed in 4.1.1: plain lock exceptions
+                `AlreadyLocked`. Changed in 4.2.0: plain lock exceptions
                 from the sidecar used to be normalized to
                 `AlreadyLocked`, which told callers to retry failures
                 retrying cannot fix.
@@ -2294,7 +2294,7 @@ class PidFileLock(TemporaryFileLock):
             # propagates unchanged: `AlreadyLocked` already means
             # contention, and a plain `LockException` is a terminal
             # backend failure (`ENOLCK`, an unsupported filesystem) that
-            # 4.1.1 no longer dresses up as `AlreadyLocked`, because
+            # 4.2.0 no longer dresses up as `AlreadyLocked`, because
             # telling callers to retry a permanent failure contradicts
             # the retry contract.
             self._rollback_failed_acquire(inner_lock)
@@ -2360,7 +2360,7 @@ class PidFileLock(TemporaryFileLock):
             owns. The file is read as bytes and validated as ASCII, so
             content the locale encoding cannot decode also comes back as
             `None` instead of raising ``UnicodeDecodeError`` as it did
-            before 4.1.1. Digit runs longer than 20 characters are junk
+            before 4.2.0. Digit runs longer than 20 characters are junk
             by the same rule (no real PID needs them), and rejecting
             them before the `int` call keeps CPython's 4300-digit
             conversion limit from escaping as a ``ValueError``. Note
@@ -2578,7 +2578,7 @@ class PidFileLock(TemporaryFileLock):
                 and the sidecar lock itself is always released first. By
                 default such failures are suppressed and logged at
                 warning level, matching `TemporaryFileLock.release`.
-                Before 4.1.1 the flag was ignored here: the POSIX branch
+                Before 4.2.0 the flag was ignored here: the POSIX branch
                 leaked unlink errors regardless of it and the Windows
                 branch swallowed them regardless of it.
         """
@@ -3040,10 +3040,10 @@ class BoundedSemaphore(LockBase['Lock | None']):
                 `True`.
             ~portalocker.exceptions.LockException: This instance already
                 holds a slot. Release it before acquiring again. Changed in
-                4.1.1: this guard used to be an ``assert``, which
+                4.2.0: this guard used to be an ``assert``, which
                 ``python -O`` strips, and a second acquire then silently
                 took a second slot and leaked the first. The guard is also
-                enforced atomically inside `try_lock` since 4.1.1: two
+                enforced atomically inside `try_lock` since 4.2.0: two
                 threads racing this method on one instance used to both
                 take a slot, with the second publication overwriting the
                 first and leaking that slot until garbage collection. Now
@@ -3096,7 +3096,7 @@ class BoundedSemaphore(LockBase['Lock | None']):
         Raises:
             ~portalocker.exceptions.LockException: This instance already
                 holds a slot, checked when the sweep starts and re-checked
-                atomically at publication. Before 4.1.1 a concurrent
+                atomically at publication. Before 4.2.0 a concurrent
                 sweep took a second slot instead and the overwritten one
                 leaked until garbage collection.
             Exception: Anything other than `AlreadyLocked` coming out of
