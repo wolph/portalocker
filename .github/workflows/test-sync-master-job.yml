@@ -14,12 +14,11 @@ jobs:
   sync-master:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
+          token: ${{ secrets.SYNC_MASTER_TOKEN }}
       - name: Fast-forward master to the release tag
         run: git push origin HEAD:master

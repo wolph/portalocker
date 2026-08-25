@@ -70,15 +70,18 @@ jobs:
   # used to be a manual step and was silently skipped (master stayed at 4.1.0
   # while 4.2.0 shipped). A plain push refuses non-fast-forward updates, so a
   # diverged master fails this job loudly instead of being overwritten.
+  #
+  # Uses the SYNC_MASTER_TOKEN fine-grained PAT (Contents + Workflows write)
+  # because GITHUB_TOKEN is forbidden from pushing commits that touch
+  # .github/workflows/, which any release including workflow changes does.
   sync-master:
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          token: ${{ secrets.SYNC_MASTER_TOKEN }}
       - name: Fast-forward master to the release tag
         run: git push origin HEAD:master
