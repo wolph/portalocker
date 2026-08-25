@@ -26,9 +26,10 @@
      ``Lock`` means ``Lock[IO[str]]``). Annotate it
      ``-> Lock[typing.IO[bytes]]``.
    - A bare subclass (``class MyLock(Lock)``) is a text lock. Using it
-     with a binary mode is an error under pyright and silently yields
-     ``IO[str]`` under mypy, so pin it (``class MyLock(Lock[IO[bytes]])``)
-     or keep it generic (``class MyLock(Lock[IOT])``).
+     with a binary mode silently yields ``IO[str]`` on both mypy and
+     pyright while the runtime hands out bytes, so pin it
+     (``class MyLock(Lock[IO[bytes]])``) or keep it generic
+     (``class MyLock(Lock[IOT])``).
    - Strict mypy older than 1.9 (March 2024) does not understand the
      type variable default and reports "Missing type parameters" on
      every bare ``Lock`` annotation. Strict-mode checking of code using

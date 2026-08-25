@@ -40,7 +40,11 @@ jobs:
             exit 1
           fi
       # An expired or rotated PAT used to surface only in sync-master,
-      # after the package was already on PyPI.
+      # after the package was already on PyPI. This probes liveness and
+      # Contents write only: the Workflows-write grant cannot be checked
+      # in advance (the rejection happens server-side at push time), so
+      # keep that permission when rotating the token or sync-master
+      # still fails on any release whose diff touches workflow files.
       - name: Verify the SYNC_MASTER_TOKEN can push
         env:
           GH_TOKEN: ${{ secrets.SYNC_MASTER_TOKEN }}
