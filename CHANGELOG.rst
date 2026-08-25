@@ -1,3 +1,20 @@
+4.3.0:
+
+ * The filehandle returned by ``Lock`` and ``RLock`` is now typed by the
+   open mode (#97): a text mode yields ``IO[str]``, a binary mode
+   ``IO[bytes]``, so ``fh.read()`` type-checks as ``str`` or ``bytes``
+   instead of ``Any``. Both classes are generic over the filehandle
+   (``Lock[IO[bytes]]``), with a PEP 696 default that keeps a bare
+   ``Lock`` annotation valid and equal to ``Lock[IO[str]]``, matching
+   the default mode of ``'a'``. ``TemporaryFileLock`` and its
+   ``PidFileLock`` subclass are pinned to ``IO[str]``. No runtime
+   behaviour changed, and no runtime dependency was added: the type
+   variable default is only visible to type checkers.
+ * ``portalocker.types.Mode`` is now the union of the new
+   ``portalocker.types.TextMode`` and ``portalocker.types.BinaryMode``
+   aliases, which drive the mode-based overloads above. Code importing
+   ``Mode`` keeps working unchanged.
+
 4.2.0:
 
  * **Connection policy change**: the ``RedisLock`` subscription now

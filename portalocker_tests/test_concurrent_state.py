@@ -112,7 +112,7 @@ def test_lock_release_clears_state_before_close_interrupt(
     proxy = _InterruptingClose(fh)
     # Annotated as optional so mypy does not narrow `lock.fh` to a plain
     # IO and declare the `is None` assertions below unreachable.
-    proxy_fh: types.IO | None = typing.cast(types.IO, proxy)
+    proxy_fh: typing.IO[str] | None = typing.cast('typing.IO[str]', proxy)
     lock.fh = proxy_fh
 
     with pytest.raises(KeyboardInterrupt):
@@ -137,7 +137,7 @@ def test_temporaryfilelock_close_interrupt_cannot_double_unlink(
     proxy = _InterruptingClose(fh)
     # Annotated as optional so mypy does not narrow `lock.fh` to a plain
     # IO and declare the `is None` assertions below unreachable.
-    proxy_fh: types.IO | None = typing.cast(types.IO, proxy)
+    proxy_fh: typing.IO[str] | None = typing.cast('typing.IO[str]', proxy)
     lock.fh = proxy_fh
 
     with pytest.raises(KeyboardInterrupt):

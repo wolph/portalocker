@@ -14,13 +14,13 @@ import typing
 
 # spellchecker: off
 # fmt: off
-#: Every mode string accepted by the built-in `open()`, spelled out
-#: explicitly - including the binary forms - so type checkers reject a
-#: typo'd mode string instead of letting it fail at runtime. The legacy
-#: universal-newline (`U`) modes are deliberately absent: Python 3.11
-#: removed them, and 3.10 only accepted them with a warning.
-Mode = typing.Literal[
-    # Text modes
+#: Every text mode string accepted by the built-in `open()`, spelled out
+#: explicitly so type checkers reject a typo'd mode string instead of
+#: letting it fail at runtime. Kept separate from `BinaryMode` so
+#: `portalocker.Lock` can infer ``IO[str]`` filehandles from the mode.
+#: The legacy universal-newline (`U`) modes are deliberately absent:
+#: Python 3.11 removed them, and 3.10 only accepted them with a warning.
+TextMode = typing.Literal[
     # Read text
     'r', 'rt', 'tr',
     # Write text
@@ -37,8 +37,11 @@ Mode = typing.Literal[
     'a+', '+a', 'at+', 'a+t', '+at', 'ta+', 't+a', '+ta',
     # Exclusive creation and read text
     'x+', '+x', 'xt+', 'x+t', '+xt', 'tx+', 't+x', '+tx',
-
-    # Binary modes
+]
+#: Every binary mode string accepted by the built-in `open()`, the
+#: counterpart of `TextMode` that makes `portalocker.Lock` infer
+#: ``IO[bytes]`` filehandles.
+BinaryMode = typing.Literal[
     # Read binary
     'rb', 'br',
     # Write binary
@@ -56,6 +59,9 @@ Mode = typing.Literal[
     # Exclusive creation and read binary
     'xb+', 'x+b', '+xb', 'bx+', 'b+x', '+bx',
 ]
+#: Every mode string accepted by the built-in `open()`, text and binary
+#: combined.
+Mode = TextMode | BinaryMode
 # spellchecker: on
 #: A filename argument: either a plain string path or a `pathlib.Path`.
 #: Accepting both lets callers pass whichever they already have on hand

@@ -20,6 +20,7 @@ import io
 import multiprocessing
 import os
 import pickle
+import typing
 
 import pytest
 
@@ -325,7 +326,7 @@ def test_detached_wrapper_does_not_break_construction() -> None:
 class _HolderPidLock(portalocker.Lock):
     """Lock whose locking step reports contention with a holder PID."""
 
-    def _get_lock(self, fh: types.IO) -> types.IO:
+    def _get_lock(self, fh: typing.IO[str]) -> typing.IO[str]:
         raise exceptions.AlreadyLocked(
             1,
             'held elsewhere',

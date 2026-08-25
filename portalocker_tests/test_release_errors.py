@@ -38,7 +38,7 @@ def make_lock(
         'unused.lock',
         raise_on_release_error=raise_on_release_error,
     )
-    lock.fh = typing.cast(types.IO, handle)
+    lock.fh = typing.cast('typing.IO[str]', handle)
     return lock
 
 
@@ -293,7 +293,7 @@ def test_default_context_preserves_body_error_from_misbehaving_release() -> (
             raise release_error
 
     lock: MisbehavingLock = MisbehavingLock('unused.lock')
-    lock.fh = typing.cast(types.IO, ReleaseHandle([]))
+    lock.fh = typing.cast('typing.IO[str]', ReleaseHandle([]))
     body_error: ValueError = ValueError('body failed')
 
     exc_info: pytest.ExceptionInfo[ValueError]

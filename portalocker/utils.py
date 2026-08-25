@@ -59,7 +59,7 @@ import weakref
 from types import FrameType
 
 from . import constants, exceptions, portalocker, types
-from .types import Filename, Mode
+from .types import BinaryMode, Filename, Mode, TextMode
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +376,28 @@ def open_atomic(
 #: `LockBase.__enter__`. Locks that guard a file return the opened
 #: filehandle, others return whatever fits their locking model.
 AcquireReturnT = typing.TypeVar('AcquireReturnT')
+
+if typing.TYPE_CHECKING:
+    # `typing.TypeVar` only learned the PEP 696 ``default`` argument in
+    # Python 3.13, and this package supports 3.10 without runtime
+    # dependencies. Type checkers bundle the `typing_extensions` stubs,
+    # so the default is visible to them without the package being
+    # installed. At runtime the plain `typing.TypeVar` below is used and
+    # the default simply does not exist, which changes nothing because
+    # defaults only matter to static analysis.
+    from typing_extensions import TypeVar as _TypeVarWithDefault
+
+    #: The filehandle type a `Lock` hands out, driven by the open mode:
+    #: ``IO[str]`` for text modes, ``IO[bytes]`` for binary modes. The
+    #: default keeps a bare ``Lock`` annotation meaningful: it is the
+    #: text filehandle, matching the default mode of ``'a'``.
+    IOT = _TypeVarWithDefault(
+        'IOT',
+        bound=typing.IO[typing.Any],
+        default=typing.IO[str],
+    )
+else:
+    IOT = typing.TypeVar('IOT', bound=typing.IO[typing.Any])
 
 
 #: Every live `LockBase` instance, registered at construction so
@@ -841,7 +863,7 @@ def _chain_release_error(
         )
 
 
-class Lock(LockBase[typing.IO[typing.Any]]):
+class Lock(LockBase[IOT]):
     """Lock manager with built-in timeout.
 
     The class most users want. It opens `filename`, locks it, retries for
@@ -849,6 +871,13 @@ class Lock(LockBase[typing.IO[typing.Any]]):
     filehandle to the caller. Releasing unlocks and closes that handle; the
     file itself stays behind, which is what makes the lock usable as a
     plain data file as well as a mutex.
+
+    The class is generic over the filehandle it hands out, and the open
+    mode decides the specialization: a text mode yields a
+    ``Lock[IO[str]]``, a binary mode a ``Lock[IO[bytes]]``, so type
+    checkers know whether ``fh.read()`` produces `str` or `bytes`
+    (issue #97). A bare ``Lock`` annotation means ``Lock[IO[str]]``,
+    matching the default mode of ``'a'``.
 
     Example:
         >>> import portalocker
@@ -887,7 +916,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         `TemporaryFileLock`: removes the lock file on release.
     """
 
-    fh: types.IO | None
+    fh: IOT | None
     filename: str
     mode: str
     truncate: bool
@@ -903,6 +932,34 @@ class Lock(LockBase[typing.IO[typing.Any]]):
     #: A real class-level default, so a subclass that skips
     #: `Lock.__init__` can still `acquire` without an `AttributeError`
     _timeout_warned: bool = False
+
+    @typing.overload
+    def __init__(
+        self: Lock[typing.IO[str]],
+        filename: Filename,
+        mode: TextMode = 'a',
+        timeout: float | None = None,
+        check_interval: float = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: bool = DEFAULT_FAIL_WHEN_LOCKED,
+        flags: constants.LockFlags = LOCK_METHOD,
+        *,
+        raise_on_release_error: bool = False,
+        **file_open_kwargs: typing.Any,
+    ) -> None: ...
+
+    @typing.overload
+    def __init__(
+        self: Lock[typing.IO[bytes]],
+        filename: Filename,
+        mode: BinaryMode,
+        timeout: float | None = None,
+        check_interval: float = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: bool = DEFAULT_FAIL_WHEN_LOCKED,
+        flags: constants.LockFlags = LOCK_METHOD,
+        *,
+        raise_on_release_error: bool = False,
+        **file_open_kwargs: typing.Any,
+    ) -> None: ...
 
     def __init__(
         self,
@@ -959,6 +1016,38 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                 The warning is emitted at most once per instance: here,
                 or on the first `acquire` that passes a timeout.
         """
+        self._init(
+            filename,
+            mode,
+            timeout,
+            check_interval,
+            fail_when_locked,
+            flags,
+            raise_on_release_error=raise_on_release_error,
+            **file_open_kwargs,
+        )
+
+    def _init(
+        self,
+        filename: Filename,
+        mode: Mode,
+        timeout: float | None,
+        check_interval: float,
+        fail_when_locked: bool,
+        flags: constants.LockFlags,
+        *,
+        raise_on_release_error: bool,
+        **file_open_kwargs: typing.Any,
+    ) -> None:
+        """Shared constructor body behind the overloaded `__init__`.
+
+        `__init__` is overloaded so the open mode picks the filehandle
+        specialization, and an overloaded method cannot be super-called
+        from a generic subclass: no overload's ``self`` type matches the
+        subclass's still-unsolved type variable. Generic subclasses such
+        as `RLock` therefore run their parent initialization through this
+        plain method instead.
+        """
         if 'w' in mode:
             truncate = True
             mode = typing.cast(Mode, mode.replace('w', 'a'))
@@ -1014,7 +1103,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.Any]:
+    ) -> IOT:
         """Open the file, lock it and return the filehandle.
 
         Calling this on a lock that is already held is cheap and safe: the
@@ -1157,7 +1246,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             self.fh = fh
         return fh
 
-    def _prepare_locked_fh(self, fh: types.IO) -> types.IO:
+    def _prepare_locked_fh(self, fh: IOT) -> IOT:
         """Run `Lock._prepare_fh`, rolling the lock back when it fails.
 
         Preparation runs after the lock was taken, so a failure there,
@@ -1190,7 +1279,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                 fh.close()
             raise
 
-    def __enter__(self) -> typing.IO[typing.Any]:
+    def __enter__(self) -> IOT:
         """Acquire the lock and return the filehandle to bind with ``as``.
 
         Returns:
@@ -1331,10 +1420,10 @@ class Lock(LockBase[typing.IO[typing.Any]]):
                     release_error,
                 )
 
-    def _get_fh(self) -> types.IO:
+    def _get_fh(self) -> IOT:
         """Open the file and return the new, still unlocked filehandle."""
         return typing.cast(
-            types.IO,
+            'IOT',
             open(  # noqa: SIM115
                 self.filename,
                 self.mode,
@@ -1342,7 +1431,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
             ),
         )
 
-    def _get_lock(self, fh: types.IO) -> types.IO:
+    def _get_lock(self, fh: IOT) -> IOT:
         """Lock `fh` with the configured flags.
 
         Args:
@@ -1358,7 +1447,7 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         portalocker.lock(fh, self.flags)
         return fh
 
-    def _prepare_fh(self, fh: types.IO) -> types.IO:
+    def _prepare_fh(self, fh: IOT) -> IOT:
         """Make the locked filehandle ready for the caller.
 
         Truncation happens here rather than in `open`, so that a lock
@@ -1384,11 +1473,16 @@ class Lock(LockBase[typing.IO[typing.Any]]):
         return fh
 
 
-class RLock(Lock):
+class RLock(Lock[IOT]):
     """
     A reentrant lock, functions in a similar way to threading.RLock in that it
     can be acquired multiple times.  When the corresponding number of release()
     calls are made the lock will finally release the underlying file lock.
+
+    Like `Lock`, the open mode picks the filehandle specialization: text
+    modes yield an ``RLock[IO[str]]``, binary modes an
+    ``RLock[IO[bytes]]``, and a bare ``RLock`` annotation means the text
+    variant.
 
     Reentrancy is per instance, not per process: it is this object's own
     acquire count that is tracked, so a *second* `RLock` on the same file
@@ -1411,6 +1505,28 @@ class RLock(Lock):
         `Lock`: the non-reentrant version and the source of every
         constructor argument.
     """
+
+    @typing.overload
+    def __init__(
+        self: RLock[typing.IO[str]],
+        filename: Filename,
+        mode: TextMode = 'a',
+        timeout: float | None = None,
+        check_interval: float = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: bool = False,
+        flags: constants.LockFlags = LOCK_METHOD,
+    ) -> None: ...
+
+    @typing.overload
+    def __init__(
+        self: RLock[typing.IO[bytes]],
+        filename: Filename,
+        mode: BinaryMode,
+        timeout: float | None = None,
+        check_interval: float = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: bool = False,
+        flags: constants.LockFlags = LOCK_METHOD,
+    ) -> None: ...
 
     def __init__(
         self,
@@ -1437,13 +1553,17 @@ class RLock(Lock):
             Unlike `Lock`, this constructor takes neither
             ``raise_on_release_error`` nor extra `open` keyword arguments.
         """
-        super().__init__(
+        # `Lock.__init__` is overloaded, and no overload's `self` type
+        # can bind this class's still-unsolved type variable, so the
+        # parent initialization runs through the plain `Lock._init`.
+        super()._init(
             filename,
             mode,
             timeout,
             check_interval,
             fail_when_locked,
             flags,
+            raise_on_release_error=False,
         )
         self._acquire_count = 0
 
@@ -1452,7 +1572,7 @@ class RLock(Lock):
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.Any]:
+    ) -> IOT:
         """Take the lock, or note that this instance already has it.
 
         The first call locks the file through `Lock.acquire`. Every later
@@ -1483,7 +1603,7 @@ class RLock(Lock):
                 exception.
             OSError: As `Lock.acquire`, on the first call only.
         """
-        fh: typing.IO[typing.Any]
+        fh: IOT
         with self._state_lock:
             if self._acquire_count >= 1:
                 if self.fh is None:
@@ -1605,7 +1725,7 @@ def _release_locks_at_exit() -> None:
 atexit.register(_release_locks_at_exit)
 
 
-class TemporaryFileLock(Lock):
+class TemporaryFileLock(Lock[typing.IO[str]]):
     """A `Lock` whose lock file only exists while the lock is held.
 
     Use it when the file is purely a mutex and leaving it behind would be
@@ -1723,7 +1843,7 @@ class TemporaryFileLock(Lock):
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.Any]:
+    ) -> typing.IO[str]:
         """Acquire the lock, guarding against split-brain path swaps.
 
         Re-acquiring while already holding the lock is an idempotent no-op
@@ -1745,7 +1865,7 @@ class TemporaryFileLock(Lock):
         depends on.
         """
         freshly_acquired: bool = self.fh is None
-        fh: typing.IO[typing.Any] = self._acquire_verified(
+        fh: typing.IO[str] = self._acquire_verified(
             self,
             self.filename,
             timeout,
@@ -1758,12 +1878,12 @@ class TemporaryFileLock(Lock):
 
     @staticmethod
     def _acquire_verified(
-        lock: Lock,
+        lock: Lock[typing.IO[str]],
         filename: str,
         timeout: float | None,
         check_interval: float | None,
         fail_when_locked: bool | None,
-    ) -> typing.IO[typing.Any]:
+    ) -> typing.IO[str]:
         """Acquire ``lock`` and confirm the handle still names ``filename``.
 
         A competing releaser can unlink (and a third party recreate)
@@ -1806,7 +1926,7 @@ class TemporaryFileLock(Lock):
                 finding the path replaced until the timeout budget ran out,
                 or the underlying `Lock.acquire` gave up on contention.
         """
-        held_fh: types.IO | None = lock.fh
+        held_fh: typing.IO[str] | None = lock.fh
         if held_fh is not None:
             if os.name == 'nt':  # Windows: a locked file can't be swapped.
                 return held_fh  # pragma: not-nt
@@ -1823,7 +1943,7 @@ class TemporaryFileLock(Lock):
         # The first attempt passes the caller's timeout through unchanged.
         # Every retry only gets what remains of the shared deadline.
         attempt_timeout: float | None = timeout
-        fh: types.IO
+        fh: typing.IO[str]
         for _ in lock._timeout_generator(timeout, check_interval):
             fh = Lock.acquire(
                 lock,
@@ -2172,7 +2292,7 @@ class PidFileLock(TemporaryFileLock):
         timeout: float | None = None,
         check_interval: float | None = None,
         fail_when_locked: bool | None = None,
-    ) -> typing.IO[typing.Any]:
+    ) -> typing.IO[str]:
         """Lock the sidecar file and publish the current PID.
 
         Calling this on an instance that already holds the lock first
@@ -2271,7 +2391,7 @@ class PidFileLock(TemporaryFileLock):
         # neither) leave the instance claiming a lock it never took, and
         # its release would then unlink files that belong to the actual
         # holder.
-        sidecar_fh: types.IO
+        sidecar_fh: typing.IO[str]
         try:
             # Reuse the split-brain guard so the sidecar lock gets the same
             # inode-verification as a direct `TemporaryFileLock`.
