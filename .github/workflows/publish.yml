@@ -6,6 +6,51 @@ on:
       - 'v*'
 
 jobs:
+  # Fail the release before anything reaches PyPI. Everything checked
+  # here used to fail only in the jobs that run after publishing, which
+  # leaves a half-finished release: the package on PyPI with no GitHub
+  # release, or master stale. A red preflight instead stops the whole
+  # run while re-tagging is still cheap.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Verify the tag matches pyproject.toml and CHANGELOG.rst
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          project_version="$(sed -n "s/^version = '\(.*\)'$/\1/p" pyproject.toml)"
+          if [ "$version" != "$project_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match pyproject.toml" \
+              "version $project_version" >&2
+            exit 1
+          fi
+          if ! grep -q "^${version}:\$" CHANGELOG.rst; then
+            echo "No CHANGELOG.rst section found for $version" >&2
+            exit 1
+          fi
+      - name: Verify master can fast-forward to this tag
+        run: |
+          git fetch origin master
+          if ! git merge-base --is-ancestor origin/master "$GITHUB_SHA"; then
+            echo "master has diverged from this tag; sync-master would" \
+              "fail after publishing. Reconcile master first." >&2
+            exit 1
+          fi
+      # An expired or rotated PAT used to surface only in sync-master,
+      # after the package was already on PyPI.
+      - name: Verify the SYNC_MASTER_TOKEN can push
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_MASTER_TOKEN }}
+        run: |
+          push="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.permissions.push')"
+          if [ "$push" != 'true' ]; then
+            echo "SYNC_MASTER_TOKEN is missing, expired or cannot push" >&2
+            exit 1
+          fi
+
   # Tag pushes do not trigger ci.yml on their own; run the full suite
   # here so nothing reaches PyPI without passing tests.
   test:
@@ -25,7 +70,7 @@ jobs:
           path: dist/
 
   publish:
-    needs: [test, build]
+    needs: [preflight, test, build]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -35,7 +80,12 @@ jobs:
         with:
           name: dist
           path: dist/
+      # skip-existing makes a tag re-push idempotent: without it a
+      # re-run dies on the PyPI duplicate-file error before the release
+      # and sync-master jobs get a second chance.
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   # GitHub releases used to be a manual step and were silently skipped when
   # forgotten; create one here so a tag push publishes everywhere at once.
@@ -83,5 +133,16 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.SYNC_MASTER_TOKEN }}
+      # master tracks stable releases only. A pre-release tag (v4.4.0rc1)
+      # may publish to PyPI, but fast-forwarding master past the latest
+      # stable release would present the rc as the current state.
       - name: Fast-forward master to the release tag
-        run: git push origin HEAD:master
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          case "$version" in
+            *[!0-9.]*)
+              echo "Pre-release tag $GITHUB_REF_NAME, leaving master alone"
+              exit 0
+              ;;
+          esac
+          git push origin HEAD:master

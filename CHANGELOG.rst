@@ -1,19 +1,53 @@
 4.3.0:
 
  * The filehandle returned by ``Lock`` and ``RLock`` is now typed by the
-   open mode (#97): a text mode yields ``IO[str]``, a binary mode
-   ``IO[bytes]``, so ``fh.read()`` type-checks as ``str`` or ``bytes``
-   instead of ``Any``. Both classes are generic over the filehandle
-   (``Lock[IO[bytes]]``), with a PEP 696 default that keeps a bare
-   ``Lock`` annotation valid and equal to ``Lock[IO[str]]``, matching
-   the default mode of ``'a'``. ``TemporaryFileLock`` and its
-   ``PidFileLock`` subclass are pinned to ``IO[str]``. No runtime
-   behaviour changed, and no runtime dependency was added: the type
-   variable default is only visible to type checkers.
- * ``portalocker.types.Mode`` is now the union of the new
-   ``portalocker.types.TextMode`` and ``portalocker.types.BinaryMode``
-   aliases, which drive the mode-based overloads above. Code importing
-   ``Mode`` keeps working unchanged.
+   open mode (#97): a literal text mode yields ``IO[str]``, a literal
+   binary mode ``IO[bytes]``, so ``fh.read()`` type-checks as ``str`` or
+   ``bytes`` instead of ``Any``. Both classes are generic over the
+   filehandle (``Lock[IO[bytes]]``), with a PEP 696 default that keeps a
+   bare ``Lock`` annotation valid and equal to ``Lock[IO[str]]``,
+   matching the default mode of ``'a'``. A mode that is not a literal at
+   the call site (a ``Mode``-typed variable, a conditional) falls back
+   to the honest ``IO[Any]`` of 4.2.0 through a catch-all overload.
+   ``TemporaryFileLock`` and its ``PidFileLock`` subclass are pinned to
+   ``IO[str]``. No runtime dependency was added: the type variable
+   default comes from a ``typing_extensions`` import that only type
+   checkers see.
+ * New ``portalocker.types.TextMode`` and ``portalocker.types.BinaryMode``
+   aliases drive the overloads above. ``portalocker.types.Mode`` stays a
+   single flat ``Literal``, so ``typing.get_args(Mode)`` still returns
+   the mode strings themselves and the
+   ``mode in typing.get_args(Mode)`` validation idiom keeps working.
+ * Migration notes for the stricter typing, in decreasing order of
+   likelihood that they hit you:
+
+   - A function annotated ``-> Lock`` that returns a binary-mode lock
+     now errors on every checker (``Lock`` is invariant and bare
+     ``Lock`` means ``Lock[IO[str]]``). Annotate it
+     ``-> Lock[typing.IO[bytes]]``.
+   - A bare subclass (``class MyLock(Lock)``) is a text lock. Using it
+     with a binary mode is an error under pyright and silently yields
+     ``IO[str]`` under mypy, so pin it (``class MyLock(Lock[IO[bytes]])``)
+     or keep it generic (``class MyLock(Lock[IOT])``).
+   - Strict mypy older than 1.9 (March 2024) does not understand the
+     type variable default and reports "Missing type parameters" on
+     every bare ``Lock`` annotation. Strict-mode checking of code using
+     bare ``Lock`` needs mypy 1.9 or newer; pyright has understood
+     defaults since early 2023, and non-strict mypy is unaffected.
+   - Overrides of the ``_get_fh``, ``_get_lock`` and ``_prepare_fh``
+     hooks that copied the 4.2.0 signatures (``types.IO``) now fail
+     override checks, because the hooks are typed by the class's type
+     variable. Re-type them with the subclass's filehandle type,
+     ``typing.IO[str]`` for a bare subclass.
+   - A generic subclass cannot call ``super().__init__()``: no overload
+     binds an unsolved type variable. Run the parent initialization
+     through ``Lock._init``, the plain method ``RLock`` itself uses.
+   - Two runtime-visible side effects, for code that introspects:
+     ``Lock`` and ``RLock`` accept subscription
+     (``Lock[typing.IO[bytes]]`` raised ``TypeError`` on 4.2.0), and
+     ``RLock.__init__`` now initializes through ``Lock._init`` instead
+     of calling ``Lock.__init__``, which monkeypatched constructors
+     notice. Everything else is unchanged at runtime.
 
 4.2.0:
 

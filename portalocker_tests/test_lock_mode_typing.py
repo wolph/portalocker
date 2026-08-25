@@ -14,7 +14,7 @@ import typing
 from typing_extensions import assert_type
 
 import portalocker
-from portalocker import utils
+from portalocker import types, utils
 
 
 def load_binary_file(path: pathlib.Path) -> bytes:
@@ -117,3 +117,99 @@ def test_temporary_file_lock_is_a_text_lock(tmp_path: pathlib.Path) -> None:
     with utils.TemporaryFileLock(path, timeout=0.1) as fh:
         assert_type(fh, typing.IO[str])
         assert fh.write('spam') > 0
+
+
+def _mode_accepts_the_split(
+    mode: types.TextMode | types.BinaryMode,
+) -> types.Mode:
+    """Static guard: every `TextMode`/`BinaryMode` member is a `Mode`."""
+    return mode
+
+
+def _split_accepts_mode(mode: types.Mode) -> types.TextMode | types.BinaryMode:
+    """Static guard: every `Mode` member is a `TextMode` or `BinaryMode`."""
+    return mode
+
+
+def test_mode_get_args_stays_flat() -> None:
+    """`typing.get_args(types.Mode)` must yield the flat mode strings.
+
+    ``mode in typing.get_args(Mode)`` is the standard runtime validation
+    idiom, and it silently rejects everything when `Mode` is a union of
+    two Literal aliases instead of one flat Literal: `typing.get_args`
+    then returns the two aliases, not their members.
+    """
+    mode_args: tuple[str, ...] = typing.get_args(types.Mode)
+    assert 'rb' in mode_args
+    assert 'a' in mode_args
+    assert set(mode_args) == (
+        set(typing.get_args(types.TextMode))
+        | set(typing.get_args(types.BinaryMode))
+    )
+    assert len(mode_args) == 76
+
+
+def _lock_with_mode_variable(
+    path: pathlib.Path,
+    mode: types.Mode,
+) -> portalocker.Lock[typing.IO[typing.Any]]:
+    """A non-literal mode cannot pick a specialization, so it must stay
+    the honest ``IO[Any]`` of 4.2.0 rather than a wrong ``IO[str]``. The
+    mode arrives as a parameter because the checkers narrow a local
+    assignment back to its literal.
+    """
+    lock = portalocker.Lock(path, mode, timeout=0.1)
+    assert_type(lock, portalocker.Lock[typing.IO[typing.Any]])
+    return lock
+
+
+def _lock_with_conditional_mode(
+    path: pathlib.Path,
+    binary: bool,
+) -> portalocker.Lock[typing.IO[typing.Any]]:
+    """A mode built from a conditional must not be typed by one branch."""
+    mode: types.Mode = 'rb' if binary else 'r'
+    lock = portalocker.Lock(path, mode, timeout=0.1)
+    assert_type(lock, portalocker.Lock[typing.IO[typing.Any]])
+    return lock
+
+
+def _rlock_with_mode_variable(
+    path: pathlib.Path,
+    mode: types.Mode,
+) -> portalocker.RLock[typing.IO[typing.Any]]:
+    lock = portalocker.RLock(path, mode, timeout=0.1)
+    assert_type(lock, portalocker.RLock[typing.IO[typing.Any]])
+    return lock
+
+
+def test_mode_variable_falls_back_to_any(tmp_path: pathlib.Path) -> None:
+    lock = _lock_with_mode_variable(tmp_path / 'dynamic.lock', 'ab+')
+    try:
+        fh = lock.acquire()
+        assert_type(fh, typing.IO[typing.Any])
+        assert fh.write(b'spam') > 0
+    finally:
+        lock.release()
+
+
+def test_conditional_mode_falls_back_to_any(tmp_path: pathlib.Path) -> None:
+    path: pathlib.Path = tmp_path / 'conditional.lock'
+    path.write_bytes(b'spam')
+    lock = _lock_with_conditional_mode(path, binary=True)
+    try:
+        assert lock.acquire().read() == b'spam'
+    finally:
+        lock.release()
+
+
+def test_rlock_mode_variable_falls_back_to_any(
+    tmp_path: pathlib.Path,
+) -> None:
+    lock = _rlock_with_mode_variable(tmp_path / 'rdynamic.lock', 'ab+')
+    try:
+        fh = lock.acquire()
+        assert_type(fh, typing.IO[typing.Any])
+        assert fh.write(b'spam') > 0
+    finally:
+        lock.release()

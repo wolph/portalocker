@@ -60,8 +60,50 @@ BinaryMode = typing.Literal[
     'xb+', 'x+b', '+xb', 'bx+', 'b+x', '+bx',
 ]
 #: Every mode string accepted by the built-in `open()`, text and binary
-#: combined.
-Mode = TextMode | BinaryMode
+#: combined. Spelled out flat instead of as ``TextMode | BinaryMode`` so
+#: ``typing.get_args(Mode)`` keeps returning the mode strings themselves,
+#: which the common runtime validation idiom
+#: ``mode in typing.get_args(Mode)`` depends on; on a union of Literals
+#: `typing.get_args` returns the two Literal aliases instead of their
+#: members. The test suite pins this literal to be exactly the union of
+#: `TextMode` and `BinaryMode`, statically and at runtime.
+Mode = typing.Literal[
+    # Text modes
+    # Read text
+    'r', 'rt', 'tr',
+    # Write text
+    'w', 'wt', 'tw',
+    # Append text
+    'a', 'at', 'ta',
+    # Exclusive creation text
+    'x', 'xt', 'tx',
+    # Read and write text
+    'r+', '+r', 'rt+', 'r+t', '+rt', 'tr+', 't+r', '+tr',
+    # Write and read text
+    'w+', '+w', 'wt+', 'w+t', '+wt', 'tw+', 't+w', '+tw',
+    # Append and read text
+    'a+', '+a', 'at+', 'a+t', '+at', 'ta+', 't+a', '+ta',
+    # Exclusive creation and read text
+    'x+', '+x', 'xt+', 'x+t', '+xt', 'tx+', 't+x', '+tx',
+
+    # Binary modes
+    # Read binary
+    'rb', 'br',
+    # Write binary
+    'wb', 'bw',
+    # Append binary
+    'ab', 'ba',
+    # Exclusive creation binary
+    'xb', 'bx',
+    # Read and write binary
+    'rb+', 'r+b', '+rb', 'br+', 'b+r', '+br',
+    # Write and read binary
+    'wb+', 'w+b', '+wb', 'bw+', 'b+w', '+bw',
+    # Append and read binary
+    'ab+', 'a+b', '+ab', 'ba+', 'b+a', '+ba',
+    # Exclusive creation and read binary
+    'xb+', 'x+b', '+xb', 'bx+', 'b+x', '+bx',
+]
 # spellchecker: on
 #: A filename argument: either a plain string path or a `pathlib.Path`.
 #: Accepting both lets callers pass whichever they already have on hand

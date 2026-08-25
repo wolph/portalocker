@@ -961,6 +961,26 @@ class Lock(LockBase[IOT]):
         **file_open_kwargs: typing.Any,
     ) -> None: ...
 
+    # The catch-all for a mode that is not a literal at the call site (a
+    # `Mode`-typed variable, a conditional): no specialization can be
+    # picked, so the filehandle honestly stays ``IO[Any]`` exactly as it
+    # was in 4.2.0. Without this overload each checker invents its own
+    # wrong answer for dynamic modes: one the text default, another the
+    # first branch of a conditional.
+    @typing.overload
+    def __init__(
+        self: Lock[typing.IO[typing.Any]],
+        filename: Filename,
+        mode: Mode,
+        timeout: float | None = None,
+        check_interval: float = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: bool = DEFAULT_FAIL_WHEN_LOCKED,
+        flags: constants.LockFlags = LOCK_METHOD,
+        *,
+        raise_on_release_error: bool = False,
+        **file_open_kwargs: typing.Any,
+    ) -> None: ...
+
     def __init__(
         self,
         filename: Filename,
@@ -1522,6 +1542,18 @@ class RLock(Lock[IOT]):
         self: RLock[typing.IO[bytes]],
         filename: Filename,
         mode: BinaryMode,
+        timeout: float | None = None,
+        check_interval: float = DEFAULT_CHECK_INTERVAL,
+        fail_when_locked: bool = False,
+        flags: constants.LockFlags = LOCK_METHOD,
+    ) -> None: ...
+
+    # Catch-all for non-literal modes, see the matching `Lock` overload.
+    @typing.overload
+    def __init__(
+        self: RLock[typing.IO[typing.Any]],
+        filename: Filename,
+        mode: Mode,
         timeout: float | None = None,
         check_interval: float = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool = False,
