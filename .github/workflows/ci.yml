@@ -43,7 +43,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Start redis
         if: runner.os == 'Linux' && !startsWith(matrix.python-version, 'pypy')
-        uses: shogo82148/actions-setup-redis@v1.55.0
+        uses: shogo82148/actions-setup-redis@v1.56.1
         with:
           redis-version: '7.x'
       - name: Run tests
