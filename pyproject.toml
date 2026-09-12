@@ -56,6 +56,7 @@ dependencies = []
 homepage = 'https://github.com/wolph/portalocker/'
 documentation = 'https://portalocker.readthedocs.io/en/latest/'
 repository = 'https://github.com/wolph/portalocker/'
+Funding = 'https://github.com/sponsors/wolph'
 
 [project.optional-dependencies]
 # redis-py has shipped inline type hints (py.typed) since 5.0, which

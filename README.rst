@@ -267,6 +267,21 @@ explaining what was added and/or changed. The list of tags/releases
 including the commit messages can be found here:
 https://github.com/WoLpH/portalocker/releases
 
+Support
+-------
+
+portalocker is maintained by `Rick van Hattem <https://github.com/wolph>`_ in
+his own time. Most of that time goes on the platforms you are not running, so
+the lock behaves the same on Windows, BSD and NFS as it does on your laptop.
+
+If it saved you an afternoon, a tip covers an hour of issue triage:
+`Ko-fi <https://ko-fi.com/wolph_gh>`_ or
+`GitHub Sponsors <https://github.com/sponsors/wolph>`_.
+
+.. image:: https://ko-fi.com/img/githubbutton_sm.svg
+   :target: https://ko-fi.com/wolph_gh
+   :alt: Support on Ko-fi
+
 License
 -------
 
