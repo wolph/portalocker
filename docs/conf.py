@@ -27,6 +27,7 @@ html_theme = 'furo'
 html_title: str = 'Portalocker'
 exclude_patterns: list[str] = ['_build', 'superpowers']
 html_static_path: list[str] = ['_static']
+html_favicon: str = '_static/file-lock.svg'
 html_css_files: list[str] = ['portalocker.css']
 html_theme_options: dict[str, object] = {
     'light_logo': 'portalocker-light.svg',

@@ -606,27 +606,23 @@ class PubSubWorkerThread(redis.client.PubSubWorkerThread):
 
 
 class RedisLock(utils.LockBase['RedisLock']):
-    """An extremely reliable Redis lock based on pubsub.
+    """A Redis lock held by a pub/sub subscription.
 
-    The lock is held by a subscription kept open by a keep-alive thread.
+    A keep-alive thread maintains the subscription. Ownership ends when
+    Redis removes it, without waiting for a lease to expire. Detecting a
+    crashed process or broken connection can still take time, especially
+    during a network partition.
 
-    As opposed to most Redis locking systems based on key/value pairs,
-    this locking method is based on the pubsub system. The big advantage is
-    that if the connection gets killed due to network issues, crashing
-    processes or otherwise, it will still immediately unlock instead of
-    waiting for a lock timeout.
-
-    The flip side of that immediacy is handled too: the *holder* learns
-    about a revocation as soon as its keep-alive thread observes the
-    dead connection. `lost` turns True, `ensure_held` and the ``with``
+    The holder observes loss separately, when its keep-alive thread
+    detects the failed connection. `lost` turns True, `ensure_held` and
+    the ``with``
     block exit raise `~portalocker.exceptions.LockLostError`, an
     optional `on_lost` callback fires, and (by default in 4.2, opt-in
     from 5.0.0) the main thread is interrupted. The subscription lives
     on a dedicated connection that never retries or reconnects, because
     a transparently resurrected subscription would be a silent
-    re-acquisition; one consequence worth knowing is that redis-py's
-    default ``socket_timeout`` turns a read stalled for five seconds
-    into a loss.
+    re-acquisition. A read exceeding the configured ``socket_timeout``
+    also counts as a loss.
 
     A note on ``os.fork``: a forked child inherits the lock object and
     the parent's sockets. The child's `release` (or garbage collection
@@ -636,9 +632,9 @@ class RedisLock(utils.LockBase['RedisLock']):
     silently revoke the *parent's* lock without the parent ever being
     told. A child that needs the lock must construct its own instance.
 
-    To make sure both sides of the lock know about the connection state it is
-    recommended to set the `health_check_interval` when creating the redis
-    connection.
+    Set `health_check_interval` when creating the Redis connection to help
+    detect failures on idle connections. Health checks and socket timeouts
+    do not provide a fixed detection bound for every network failure.
 
     Mixing versions on one channel has a known limitation: portalocker
     3.2.0 and older holders all share one connection name, so one live
@@ -661,16 +657,16 @@ class RedisLock(utils.LockBase['RedisLock']):
             lock itself is closed on release.
         timeout: timeout when trying to acquire a lock
         check_interval: check interval while waiting
-        fail_when_locked: after the initial lock failed, return an error
-            or lock the file. This does not wait for the timeout.
+        fail_when_locked: Raise `~portalocker.exceptions.AlreadyLocked`
+            when the first acquisition attempt is blocked, without
+            retrying until the timeout.
         thread_sleep_time: sleep time between fetching messages from redis to
             prevent a busy/wait loop. In the case of lock conflicts this
             increases the time it takes to resolve the conflict. This should
             be smaller than the `check_interval` to be useful.
-        unavailable_timeout: If the conflicting lock is properly connected
-            this should never exceed twice your redis latency. Note that this
-            will increase the wait time possibly beyond your `timeout` and is
-            always executed if a conflict arises.
+        unavailable_timeout: How long a probe waits for a conflicting
+            holder to reply. Probing can extend the total acquisition
+            time beyond `timeout`.
         redis_kwargs: The redis connection arguments if no connection is
             given. The `DEFAULT_REDIS_KWARGS` are used as default, if you want
             to override these you need to explicitly specify a value (e.g.

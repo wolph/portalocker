@@ -145,6 +145,10 @@ a.portalocker-button:hover {
 }
 
 @media (max-width: 600px) {
+  h1 {
+    font-size: 2rem;
+  }
+
   .portalocker-links {
     margin-bottom: 2rem;
   }
