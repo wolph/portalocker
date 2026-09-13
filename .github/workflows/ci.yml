@@ -5,6 +5,10 @@ on:
     branches: [develop, master]
   pull_request:
   workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,11 +23,42 @@ jobs:
       matrix:
         env: [ruff, mypy, basedpyright, pyrefly, ty, codespell, repo-review, docs]
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           python-version: '3.13'
       - run: uv run tox -e ${{ matrix.env }}
+
+  zizmor:
+    name: Workflow security
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          inputs: .github/workflows
+          online-audits: false
+          advanced-security: false
+          annotations: true
+
+  distribution:
+    name: Distribution checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          python-version: '3.13'
+          enable-cache: false
+      - run: uv run tox -e distribution
 
   test:
     runs-on: ${{ matrix.os }}
@@ -37,24 +72,31 @@ jobs:
           - os: ubuntu-latest
             python-version: pypy3.11
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           python-version: ${{ matrix.python-version }}
       - name: Start redis
         if: runner.os == 'Linux' && !startsWith(matrix.python-version, 'pypy')
-        uses: shogo82148/actions-setup-redis@v1.55.0
+        uses: shogo82148/actions-setup-redis@59cda539fd5cc9be4c42bb07e4b28156951f37d6 # v1.55.0
         with:
           redis-version: '7.x'
       - name: Run tests
         run: uv run --no-default-groups --extra tests pytest -v
+      - name: Require live Redis tests
+        if: runner.os == 'Linux' && !startsWith(matrix.python-version, 'pypy')
+        run: uv run tox -e redis-live
 
   test-windows-pywin32:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
         with:
           python-version: '3.13'
       - name: Run tests with pywin32 installed

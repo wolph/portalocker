@@ -29,6 +29,89 @@ from portalocker import redis, utils
 ConnectionFactory = typing.Callable[[], client.Redis]
 
 
+@pytest.mark.parametrize('error_type', [KeyboardInterrupt, SystemExit])
+def test_cancelled_subscription_is_released_and_reusable(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[BaseException],
+) -> None:
+    """Cancellation after SUBSCRIBE must not leave a counted participant."""
+    connection: client.Redis = redis_connection()
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()), connection=connection
+    )
+    interruption: BaseException = error_type('cancelled subscription')
+
+    def cancel(pubsub: client.PubSub) -> None:
+        raise interruption
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(lock, '_wait_for_subscribe_confirmation', cancel)
+            with pytest.raises(error_type) as caught:
+                lock.acquire()
+        assert caught.value is interruption
+        assert lock.pubsub is None
+        assert lock.thread is None
+        assert lock._get_subscriber_count(connection) == 0
+        assert lock.acquire(timeout=0) is lock
+    finally:
+        lock.release()
+        connection.close()
+
+
+@pytest.mark.parametrize('error_type', [KeyboardInterrupt, SystemExit])
+def test_cancelled_retry_releases_elected_writer(
+    redis_connection: ConnectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[BaseException],
+) -> None:
+    """Cancelling between attempts must remove the waiting writer."""
+    connection: client.Redis = redis_connection()
+    channel: str = str(random.random())
+    reader: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=connection,
+        flags=portalocker.LockFlags.SHARED,
+    )
+    writer: redis.RedisLock = redis.RedisLock(channel, connection=connection)
+    interruption: BaseException = error_type('cancelled retry')
+    workers: list[threading.Thread] = []
+    original_generator: typing.Callable[
+        [float | None, float | None], typing.Iterator[int]
+    ] = writer._timeout_generator
+
+    def cancel_retry(
+        timeout: float | None, check_interval: float | None
+    ) -> typing.Iterator[int]:
+        if timeout != 12:
+            yield from original_generator(timeout, check_interval)
+            return
+        yield 0
+        assert writer.writer_elected
+        assert writer.thread is not None
+        workers.append(writer.thread)
+        raise interruption
+
+    try:
+        reader.acquire()
+        with monkeypatch.context() as patch:
+            patch.setattr(writer, '_timeout_generator', cancel_retry)
+            with pytest.raises(error_type) as caught:
+                writer.acquire(timeout=12)
+        assert caught.value is interruption
+        assert writer.pubsub is None
+        assert writer.thread is None
+        assert len(workers) == 1 and not workers[0].is_alive()
+        assert writer._get_subscriber_count(connection) == 1
+        reader.release()
+        assert writer.acquire(timeout=0) is writer
+    finally:
+        writer.release()
+        reader.release()
+        connection.close()
+
+
 def test_redis_lock_accepts_shared_flag() -> None:
     lock: redis.RedisLock = redis.RedisLock(
         'shared-channel',

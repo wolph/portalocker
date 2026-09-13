@@ -1,0 +1,164 @@
+.sidebar-logo {
+  width: 220px;
+  max-width: 100%;
+}
+
+.portalocker-links,
+.portalocker-footer-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+  font-size: 0.875rem;
+}
+
+.portalocker-links {
+  margin: 0.5rem 0 2.5rem;
+}
+
+.portalocker-eyebrow {
+  color: var(--color-brand-content);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+section:has(> .portalocker-hero) > h1 {
+  max-width: 16ch;
+  font-size: clamp(2rem, 5vw, 3rem);
+  font-weight: 750;
+  letter-spacing: -0.045em;
+  line-height: 1.08;
+  margin-bottom: 1.5rem;
+}
+
+[role="main"] .portalocker-hero {
+  position: relative;
+  margin-bottom: 3.5rem;
+  padding-right: 155px;
+}
+
+.portalocker-hero::after {
+  position: absolute;
+  right: 0;
+  top: -5.5rem;
+  width: 140px;
+  height: 140px;
+  background: url("file-lock.svg") center / contain no-repeat;
+  content: "";
+  pointer-events: none;
+}
+
+.portalocker-hero > p {
+  color: var(--color-foreground-secondary);
+  font-size: 1.1rem;
+  line-height: 1.65;
+}
+
+.portalocker-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+a.portalocker-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.7rem 1rem;
+  border: 1px solid var(--color-brand-primary);
+  border-radius: 5px;
+  background: var(--color-brand-primary);
+  color: var(--color-background-primary);
+  font-size: 0.9rem;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+a.portalocker-button-secondary {
+  background: transparent;
+  color: var(--color-brand-content);
+}
+
+.portalocker-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 1.5rem 0;
+}
+
+a.portalocker-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  padding: 1.1rem;
+  border: 1px solid var(--color-background-border);
+  border-radius: 6px;
+  color: var(--color-foreground-primary);
+  text-decoration: none;
+}
+
+.portalocker-card h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  line-height: 1.4;
+}
+
+.portalocker-card p {
+  margin: 0;
+  color: var(--color-foreground-secondary);
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+
+.portalocker-card > span {
+  margin-top: auto;
+  color: var(--color-brand-content);
+  font-size: 0.85rem;
+  font-weight: 650;
+}
+
+a.portalocker-card:hover {
+  border-color: var(--color-brand-primary);
+  background: var(--color-background-secondary);
+}
+
+a.portalocker-button:hover {
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.portalocker-links a:focus-visible,
+.portalocker-actions a:focus-visible,
+.portalocker-cards a:focus-visible,
+.portalocker-footer-links a:focus-visible {
+  outline: 3px solid var(--color-brand-primary);
+  outline-offset: 4px;
+}
+
+.portalocker-footer-links {
+  margin-top: 2.5rem;
+  padding: 1.5rem 0 0.5rem;
+  border-top: 1px solid var(--color-background-border);
+}
+
+@media (max-width: 600px) {
+  .portalocker-links {
+    margin-bottom: 2rem;
+  }
+
+  [role="main"] .portalocker-hero {
+    padding-right: 0;
+    margin-bottom: 2.5rem;
+  }
+
+  .portalocker-hero::after {
+    display: none;
+  }
+
+  .portalocker-cards {
+    grid-template-columns: 1fr;
+  }
+}

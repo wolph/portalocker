@@ -1,3 +1,25 @@
+4.3.1:
+
+ * Refreshed the README in Markdown and added a branded documentation
+   landing page, light and dark logos, and links to the locking guides.
+   README examples now run directly from their Markdown source in tests.
+ * Corrected the Linux mandatory-locking advice and clarified that Redis
+   subscription removal and local loss detection can happen at different
+   times during a network failure.
+ * Capped Redis retry sleeps at the acquisition deadline. A large
+   ``check_interval`` no longer adds a full interval after the timeout.
+   Reply polling retains its final read so buffered holder responses are
+   processed before deciding that a holder is unavailable.
+ * Fixed cancelled Redis acquisition leaving a subscription or elected
+   writer behind. Cancellation during setup or between attempts now
+   releases resources, preserves the original exception and permits reuse.
+ * Updated the single-file bundler for the Markdown README. Source
+   distributions now include the supporting files needed by their tests.
+ * Added workflow security analysis and isolated wheel/sdist installation
+   checks before publication. Actions are pinned to reviewed revisions,
+   job permissions are explicit, and live Redis CI checks fail when the
+   required server is unavailable.
+
 4.3.0:
 
  * The filehandle returned by ``Lock`` and ``RLock`` is now typed by the

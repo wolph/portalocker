@@ -2,7 +2,7 @@ Redis Lock
 ==========
 
 `RedisLock` coordinates processes across machines through a Redis pubsub
-channel rather than a shared filesystem; see :doc:`lock-types` for where it
+channel. See :doc:`lock-types` for where it
 fits next to the file-based locks, and :doc:`quickstart` for installing
 portalocker itself. This page is the deep dive: why the lock works this
 way, installing the extra it needs, everyday usage, who owns the
@@ -17,27 +17,28 @@ Why a pubsub lock
 The common way to build a Redis lock is a key with a time to live: the
 holder writes ``SET <name> <token> NX PX <ttl>`` and keeps refreshing it
 for as long as it needs the lock. That design has one persistent problem.
-When the holder crashes, its network drops, or its machine loses power,
-the key outlives it, and every other contender waits out the remaining
-TTL even though the holder is provably gone. Shortening the TTL narrows
+When the holder crashes or stops refreshing the key, every other contender
+waits out the remaining TTL. A lost connection does not establish whether
+the holder has stopped running. Shortening the TTL narrows
 that window but trades it for a different failure: a holder that is
 merely slow, not dead, can lose a lock it still believes it owns.
 
 `RedisLock` keeps the lock in a *subscription* instead of a key. A holder
 subscribes to the lock channel, and a background thread keeps reading
 from it, so ownership is a property of a live connection rather than a
-stored value. The moment that connection drops - a clean release, a
-crash, or a severed network - Redis drops the subscriber and the lock is
-released at once, and since 4.2.0 the holder is told at once as well
-(see `Losing a lock`_). There is no expiry to wait out and no heartbeat
-to refresh. The trade is that nothing is stored anywhere, so every
-acquisition attempt has to ask the channel who is currently there instead
-of reading a key.
+stored value. Redis releases ownership when it removes the subscription,
+without waiting for a key to expire. A clean release normally closes the
+connection promptly, but a crash or network partition can take time to
+detect. Since 4.2.0 the holder records loss when its subscription worker
+detects the failure (see `Losing a lock`_). Redis and the holder can observe
+the failure at different times. There is no lease to refresh, though
+connection health checks and optional self-checks still generate traffic.
+Each acquisition attempt asks the channel who is currently there.
 
 That ask is a ping/pong published on the channel itself: a probing lock
 publishes a ping carrying a private response channel, and every
 subscriber answers with its holder id and current mode. Shared readers
-hold the lock together; an exclusive writer holds it alone; and competing
+hold the lock together. An exclusive writer holds it alone. Competing
 writers agree on a single winner by sorting the pending holder ids they
 all observed, with no coordinator and no message exchange beyond that one
 probe.
@@ -92,7 +93,7 @@ Basic usage
 ------------
 
 Every example on this page runs against `fakeredis` instead of a real
-server, the same way `portalocker_tests/test_redis.py` does; see
+server, the same way `portalocker_tests/test_redis.py` does. See
 `Testing against fakeredis`_ at the end of this page.
 
 >>> import fakeredis
@@ -104,7 +105,7 @@ server, the same way `portalocker_tests/test_redis.py` does; see
 ...     print('do something here')
 do something here
 
-`RedisLock` is exclusive by default; pass
+`RedisLock` is exclusive by default. Pass
 ``flags=portalocker.LockFlags.SHARED`` for a reader that can coexist with
 other readers, while an exclusive writer waits for every shared reader to
 release first:
@@ -123,10 +124,11 @@ release first:
 ...     print('both readers are in')
 both readers are in
 
-Set ``health_check_interval`` on the connection so that both sides notice
-a dead peer promptly; it is part of `RedisLock.DEFAULT_REDIS_KWARGS`, so
-it already defaults to ``10`` seconds unless a connection is supplied
-directly, in which case the connection's own settings apply instead.
+``health_check_interval`` enables periodic connection checks. It is part
+of `RedisLock.DEFAULT_REDIS_KWARGS` and defaults to ``10`` seconds unless
+you supply a connection directly, in which case that connection's settings
+apply. This interval alone does not bound network failure detection.
+See `Self-checking a held lock`_ for an application-level deadline.
 
 Connection handling
 ---------------------
@@ -167,7 +169,7 @@ Since 4.2.0 the connection above is only the *command* connection
 the lock lives on a dedicated client the lock builds for every
 attempt, derived from the command connection's pool but configured to
 never retry and never reconnect, with the holder's name set at the
-connection level; see `Losing a lock`_ for why. Exotic setups whose
+connection level. See `Losing a lock`_ for why. Exotic setups whose
 pools the derivation cannot clone (Sentinel, cluster, custom pool
 classes) pass ``subscription_connection_factory`` to build that client
 themselves.
@@ -196,8 +198,10 @@ True
 Losing a lock
 ---------------
 
-The pubsub design releases a lock the instant its connection dies, and
-since 4.2.0 the holder is told just as promptly. The subscription lives
+Redis removes a lock's ownership when it removes the subscription. The
+holder detects loss separately, when its subscription worker sees a
+connection error or a failed self-check. Detection can be delayed by a
+network partition. Since 4.2.0 the subscription lives
 on a dedicated connection with a zero-retry, zero-reconnect policy: a
 transparently resurrected subscription would be a silent re-acquisition
 of a lock the holder may have lost to someone else in the gap, so the
@@ -211,8 +215,9 @@ channels:
 - `RedisLock.ensure_held` raises
   :class:`~portalocker.exceptions.LockLostError` (carrying the channel,
   the holder id and the causal error as ``__cause__``). Long critical
-  sections should call it periodically, since it is the only
-  deterministic way a loss interrupts a running body.
+  sections can call it periodically to stop after an observed loss.
+  It checks the local recorded state and does not make a fresh request
+  to Redis or detect an unobserved partition.
 - A ``with`` block whose body finishes cleanly raises
   :class:`~portalocker.exceptions.LockLostError` on exit, after
   releasing. A body exception is never masked by it.
@@ -230,7 +235,7 @@ best-effort as it sounds: a custom ``SIGINT`` disposition, a main
 thread blocked in a C call, or a broad ``except`` all swallow it.
 portalocker 5.0.0 flips the ``interrupt_on_lost`` default to `False`,
 and until then a loss under the implicit default emits a
-`DeprecationWarning` at the moment it interrupts; pass
+`DeprecationWarning` at the moment it interrupts. Pass
 ``interrupt_on_lost`` explicitly to choose your side early.
 
 Injecting a read failure into the keep-alive thread stands in for a
@@ -280,32 +285,30 @@ The caveats, stated plainly rather than hidden:
   maintenance notifications drive a reconnect path in redis-py that
   bypasses the retry policy. If you need RESP3 on the subscription,
   supply ``subscription_connection_factory`` and disable maintenance
-  notifications yourself; the factory must yield a client whose
+  notifications yourself. The factory must yield a client whose
   connections do not retry or reconnect.
 - A holder running portalocker 4.1 or older still resubscribes
   silently after a kill, so the loss guarantee covers a channel only
   once every participant on it runs 4.2 or later.
-- Loss detection rides on the socket. A half-open link that never
-  delivers a TCP reset - a hard-powered-off peer, a silently
-  partitioned network - only surfaces when something writes into the
-  connection, so with ``health_check_interval=0`` (redis-py's default
-  for a connection you supply yourself) such a partition goes
-  undetected indefinitely. Set the interval on your connection so the
-  periodic health-check ping turns the partition into a read error,
-  or enable the end-to-end check from `Self-checking a held lock`_ to
-  bound detection with an application-level deadline.
+- A half-open connection may deliver neither a TCP reset nor data. Its
+  failure can remain undetected until traffic or transport timeouts
+  reveal it. With ``health_check_interval=0`` (redis-py's default for a
+  connection you supply yourself), there are no periodic health-check
+  pings. A nonzero interval creates traffic, but does not itself impose
+  a deadline for every kind of partition. Enable the end-to-end check
+  from `Self-checking a held lock`_ for an application-level deadline.
 - A forked child inherits the lock object and the parent's sockets.
   The child's ``release`` (explicit or via garbage collection) only
-  drops the child's local references; the network teardown is skipped
+  drops the child's local references. The network teardown is skipped
   outside the subscribing process, because an UNSUBSCRIBE over the
   inherited socket would silently revoke the parent's lock. A child
   that needs the lock must build its own instance.
 
-From the revocation until the holder observes it, both the new and the
-old holder run: detection is bounded (about one worker sleep interval
-after the TCP layer notices), reaction is not. Only resource-side
-fencing closes that window, and the resource-side half is necessarily
-yours. The token half is the opt-in described in `Fencing tokens`_.
+After revocation, a new holder can acquire while the old holder still
+runs. Observing the loss and stopping application work are separate steps,
+and neither happens atomically with a write to your resource. To reject
+stale writes, the resource itself must check the optional token described
+in `Fencing tokens`_.
 
 Self-checking a held lock
 --------------------------
@@ -457,11 +460,10 @@ What the flag signs you up for, stated plainly:
 Crashed holders
 -----------------
 
-The connection-as-ownership design covers the common case on its own: a
-clean release, a crash, or a dropped network all close the socket, and
-Redis drops the subscriber immediately - no reaping needed. What is left
-to handle is a subscriber Redis still *counts* but that has stopped
-answering: wedged rather than gone, which would otherwise leave the
+When Redis observes a closed connection it removes the subscription, so
+no reaping is needed for that holder. A crash or network partition may
+not close the connection promptly from Redis's point of view. A subscriber
+Redis still *counts* can also stop answering probes, which would leave the
 channel permanently inconsistent, since the subscriber count would never
 again match the number of holders willing to answer a probe.
 
@@ -501,7 +503,7 @@ question and leave the reaping to `RedisLock.acquire`.
 
 `fakeredis` does not implement ``CLIENT KILL``, so the reaping inside
 `RedisLock.acquire` is only exercised against a live server in
-`portalocker_tests/test_redis.py`; against `fakeredis`, the internal
+`portalocker_tests/test_redis.py`. Against `fakeredis`, the internal
 cleanup helper is monkeypatched to a no-op so the rest of the contention
 logic can still be tested without it.
 

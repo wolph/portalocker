@@ -5,9 +5,9 @@ which bundles the package into a single vendorable ``portalocker.py``
 file; see `combine` for what that transform does and why it exists.
 
 Every file this module reads while doing that -- the package's own
-modules, ``README.rst`` and ``LICENSE`` -- is opened with
+modules, ``README.md`` and ``LICENSE`` -- is opened with
 ``encoding='ascii'`` (see `_read_file` and `combine`). That means the
-entire ``portalocker`` source tree, plus ``README.rst`` and ``LICENSE``,
+entire ``portalocker`` source tree, plus ``README.md`` and ``LICENSE``,
 must stay ASCII-only: a non-ASCII character in any of them makes this
 module raise `UnicodeDecodeError` instead of silently mis-decoding it.
 ``portalocker_tests/test_combined.py`` asserts the combined output can
@@ -54,7 +54,7 @@ def _log_decode_error(
     """Log a snippet of `path` around the bytes that failed to decode.
 
     Shared by every ASCII read in this module (see `_read_text_ascii`),
-    so a stray non-ASCII byte in a source file, ``README.rst`` or
+    so a stray non-ASCII byte in a source file, ``README.md`` or
     ``LICENSE`` always produces an error naming the offending file and
     showing the surrounding context instead of a bare traceback.
 
@@ -325,10 +325,10 @@ def combine(args: argparse.Namespace) -> None:
     `RedisLock` the same way the package does -- to the stub class that
     raises ``ImportError`` on construction if importing it fails.
 
-    Every module under `src_path`, plus ``README.rst`` and ``LICENSE``,
+    Every module under `src_path`, plus ``README.md`` and ``LICENSE``,
     is read with ``encoding='ascii'`` (see the module docstring): all of
     them must be ASCII-only or this raises `UnicodeDecodeError`.
-    ``README.rst`` and ``LICENSE`` are also written near the top of the
+    ``README.md`` and ``LICENSE`` are also written near the top of the
     output, each wrapped in a triple-quoted string, for reference; they
     are not the output file's docstring, since the single
     ``from __future__ import annotations`` line this function writes
@@ -368,7 +368,7 @@ def combine(args: argparse.Namespace) -> None:
         # We're handling this separately because it has to be the first
         # import.
         'from __future__ import annotations\n',
-        _TEXT_TEMPLATE.format(_read_text_ascii(base_path / 'README.rst')),
+        _TEXT_TEMPLATE.format(_read_text_ascii(base_path / 'README.md')),
         _TEXT_TEMPLATE.format(_read_text_ascii(base_path / 'LICENSE')),
     ]
     seen_files: set[pathlib.Path] = set()

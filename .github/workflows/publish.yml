@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+
 jobs:
   # Fail the release before anything reaches PyPI. Everything checked
   # here used to fail only in the jobs that run after publishing, which
@@ -15,9 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Verify the tag matches pyproject.toml and CHANGELOG.rst
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -58,17 +62,23 @@ jobs:
   # Tag pushes do not trigger ci.yml on their own; run the full suite
   # here so nothing reaches PyPI without passing tests.
   test:
-    uses: ./.github/workflows/ci.yml
+    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository] -- retain standard reusable-workflow syntax
 
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          enable-cache: false
       - name: Build
         run: uv build
-      - uses: actions/upload-artifact@v7
+      - name: Validate the exact archives to be published
+        run: uv run --no-project --with twine --with 'readme-renderer[md]' python scripts/check_distribution.py dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dist
           path: dist/
@@ -80,14 +90,14 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: dist
           path: dist/
       # skip-existing makes a tag re-push idempotent: without it a
       # re-run dies on the PyPI duplicate-file error before the release
       # and sync-master jobs get a second chance.
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           skip-existing: true
 
@@ -100,7 +110,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Extract this version's changelog section
         run: |
           version="${GITHUB_REF_NAME#v}"
@@ -133,10 +145,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      # Only this job pushes. The token is removed by checkout's cleanup.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           token: ${{ secrets.SYNC_MASTER_TOKEN }}
+          persist-credentials: true # zizmor: ignore[artipacked] -- required for the fast-forward push, no artefacts uploaded
       # master tracks stable releases only. A pre-release tag (v4.4.0rc1)
       # may publish to PyPI, but fast-forwarding master past the latest
       # stable release would present the rc as the current state.

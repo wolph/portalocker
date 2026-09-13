@@ -4,7 +4,7 @@ env_list = [
     'py310', 'py311', 'py312', 'py313', 'py314',
     'pypy310', 'pypy311',
     'ruff', 'mypy', 'basedpyright', 'pyrefly', 'ty',
-    'codespell', 'repo-review', 'docs',
+    'codespell', 'repo-review', 'zizmor', 'docs', 'distribution',
 ]
 skip_missing_interpreters = true
 
@@ -81,11 +81,21 @@ commands = [['repo-review', '.']]
 [env.docs]
 labels = ['docs']
 extras = ['docs']
-allowlist_externals = ['rm', 'mkdir']
 commands = [
-    ['rm', '-f', 'docs/api/modules.rst'],
-    ['mkdir', '-p', 'docs/_static'],
-    ['sphinx-apidoc', '-e', '-o', 'docs/api', 'portalocker'],
-    ['rm', '-f', 'docs/api/modules.rst'],
     ['sphinx-build', '-W', '-b', 'html', 'docs', 'docs/_build/html'],
+]
+
+[env.zizmor]
+labels = ['check']
+skip_install = true
+deps = ['zizmor']
+commands = [['zizmor', '--offline', '.github/workflows']]
+
+[env.distribution]
+labels = ['package']
+skip_install = true
+deps = ['uv', 'twine', 'readme-renderer[md]']
+commands = [
+    ['uv', 'build', '--out-dir', '{env_tmp_dir}/dist'],
+    ['python', 'scripts/check_distribution.py', '{env_tmp_dir}/dist'],
 ]

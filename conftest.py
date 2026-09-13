@@ -1,6 +1,6 @@
 """Pytest configuration shared by the package, the tests and the docs.
 
-The doctests in ``portalocker/``, ``docs/`` and ``README.rst`` create real
+The doctests in ``portalocker/`` and ``docs/`` create real
 lock files. Without a fixture that moves them somewhere disposable they
 write into the repository root, which is where the stray ``somefile``,
 ``test.lock`` and ``x`` entries in earlier working trees came from.

@@ -4,7 +4,7 @@ Platform Behaviour
 portalocker presents a single API over three quite different locking
 systems: ``fcntl`` on POSIX, ``msvcrt`` on Windows, and the Win32 API
 (``LockFileEx``/``UnlockFileEx``) when the optional ``pywin32`` package
-is installed. The API hides the system calls; it cannot hide their
+is installed. The API hides the system calls but cannot hide their
 semantics, and the semantics are where the surprises live.
 
 This page describes what the operating system actually does underneath.
@@ -53,17 +53,17 @@ or writes an overlapping range of the file fails with a
     with open('data.txt', 'r+') as other:
         other.write('clobbered')  # PermissionError
 
-This asymmetry is not a portability wart you can ignore; it changes what
+This asymmetry changes what
 your program is allowed to do. `portalocker.PidFileLock`, for instance,
 puts the OS lock on a sidecar ``<filename>.lock`` file precisely so that
 the PID file itself stays readable on Windows (see :doc:`lock-types`).
 
-Linux can be told to enforce locks, by mounting a filesystem with
-``-o mand`` and marking individual files set-group-ID with the group
-execute bit cleared. Don't. It is racy by design, it was deprecated in
-Linux 4.5, and support was removed from the kernel in 5.15, so any code
-relying on it stops working on a modern distribution. Treat POSIX locks
-as advisory and make every participant lock.
+Linux removed support for its old mandatory locking feature in kernel
+5.15. The historical ``-o mand`` mount option cannot enable it on current
+kernels. The `Linux locking manual
+<https://man7.org/linux/man-pages/man2/fcntl_locking.2.html>`_ describes the
+feature's unreliability and removal. Treat POSIX locks as advisory and
+make every participant lock.
 
 Further reading:
 
@@ -89,18 +89,18 @@ POSIX offers two unrelated locking mechanisms, and Python exposes both:
       - the process, per file
     * - Two ``open()`` calls in one process
       - conflict with each other
-      - do **not** conflict; the second call replaces the first lock
+      - do **not** conflict. The second call replaces the first lock
     * - Descriptors shared via ``dup()`` or ``fork()``
-      - share one lock; it is released when the last of them closes
+      - share one lock. It is released when the last of them closes
       - a ``fork()`` child does not inherit the parent's locks
     * - Closing an unrelated descriptor for the same file
       - harmless
       - drops all of that process's locks on the file
     * - Byte ranges
-      - not supported; always the whole file
+      - not supported. Always the whole file
       - supported (portalocker does not use them)
     * - Upgrading shared to exclusive
-      - not atomic; the old lock is dropped first, so another waiter can
+      - not atomic. The old lock is dropped first, so another waiter can
         slip in
       - atomic
 
@@ -114,7 +114,7 @@ On Linux the two mechanisms are independent: a ``flock`` lock does not
 block a ``lockf`` lock on the same file, or the reverse. Other systems
 may implement one in terms of the other, so mixing them is not portable.
 The practical rule is that every process sharing a file has to use the
-same primitive — which is the usual reason to switch portalocker away
+same primitive, which is the usual reason to switch portalocker away
 from its default: some other program already picked ``lockf``.
 
 Selecting the primitive
@@ -134,12 +134,12 @@ package:
 
 ``LOCKER`` accepts four forms. On POSIX:
 
-* a bare ``fcntl``-style callable taking ``(fd, operation)`` — the
+* a bare ``fcntl``-style callable taking ``(fd, operation)`` - the
   default, ``fcntl.flock``. It is routed through a shared `PosixLocker`,
   so it still gets descriptor extraction, flag validation and the
-  translation of ``OSError`` into ``AlreadyLocked``/``LockException``;
-* a `BaseLocker` subclass, instantiated once and cached;
-* a `BaseLocker` instance;
+  translation of ``OSError`` into ``AlreadyLocked``/``LockException``.
+* a `BaseLocker` subclass, instantiated once and cached.
+* a `BaseLocker` instance.
 * a ``(lock, unlock)`` tuple of two callables.
 
 On Windows the same forms are accepted except the bare callable, which
@@ -147,7 +147,7 @@ has no meaning without ``fcntl`` and raises ``TypeError``. There
 ``LOCKER`` defaults to the `MsvcrtLocker` class.
 
 Honouring all four forms in the module-level ``lock()``/``unlock()`` on
-POSIX is a 4.0.0 fix; earlier versions only honoured the bare callable
+POSIX is a 4.0.0 fix. Earlier versions only honoured the bare callable
 there.
 
 The class form is the tidier way to pin a primitive, because
@@ -259,7 +259,7 @@ Two more consequences of the split:
   original msvcrt failure surfaces as a ``LockException`` whose message
   names the missing extra.
 * Because Windows locking is mandatory (see above), a shared lock is not
-  merely an optimisation there — without one, readers that would happily
+  merely an optimisation there. Without one, readers that would happily
   coexist on POSIX are locked out.
 
 Blocking locks give up after about ten seconds
@@ -286,22 +286,22 @@ Networked filesystems
 
 Locking over a network filesystem is best-effort. It depends on the
 protocol, the server, the client implementation and the mount options,
-and none of that is visible from Python. Prefer a lock that does not
-depend on the filesystem — `portalocker.RedisLock`, see :doc:`redis` —
-when correctness across machines actually matters.
+and none of that is visible from Python. `portalocker.RedisLock` avoids
+filesystem locking, but has its own connection-loss and network-partition
+caveats. See :doc:`redis` before choosing it for cross-machine coordination.
 
 If you must lock on a network mount:
 
 **NFS.** On Linux, ``flock()`` on an NFS file has been emulated with
 whole-file POSIX byte-range locks since kernel 2.6.12, so it does reach
-the server; older kernels kept it client-local. NFSv2 and NFSv3 carry
+the server. Older kernels kept it client-local. NFSv2 and NFSv3 carry
 locking in a separate protocol that needs ``rpc.statd``/``lockd``
 running on both ends, while NFSv4 carries it in the main protocol. The
 ``local_lock`` mount option turns locking back into a client-local
-operation, which silently removes all cross-client exclusion — check it
+operation, which silently removes all cross-client exclusion. Check it
 before trusting a mount. After a server or client restart there is a
 recovery grace period during which locks may be lost. Some NFS setups
-also make ``fcntl`` raise ``EOFError``; portalocker translates that into
+also make ``fcntl`` raise ``EOFError``. Portalocker translates that into
 ``LockException`` so it is at least catchable alongside every other lock
 failure. Since 4.2.0 that translated ``EOFError``, like ``ENOLCK`` and
 every other non-contention failure, is terminal: `Lock.acquire` raises
@@ -311,8 +311,8 @@ prompt error names the real problem where a timeout only claimed
 contention.
 
 **SMB/CIFS.** Byte-range locks are supported by the Linux ``cifs``
-client and enforced by the server, but the ``nobrl`` mount option — used
-to make some database files usable — stops the client from sending them,
+client and enforced by the server, but the ``nobrl`` mount option (used
+to make some database files usable) stops the client from sending them,
 again leaving locking client-local. Windows clients talking to a Windows
 or Samba server get the usual mandatory semantics.
 
@@ -332,7 +332,7 @@ NFS's close-to-open consistency means a reader is only guaranteed to see
 your data after you closed the file and it opened the file afresh.
 `portalocker.Lock` does close its handle on release, which usually
 covers it, but nothing forces a flush if you hold the handle open across
-the unlock — with `portalocker.RLock`, or by calling `portalocker.lock`
+the unlock - with `portalocker.RLock`, or by calling `portalocker.lock`
 and `portalocker.unlock` on a handle you manage yourself. Doing both
 explicitly costs one line and removes the question:
 
@@ -353,7 +353,7 @@ contend:
 
 * **POSIX.** ``fcntl.flock`` has no concept of a range. portalocker calls
   its locker with ``(fd, operation)`` only, so when ``fcntl.lockf`` is
-  selected instead, that function's defaults apply — ``start=0``,
+  selected instead, that function's defaults apply: ``start=0``,
   ``whence=SEEK_SET`` and ``len=0``, which means "to the end of the
   file", including bytes appended later.
 * **Windows, msvcrt.** ``msvcrt.locking`` locks a fixed number of bytes
@@ -365,7 +365,7 @@ contend:
   fixed large range from there.
 
 Seeking to byte 0 on the msvcrt path is a 4.0.0 fix. Before it, raw file
-descriptors — an ``int``, or an object exposing only ``fileno()`` —
+descriptors (an ``int``, or an object exposing only ``fileno()``)
 were locked from wherever the descriptor happened to be positioned. Two
 processes working at different offsets in a file larger than 64 KiB
 would then lock disjoint ranges and fail to exclude each other at all,

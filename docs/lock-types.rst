@@ -24,7 +24,7 @@ Selection guide
     * - Acquire the same lock again from code nested inside the first
         ``with`` block
       - `RLock`
-    * - A pure mutex with no data worth keeping; the lock file should not
+    * - A pure mutex with no data worth keeping, whose lock file should not
         outlive the lock
       - `TemporaryFileLock`
     * - "Only one instance of this program", plus a way to see which PID
@@ -46,7 +46,7 @@ place, so it doubles as a plain data file as well as a mutex.
 
 Guarantees:
 
-- The lock is exclusive by default (`LockFlags.EXCLUSIVE`); pass
+- The lock is exclusive by default (`LockFlags.EXCLUSIVE`). Pass
   ``flags=portalocker.LockFlags.SHARED`` for a shared/read lock.
 - Locking is per open filehandle, not per process: two `Lock` instances
   on the same path in the same process still contend with each other.
@@ -72,7 +72,7 @@ Costs:
   persist, is the caller's job (see `TemporaryFileLock` for the
   alternative).
 - Acquiring twice from separate instances on the same path blocks or
-  raises like any other contention; `Lock` itself is not reentrant (see
+  raises like any other contention. `Lock` itself is not reentrant (see
   `RLock`).
 
 Reach for it when you want the default: locking a real file whose
@@ -147,14 +147,14 @@ Guarantees:
   (the default) and returns ``None`` with ``fail_when_locked=False``.
   Both are divergences kept as they have behaved since 3.2.0, so check
   the return value when you pass ``fail_when_locked=False``.
-- `BoundedSemaphore.release` only unlocks the held slot; the lock files
+- `BoundedSemaphore.release` only unlocks the held slot. The lock files
   themselves stay on disk so the same slots can be reused later.
 
 Costs:
 
 - Constructing it without a ``name`` (or with the literal default name)
   emits a ``DeprecationWarning`` and risks colliding with unrelated
-  programs; see `NamedBoundedSemaphore`.
+  programs. See `NamedBoundedSemaphore`.
 - Acquiring while already holding a slot is a programming error
   (``LockException``), so release first. Before 4.2.0 this guard was an
   ``assert``, so ``python -O`` silently took a second slot instead.
@@ -188,7 +188,7 @@ are locked in numerical order, release leaves the lock files behind, and
 holding a slot twice from the same instance is a programming error.
 
 Because the semaphore works across processes, give it an explicit
-``name`` whenever more than one process needs to share it; leaving
+``name`` whenever more than one process needs to share it. Leaving
 ``name`` unset generates a random one, which only makes sense when the
 semaphore object itself (not just its name) is handed to the other
 processes, for instance to worker processes spawned by the current one.
@@ -291,7 +291,7 @@ Costs:
    the guarded block, one side exits) must fork outside the ``with``
    block, or end the child with ``os._exit`` so the inherited block is
    never left. This applies to `TemporaryFileLock` and `PidFileLock`
-   alike; the interpreter-exit cleanup itself is pid-aware and stays
+   alike. The interpreter-exit cleanup itself is pid-aware and stays
    safe across forks.
 
 >>> import os
@@ -308,12 +308,11 @@ RedisLock
 ---------
 
 `RedisLock` coordinates processes across machines through a Redis
-pubsub channel instead of a shared filesystem: a holder subscribes to
-the channel, and the lock is released the instant that connection
-drops, whether the process closed it cleanly, crashed, or lost the
-network, with no expiring key to wait out. See :doc:`redis` for the
-pubsub design, its shared/exclusive election, and crashed-holder
-reaping.
+pubsub channel. A holder subscribes to the channel, and Redis releases
+ownership when it removes that subscription, without waiting for a key
+to expire. Detecting a crash or network partition can take time, and
+the holder observes loss separately. See :doc:`redis` for shared and
+exclusive locks, connection checks, loss handling and fencing tokens.
 
 >>> import fakeredis
 >>> import portalocker

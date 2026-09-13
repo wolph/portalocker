@@ -53,7 +53,7 @@ becoming just ``LockFlags``, for instance) are cleaned up, and useless
 self-assignments the cleanup can produce (``spam = spam``) are stripped
 entirely.
 
-``README.rst`` and ``LICENSE`` are also copied near the top of the
+``README.md`` and ``LICENSE`` are also copied near the top of the
 output, each wrapped in a triple-quoted string, for reference.
 
 Limitations
@@ -64,9 +64,9 @@ The combined file still needs the ``redis`` package installed for
 ``redis``, not ``redis`` itself.
 
 Every file ``combine`` reads -- the package's own modules, plus
-``README.rst`` and ``LICENSE`` -- is opened with ``encoding='ascii'``.
+``README.md`` and ``LICENSE`` -- is opened with ``encoding='ascii'``.
 That means the entire ``portalocker`` source tree, along with
-``README.rst`` and ``LICENSE``, must stay ASCII-only: an em dash, curly
+``README.md`` and ``LICENSE``, must stay ASCII-only: an em dash, curly
 quote, box-drawing character, or any other non-ASCII byte anywhere in
 those files makes ``combine`` raise ``UnicodeDecodeError`` instead of
 silently mis-encoding the result. ``portalocker_tests/test_combined.py``

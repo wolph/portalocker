@@ -1,12 +1,88 @@
 """Validate the jitter that RedisLock adds to its sleep intervals."""
 
+import random
 import time
 from typing import Any
 
 import fakeredis
 import pytest
+from redis import client
 
+import portalocker
 from portalocker import redis
+
+
+def test_acquire_caps_jitter_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry sleeps end at the deadline without starting another attempt."""
+    now: float = 0.0
+    sleeps: list[float] = []
+    attempts: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    def attempt(connection: client.Redis, fail_when_locked: bool) -> bool:
+        attempts.append(now)
+        return False
+
+    monkeypatch.setattr(time, 'monotonic', lambda: now)
+    monkeypatch.setattr(time, 'sleep', sleep)
+    monkeypatch.setattr(random, 'random', lambda: 0.5)
+    lock: redis.RedisLock = redis.RedisLock('deadline')
+    monkeypatch.setattr(lock, '_acquire_attempt', attempt)
+
+    with pytest.raises(portalocker.AlreadyLocked):
+        lock.acquire(timeout=0.3, check_interval=2)
+    assert attempts == [0.0]
+    assert sleeps == [0.3]
+
+
+def test_acquire_rechecks_deadline_after_sleep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late wakeup must not start another acquisition attempt."""
+    now: float = 0.0
+    attempts: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds + 1.0
+
+    def attempt(connection: client.Redis, fail_when_locked: bool) -> bool:
+        attempts.append(now)
+        return False
+
+    monkeypatch.setattr(time, 'monotonic', lambda: now)
+    monkeypatch.setattr(time, 'sleep', sleep)
+    lock: redis.RedisLock = redis.RedisLock('late-wakeup')
+    monkeypatch.setattr(lock, '_acquire_attempt', attempt)
+
+    with pytest.raises(portalocker.AlreadyLocked):
+        lock.acquire(timeout=0.3, check_interval=0.01)
+    assert attempts == [0.0]
+
+
+def test_reply_polling_keeps_the_final_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply buffered during the final sleep still gets read by probes."""
+    now: float = 0.0
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(time, 'monotonic', lambda: now)
+    monkeypatch.setattr(time, 'sleep', sleep)
+    monkeypatch.setattr(random, 'random', lambda: 0.5)
+    lock: redis.RedisLock = redis.RedisLock('final-reply')
+    reads: list[float] = [now for _ in lock._timeout_generator(0.3, 2)]
+
+    assert reads == [0.0, 0.3]
 
 
 class FakeLock(redis.RedisLock):

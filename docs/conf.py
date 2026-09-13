@@ -24,6 +24,23 @@ napoleon_google_docstring = True
 napoleon_numpy_docstring = False
 
 html_theme = 'furo'
+html_title: str = 'Portalocker'
+exclude_patterns: list[str] = ['_build', 'superpowers']
+html_static_path: list[str] = ['_static']
+html_css_files: list[str] = ['portalocker.css']
+html_theme_options: dict[str, object] = {
+    'light_logo': 'portalocker-light.svg',
+    'dark_logo': 'portalocker-dark.svg',
+    'sidebar_hide_name': True,
+    'light_css_variables': {
+        'color-brand-primary': '#087869',
+        'color-brand-content': '#087869',
+    },
+    'dark_css_variables': {
+        'color-brand-primary': '#70ddbf',
+        'color-brand-content': '#70ddbf',
+    },
+}
 
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3', None),

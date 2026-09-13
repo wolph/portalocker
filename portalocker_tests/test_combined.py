@@ -114,12 +114,12 @@ def test_combine_failure_preserves_existing_output(
     """A decode failure must not destroy a pre-existing output file.
 
     ``combine`` used to open (and truncate) ``--output-file`` before
-    reading ``README.rst``, so a non-ASCII byte in an input destroyed the
+    reading the README, so a non-ASCII byte in an input destroyed the
     previous build and died with a raw traceback. All inputs are now read
     and assembled first, and the output is written last, so the
     pre-existing file survives and the error names the offending input.
     """
-    (tmp_path / 'README.rst').write_bytes(b'caf\xe9 in the readme\n')
+    (tmp_path / 'README.md').write_bytes(b'caf\xe9 in the readme\n')
     (tmp_path / 'LICENSE').write_text('license text\n', encoding='ascii')
 
     output_file = tmp_path / 'combined.py'
@@ -137,7 +137,7 @@ def test_combine_failure_preserves_existing_output(
     # The pre-existing output file is untouched.
     assert output_file.read_text(encoding='ascii') == sentinel
     # The logged error names the offending file and shows a snippet.
-    assert 'README.rst' in caplog.text
+    assert 'README.md' in caplog.text
     assert 'Snippet' in caplog.text
 
 
@@ -149,7 +149,7 @@ def test_combine_missing_input_exits_with_clear_error(
     It used to escape as a raw ``FileNotFoundError`` traceback. The
     pre-existing output file must survive, as with decode failures.
     """
-    # No README.rst in the doctored tree at all.
+    # No README.md in the doctored tree at all.
     (tmp_path / 'LICENSE').write_text('license text\n', encoding='ascii')
 
     output_file = tmp_path / 'combined.py'
@@ -165,7 +165,7 @@ def test_combine_missing_input_exits_with_clear_error(
         __main__.main(['combine', '--output-file', str(output_file)])
 
     assert exc_info.value.code == 1
-    assert 'README.rst' in caplog.text
+    assert 'README.md' in caplog.text
     assert 'not found' in caplog.text
     assert output_file.read_text(encoding='ascii') == sentinel
 

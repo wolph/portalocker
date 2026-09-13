@@ -6,19 +6,19 @@
 
 The usual way to build a Redis lock is a key with a time to live: the
 holder writes ``SET <name> <token> NX PX <ttl>`` and keeps refreshing it.
-That design has an awkward failure mode. When a holder crashes, its
-network drops, or its machine is powered off, the key outlives it and
-every other process waits out the remaining TTL even though the holder is
-provably gone. Shortening the TTL narrows that window but risks a merely
-slow holder losing a lock it still believes it owns.
+When a holder crashes or stops refreshing the key, every other process
+waits out the remaining TTL. A lost connection does not establish whether
+the holder has stopped running. Shortening the TTL narrows that window
+but risks a slow holder losing a lock it still believes it owns.
 
 `RedisLock` keeps the lock in a *subscription* rather than in a key. A
 holder subscribes to the lock channel and a background thread keeps
-reading from it, so ownership is a property of a live connection. If the
-process dies the socket closes, Redis drops the subscriber, and the lock
-is released at once: there is no expiry to wait out and no heartbeat to
-refresh. The price is that nothing is stored anywhere, so a lock attempt
-has to ask the channel who is currently there.
+reading from it, so ownership is a property of a live connection. Redis
+releases ownership when it removes the subscription, without waiting for
+a key to expire. A clean release normally closes the connection promptly,
+but detecting a crash or network partition can take time. There is no
+lease to refresh, though connection health checks and optional self-checks
+still generate traffic. Each lock attempt asks the channel who is there.
 
 Asking is a ping/pong on the channel itself::
 
@@ -43,21 +43,24 @@ Asking is a ping/pong on the channel itself::
 Shared readers hold the lock together, an exclusive writer holds it
 alone. There is no coordinator and no lock to take before taking the
 lock, so competing writers agree on a single winner by sorting the
-pending holder ids they all saw; see `RedisLock._writer_is_elected`.
-Subscribers that Redis still counts but that stopped answering are
-crashed processes, and their connections are killed so that the channel
-becomes consistent again.
+pending holder ids they all saw. See `RedisLock._writer_is_elected`.
+Subscribers that Redis still counts can stop answering without their
+processes having crashed. Contended acquisition attempts can reap these
+unresponsive subscriptions by killing their connections.
 
-Losing the connection releases the lock, and since 4.2.0 the holder is
-told about it just as promptly. The subscription lives on a dedicated
-connection that never reconnects (a resurrected subscription would be a
-silent re-acquisition that skipped the election), so the first read
-error after a revocation marks the lock as lost: `RedisLock.ensure_held`
-raises `~portalocker.exceptions.LockLostError`, the ``with`` block exit
-raises it too once the body finished cleanly, an ``on_lost`` callback
-fires on the reader thread, and by default the main thread receives a
-``KeyboardInterrupt`` (``interrupt_on_lost``, opt-in from 5.0.0
-onwards). Caveats that follow from this design:
+Redis and the holder can observe a connection failure at different times.
+Since 4.2.0 the holder records loss when its subscription worker detects
+a connection error or a failed self-check. The subscription lives on a
+dedicated connection that never reconnects: a resurrected subscription
+would be a silent re-acquisition that skipped the election. Once the
+worker records loss, `RedisLock.ensure_held` raises
+`~portalocker.exceptions.LockLostError`, the ``with`` block exit raises
+it too if the body finished cleanly, and an ``on_lost`` callback fires on
+the reader thread. By default, a loss also requests a main-thread
+``KeyboardInterrupt`` (``interrupt_on_lost``, opt-in from 5.0.0 onwards).
+That interruption is best-effort. `RedisLock.ensure_held` checks local
+recorded state without contacting Redis, so it cannot detect a partition
+the worker has not observed. Caveats that follow from this design:
 
 - Under redis-py's default ``socket_timeout`` of five seconds, a read
   stalled for that long raises ``TimeoutError`` and counts as a loss. A
@@ -72,27 +75,27 @@ onwards). Caveats that follow from this design:
 - A holder running portalocker 4.1 or older still resubscribes silently
   after a kill, so the loss guarantee only covers channels where every
   participant runs 4.2 or later.
-- Loss detection rides on the socket. A half-open link that never
-  delivers a TCP reset - a hard-powered-off peer, a silently
-  partitioned network - only surfaces when something writes into the
-  connection, so with ``health_check_interval=0`` (redis-py's default
-  for a connection you supply yourself) such a partition goes
-  undetected indefinitely. The opt-in ``self_check_interval``
-  parameter closes this hole above the transport: the holder
-  periodically pings itself through its own channel and treats a
-  missing echo as the loss it is (see `RedisLockSelfCheckError`).
-- From the revocation until the holder observes it, the old and the
-  new holder both run. Detection is bounded (about one worker sleep
-  interval once the TCP layer notices), reaction is not, and only
-  fencing at the resource itself - a token the resource checks, which
-  is outside this lock's reach - closes that window. The opt-in
-  ``fencing`` parameter hands every exclusive grant such a token
-  (`RedisLock.fence_token`). Checking it remains the resource's job.
+- A half-open connection may deliver neither a TCP reset nor data. Its
+  failure can remain undetected until traffic or transport timeouts
+  reveal it. With ``health_check_interval=0`` (redis-py's default for a
+  connection you supply yourself), there are no periodic health-check
+  pings. A nonzero interval creates traffic but does not itself impose
+  a deadline for every kind of partition. The opt-in
+  ``self_check_interval`` enables an application-level check: the holder
+  periodically pings itself through its channel and records loss if
+  the echo misses its deadline (see `RedisLockSelfCheckError`).
+- After revocation, a new holder can acquire while the old holder still
+  runs. Observing loss and stopping application work are separate steps,
+  and neither happens atomically with a write to your resource. The
+  opt-in ``fencing`` parameter gives every exclusive grant a token
+  (`RedisLock.fence_token`). To reject stale writes, the resource itself
+  must check that token.
 
-Set ``health_check_interval`` on the connection (it is part of
-`RedisLock.DEFAULT_REDIS_KWARGS`) so that both sides notice a dead peer
-promptly; the periodic ping is also what turns a half-open link into a
-read error.
+``health_check_interval`` is part of `RedisLock.DEFAULT_REDIS_KWARGS` and
+defaults to ten seconds. If you supply a connection directly, that
+connection's settings apply instead. Health checks generate periodic
+traffic, but Redis and the holder can still detect a failure at different
+times.
 
 Example:
     >>> import fakeredis
@@ -1212,8 +1215,15 @@ class RedisLock(utils.LockBase['RedisLock']):
         )
         deadline: float = time.monotonic() + timeout
         yield 0
-        while time.monotonic() < deadline:
-            time.sleep(effective_interval * (0.5 + random.random()))
+        while True:
+            remaining: float = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(
+                min(effective_interval * (0.5 + random.random()), remaining)
+            )
+            # Probe callers must drain replies received during this final
+            # sleep. The acquisition loop separately rejects late retries.
             yield 0
 
     def _make_subscription_client(
@@ -3262,14 +3272,27 @@ class RedisLock(utils.LockBase['RedisLock']):
             with self._mode_lock:
                 self.mode = RedisLockMode.PENDING
                 self.writer_elected = False
-        connection: redis.client.Redis = self.get_connection()
-
-        for _ in self._timeout_generator(
-            effective_timeout,
-            effective_check_interval,
-        ):
-            if self._acquire_attempt(connection, effective_fail_when_locked):
-                return self
+        try:
+            connection: redis.client.Redis = self.get_connection()
+            deadline: float = time.monotonic() + effective_timeout
+            first_attempt: bool = True
+            for _ in self._timeout_generator(
+                effective_timeout,
+                effective_check_interval,
+            ):
+                if not first_attempt and time.monotonic() >= deadline:
+                    break
+                first_attempt = False
+                if self._acquire_attempt(
+                    connection, effective_fail_when_locked
+                ):
+                    return self
+        except BaseException:
+            # Cancellation can arrive during subscription setup or while
+            # an elected writer waits between attempts. Neither site is
+            # covered by the probe's rollback.
+            self._roll_back_terminal_acquire_failure()
+            raise
 
         self.release()
         raise exceptions.AlreadyLocked()
