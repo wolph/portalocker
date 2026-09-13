@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/wolph/portalocker/release/4.3.1-refresh/docs/_static/portalocker-dark.svg">
-  <img src="https://raw.githubusercontent.com/wolph/portalocker/release/4.3.1-refresh/docs/_static/portalocker-light.svg" alt="portalocker" width="300" height="64">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/wolph/portalocker/develop/docs/_static/portalocker-dark.svg">
+  <img src="https://raw.githubusercontent.com/wolph/portalocker/develop/docs/_static/portalocker-light.svg" alt="portalocker" width="300" height="64">
 </picture>
 
 # Coordinate access. Keep your code simple.
@@ -119,7 +119,7 @@ For upgrades from 3.x, see the
 Portalocker is maintained by [Rick van Hattem](https://github.com/wolph).
 [Bug reports and feature requests](https://github.com/wolph/portalocker/issues)
 and patches are welcome. See the
-[contribution guide](https://github.com/wolph/portalocker/blob/release/4.3.1-refresh/CONTRIBUTING.md)
+[contribution guide](https://github.com/wolph/portalocker/blob/develop/CONTRIBUTING.md)
 for development and test commands.
 
 To report a security vulnerability, please use the
