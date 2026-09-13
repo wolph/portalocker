@@ -62,11 +62,9 @@ That interruption is best-effort. `RedisLock.ensure_held` checks local
 recorded state without contacting Redis, so it cannot detect a partition
 the worker has not observed. Caveats that follow from this design:
 
-- Under redis-py's default ``socket_timeout`` of five seconds, a read
-  stalled for that long raises ``TimeoutError`` and counts as a loss. A
-  holder that cannot complete a read cannot confirm ownership either,
-  so this is deliberate, but pathologically slow links can produce
-  false losses.
+- When ``socket_timeout`` is set, a read exceeding it raises
+  ``TimeoutError`` and counts as a loss. Slow links can produce false
+  loss reports.
 - The zero-reconnect policy is applied on a RESP2 connection because
   RESP3 maintenance notifications carry their own reconnect path that
   bypasses the retry policy. Callers who need RESP3 on the subscription

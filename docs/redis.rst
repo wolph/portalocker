@@ -275,12 +275,10 @@ True
 False
 >>> lock.release()
 
-The caveats, stated plainly rather than hidden:
+Connection settings and older holders need care:
 
-- Under redis-py's default ``socket_timeout`` of five seconds, a read
-  stalled that long counts as a loss. A holder that cannot complete a
-  read cannot confirm ownership either, so this is deliberate, but a
-  pathologically slow link can produce a false loss.
+- When ``socket_timeout`` is set, a read exceeding it counts as a loss.
+  Slow links can produce false loss reports.
 - The dedicated subscription connection speaks RESP2, because RESP3
   maintenance notifications drive a reconnect path in redis-py that
   bypasses the retry policy. If you need RESP3 on the subscription,
