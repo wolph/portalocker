@@ -5,7 +5,7 @@
 
 # Coordinate access. Keep your code simple.
 
-[![CI](https://github.com/wolph/portalocker/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/wolph/portalocker/actions/workflows/ci.yml)
+[![CI](https://github.com/wolph/portalocker/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/wolph/portalocker/actions/workflows/ci.yml?query=branch%3Amaster)
 [![PyPI](https://img.shields.io/pypi/v/portalocker)](https://pypi.org/project/portalocker/)
 [![Python versions](https://img.shields.io/pypi/pyversions/portalocker)](https://pypi.org/project/portalocker/)
 [![Documentation](https://readthedocs.org/projects/portalocker/badge/?version=latest)](https://portalocker.readthedocs.io/en/latest/)
@@ -119,7 +119,7 @@ For upgrades from 3.x, see the
 Portalocker is maintained by [Rick van Hattem](https://github.com/wolph).
 [Bug reports and feature requests](https://github.com/wolph/portalocker/issues)
 and patches are welcome. See the
-[contribution guide](https://github.com/wolph/portalocker/blob/develop/CONTRIBUTING.md)
+[contribution guide](https://github.com/wolph/portalocker/blob/release/4.3.1-refresh/CONTRIBUTING.md)
 for development and test commands.
 
 To report a security vulnerability, please use the

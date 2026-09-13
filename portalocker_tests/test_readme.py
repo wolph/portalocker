@@ -20,6 +20,23 @@ def test_readme_contains_executable_examples() -> None:
     assert EXAMPLES
 
 
+def test_ci_badge_tracks_master() -> None:
+    """The status image and its destination both refer to master."""
+    workflow: str = (
+        'https://github.com/wolph/portalocker/actions/workflows/ci.yml'
+    )
+    badges: list[tuple[str, str]] = re.findall(
+        r'\[!\[CI\]\((.*?)\)\]\((.*?)\)',
+        README.read_text(encoding='ascii'),
+    )
+    assert badges == [
+        (
+            f'{workflow}/badge.svg?branch=master',
+            f'{workflow}?query=branch%3Amaster',
+        )
+    ]
+
+
 @pytest.mark.parametrize('source', EXAMPLES)
 def test_readme_python_example(source: str, tmp_path: pathlib.Path) -> None:
     result: subprocess.CompletedProcess[str] = subprocess.run(
