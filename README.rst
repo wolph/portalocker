@@ -278,6 +278,9 @@ If it saved you an afternoon, a tip covers an hour of issue triage:
 `Ko-fi <https://ko-fi.com/wolph_gh>`_ or
 `GitHub Sponsors <https://github.com/sponsors/wolph>`_.
 
+If your company funds its dependencies, this package is on
+`thanks.dev <https://thanks.dev/u/gh/wolph>`_.
+
 .. image:: https://ko-fi.com/img/githubbutton_sm.svg
    :target: https://ko-fi.com/wolph_gh
    :alt: Support on Ko-fi
