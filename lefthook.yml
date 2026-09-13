@@ -21,8 +21,8 @@ pre-commit:
     ruff:
       glob: '*.py'
       run: |
-        {ruff} check --exit-zero --fix {staged_files}
-        {ruff} format {staged_files}
+        {ruff} check --fix {staged_files} &&
+          {ruff} format {staged_files}
       stage_fixed: true
     nbstripout:
       glob: '*.ipynb'

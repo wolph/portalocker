@@ -1,6 +1,7 @@
 # We keep the ruff configuration separate so it can easily be shared across
 # all projects
 target-version = 'py310'
+force-exclude = true
 
 src = ['.']
 
@@ -108,4 +109,3 @@ max-line-length = 79
 
 [lint.flake8-pytest-style]
 mark-parentheses = true
-
