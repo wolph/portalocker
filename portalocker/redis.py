@@ -54,7 +54,7 @@ a connection error or a failed self-check. The subscription lives on a
 dedicated connection that never reconnects: a resurrected subscription
 would be a silent re-acquisition that skipped the election. Once the
 worker records loss, `RedisLock.ensure_held` raises
-`~portalocker.exceptions.LockLostError`, the ``with`` block exit raises
+:exc:`~portalocker.exceptions.LockLostError`, the ``with`` block exit raises
 it too if the body finished cleanly, and an ``on_lost`` callback fires on
 the reader thread. By default, a loss also requests a main-thread
 ``KeyboardInterrupt`` (``interrupt_on_lost``, opt-in from 5.0.0 onwards).
@@ -222,7 +222,7 @@ class RedisLockSelfCheckError(redis_exceptions.ConnectionError):
     classifies a failed self-check as a connection loss and surfaces it
     exactly like a socket error: `RedisLock.lost` turns `True`,
     `RedisLock.ensure_held` and the ``with`` block exit raise
-    `~portalocker.exceptions.LockLostError` with this error as
+    :exc:`~portalocker.exceptions.LockLostError` with this error as
     ``__cause__``, ``on_lost`` fires, and ``interrupt_on_lost`` behaves
     as it would for a dead socket.
 
@@ -614,7 +614,7 @@ class RedisLock(utils.LockBase['RedisLock']):
     The holder observes loss separately, when its keep-alive thread
     detects the failed connection. `lost` turns True, `ensure_held` and
     the ``with``
-    block exit raise `~portalocker.exceptions.LockLostError`, an
+    block exit raise :exc:`~portalocker.exceptions.LockLostError`, an
     optional `on_lost` callback fires, and (by default in 4.2, opt-in
     from 5.0.0) the main thread is interrupted. The subscription lives
     on a dedicated connection that never retries or reconnects, because
@@ -655,7 +655,7 @@ class RedisLock(utils.LockBase['RedisLock']):
             lock itself is closed on release.
         timeout: timeout when trying to acquire a lock
         check_interval: check interval while waiting
-        fail_when_locked: Raise `~portalocker.exceptions.AlreadyLocked`
+        fail_when_locked: Raise :exc:`~portalocker.exceptions.AlreadyLocked`
             when the first acquisition attempt is blocked, without
             retrying until the timeout.
         thread_sleep_time: sleep time between fetching messages from redis to
@@ -693,7 +693,7 @@ class RedisLock(utils.LockBase['RedisLock']):
             `DeprecationWarning` at the moment a loss actually triggers
             the interrupt: portalocker 5.0.0 flips the default to
             `False`, surfacing losses only through
-            `~portalocker.exceptions.LockLostError`, `ensure_held`,
+            :exc:`~portalocker.exceptions.LockLostError`, `ensure_held`,
             `lost`, the ``with`` block exit and `on_lost`. Pass an
             explicit `True` or `False` to opt out of the warning.
             Delivery of the interrupt is best effort either way: it is
@@ -822,7 +822,7 @@ class RedisLock(utils.LockBase['RedisLock']):
     #: needs to exist between them.
     _lock_state: _LockState
     #: The error that killed the keep-alive worker, kept until the next
-    #: `acquire` so `~portalocker.exceptions.LockLostError` can carry it
+    #: `acquire` so :exc:`~portalocker.exceptions.LockLostError` can carry it
     #: as ``__cause__``. Guarded by `_state_lock`.
     _lost_error: BaseException | None
     #: Monotonic instant the next self-check is due. Meaningful only
@@ -1537,7 +1537,7 @@ class RedisLock(utils.LockBase['RedisLock']):
 
         - `_LockState.HELD`: the lock is lost. The state moves to
           `_LockState.LOST`, the error is recorded for
-          `~portalocker.exceptions.LockLostError`, `on_lost` fires, and
+          :exc:`~portalocker.exceptions.LockLostError`, `on_lost` fires, and
           when `interrupt_on_lost` is set the main thread is
           interrupted. Connection errors log as an error without a
           traceback (an expected lifecycle event, just a bad one),
