@@ -1,3 +1,13 @@
+4.3.2:
+
+ * Restored the coverage badge. CI now merges the coverage data from
+   every matrix cell, holds the merged result to the same 100% threshold
+   each cell already enforces, and uploads it to Coveralls, so the badge
+   measures a build instead of repeating a fixed claim. This release
+   carries that README to PyPI. No library code changed.
+ * Refreshed the pinned revisions of the CI actions, ``setup-uv`` across
+   a major version among them.
+
 4.3.1:
 
  * Refreshed the README in Markdown and added a branded documentation
