@@ -7,10 +7,11 @@
 
 [![CI](https://github.com/wolph/portalocker/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/wolph/portalocker/actions/workflows/ci.yml?query=branch%3Amaster)
 [![Coverage](https://coveralls.io/repos/github/wolph/portalocker/badge.svg?branch=master)](https://coveralls.io/github/wolph/portalocker?branch=master)
-[![PyPI](https://img.shields.io/pypi/v/portalocker)](https://pypi.org/project/portalocker/)
-[![Python versions](https://img.shields.io/pypi/pyversions/portalocker)](https://pypi.org/project/portalocker/)
-[![Documentation](https://readthedocs.org/projects/portalocker/badge/?version=latest)](https://portalocker.readthedocs.io/en/latest/)
-[![Licence](https://img.shields.io/pypi/l/portalocker)](https://github.com/wolph/portalocker/blob/develop/LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/portalocker?style=flat)](https://pypi.org/project/portalocker/)
+[![Downloads](https://img.shields.io/pypi/dm/portalocker?style=flat)](https://pypistats.org/packages/portalocker)
+[![Python versions](https://img.shields.io/pypi/pyversions/portalocker?style=flat)](https://pypi.org/project/portalocker/)
+[![Documentation](https://readthedocs.org/projects/portalocker/badge/?version=latest&style=flat)](https://portalocker.readthedocs.io/en/latest/)
+[![Licence](https://img.shields.io/pypi/l/portalocker?style=flat)](https://github.com/wolph/portalocker/blob/develop/LICENSE)
 
 Portalocker provides file locks for Python on Linux, macOS and Windows.
 Use a context manager to coordinate access between processes, a semaphore to
