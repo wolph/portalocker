@@ -4,6 +4,7 @@ import pathlib
 import re
 import subprocess
 import sys
+from urllib.parse import SplitResult, parse_qs, urlsplit
 
 import pytest
 
@@ -29,12 +30,22 @@ def test_ci_badge_tracks_master() -> None:
         r'\[!\[CI\]\((.*?)\)\]\((.*?)\)',
         README.read_text(encoding='ascii'),
     )
-    assert badges == [
-        (
-            f'{workflow}/badge.svg?branch=master',
-            f'{workflow}?query=branch%3Amaster',
-        )
-    ]
+    assert len(badges) == 1
+    image: SplitResult = urlsplit(badges[0][0])
+    assert image.scheme == 'https'
+    assert image.netloc == 'img.shields.io'
+    assert image.path == (
+        '/github/actions/workflow/status/wolph/portalocker/ci.yml'
+    )
+    assert parse_qs(image.query) == {
+        'branch': ['master'],
+        'label': ['CI'],
+        'style': ['flat-square'],
+        'labelColor': ['555'],
+    }
+    destination: SplitResult = urlsplit(badges[0][1])
+    assert destination._replace(query='').geturl() == workflow
+    assert parse_qs(destination.query) == {'query': ['branch:master']}
 
 
 @pytest.mark.parametrize('source', EXAMPLES)
