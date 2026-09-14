@@ -161,6 +161,14 @@ relative_files = true
 source = ['portalocker', 'portalocker_tests']
 plugins = ['coverage_conditional_plugin']
 
+# `coverage combine` merges the CI matrix data files on Linux, so the
+# Windows cells arrive with backslash-separated relative paths. These
+# aliases fold both spellings onto the checked-out tree; without them the
+# same module counts as two files and the combined report goes wrong.
+[tool.coverage.paths]
+source = ['portalocker', '*/portalocker', '*\portalocker']
+tests = ['portalocker_tests', '*/portalocker_tests', '*\portalocker_tests']
+
 [tool.coverage.report]
 fail_under = 100
 ignore_errors = true

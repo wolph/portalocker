@@ -6,6 +6,7 @@
 # Coordinate access. Keep your code simple.
 
 [![CI](https://github.com/wolph/portalocker/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/wolph/portalocker/actions/workflows/ci.yml?query=branch%3Amaster)
+[![Coverage](https://coveralls.io/repos/github/wolph/portalocker/badge.svg?branch=master)](https://coveralls.io/github/wolph/portalocker?branch=master)
 [![PyPI](https://img.shields.io/pypi/v/portalocker)](https://pypi.org/project/portalocker/)
 [![Python versions](https://img.shields.io/pypi/pyversions/portalocker)](https://pypi.org/project/portalocker/)
 [![Documentation](https://readthedocs.org/projects/portalocker/badge/?version=latest)](https://portalocker.readthedocs.io/en/latest/)

@@ -85,9 +85,19 @@ jobs:
           redis-version: '7.x'
       - name: Run tests
         run: uv run --no-default-groups --extra tests pytest -v
+        env:
+          COVERAGE_FILE: .coverage.${{ matrix.os }}-${{ matrix.python-version }}
       - name: Require live Redis tests
         if: runner.os == 'Linux' && !startsWith(matrix.python-version, 'pypy')
         run: uv run tox -e redis-live
+      - name: Store coverage data
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.os }}-${{ matrix.python-version }}
+          path: .coverage.*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
 
   test-windows-pywin32:
     runs-on: windows-latest
@@ -101,3 +111,48 @@ jobs:
           python-version: '3.13'
       - name: Run tests with pywin32 installed
         run: uv run --no-default-groups --extra tests --extra win32 pytest -v
+        env:
+          COVERAGE_FILE: .coverage.windows-latest-pywin32
+      - name: Store coverage data
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-windows-latest-pywin32
+          path: .coverage.*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  # Every matrix cell already enforces 100% on its own platform. This job
+  # merges their data files so Coveralls reports a single number for the
+  # whole matrix instead of whichever cell uploaded last, and so the badge
+  # measures a build rather than repeating a hardcoded claim.
+  coverage:
+    name: Coverage
+    needs: [test, test-windows-pywin32]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          python-version: '3.13'
+      - name: Collect coverage data
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+      - name: Combine coverage data
+        run: uv run --no-default-groups --extra tests coverage combine
+      # `fail_under = 100` lives in pyproject.toml, so this step is the gate
+      # on the merged result and not only a report.
+      - name: Report combined coverage
+        run: uv run --no-default-groups --extra tests coverage report --show-missing
+      - name: Convert coverage data to lcov
+        run: uv run --no-default-groups --extra tests coverage lcov -o coverage.lcov
+      - name: Upload coverage to Coveralls
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
+        with:
+          file: coverage.lcov
+          format: lcov
