@@ -5,13 +5,13 @@
 
 # Coordinate access. Keep your code simple.
 
-[![CI](https://github.com/wolph/portalocker/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/wolph/portalocker/actions/workflows/ci.yml?query=branch%3Amaster)
-[![Coverage](https://coveralls.io/repos/github/wolph/portalocker/badge.svg?branch=master)](https://coveralls.io/github/wolph/portalocker?branch=master)
-[![PyPI](https://img.shields.io/pypi/v/portalocker?style=plastic)](https://pypi.org/project/portalocker/)
-[![Downloads](https://static.pepy.tech/badge/portalocker/month)](https://pepy.tech/projects/portalocker)
-[![Python versions](https://img.shields.io/pypi/pyversions/portalocker?style=plastic)](https://pypi.org/project/portalocker/)
-[![Documentation](https://img.shields.io/readthedocs/portalocker/latest?style=plastic)](https://portalocker.readthedocs.io/en/latest/)
-[![Licence](https://img.shields.io/pypi/l/portalocker?style=plastic)](https://github.com/wolph/portalocker/blob/develop/LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/wolph/portalocker/ci.yml?branch=master&label=CI&style=flat-square&labelColor=555)](https://github.com/wolph/portalocker/actions/workflows/ci.yml?query=branch%3Amaster)
+[![Coverage](https://img.shields.io/coverallsCoverage/github/wolph/portalocker?branch=master&style=flat-square&labelColor=555)](https://coveralls.io/github/wolph/portalocker?branch=master)
+[![PyPI](https://img.shields.io/pypi/v/portalocker?style=flat-square&labelColor=555&color=007ec6)](https://pypi.org/project/portalocker/)
+[![Downloads](https://img.shields.io/badge/dynamic/xml?url=https%3A%2F%2Fapi.pepy.tech%2Fbadge%2Fportalocker%2Fmonth&query=%28%2F%2F%2A%5Blocal-name%28%29%3D%22text%22%5D%29%5Blast%28%29%5D&label=downloads%2Fmonth&style=flat-square&labelColor=555&color=007ec6)](https://pepy.tech/projects/portalocker)
+[![Python versions](https://img.shields.io/pypi/pyversions/portalocker?style=flat-square&labelColor=555&color=007ec6)](https://pypi.org/project/portalocker/)
+[![Documentation](https://img.shields.io/readthedocs/portalocker/latest?style=flat-square&labelColor=555)](https://portalocker.readthedocs.io/en/latest/)
+[![Licence](https://img.shields.io/pypi/l/portalocker?style=flat-square&labelColor=555&color=007ec6)](https://github.com/wolph/portalocker/blob/develop/LICENSE)
 
 Portalocker provides file locks for Python on Linux, macOS and Windows.
 Use a context manager to coordinate access between processes, a semaphore to
