@@ -2,7 +2,7 @@ version: 2
 updates:
   - package-ecosystem: github-actions
     directory: /
-    target-branch: master
+    target-branch: develop
     labels:
       - "meta: CI"
     schedule:
@@ -16,7 +16,7 @@ updates:
 
   - package-ecosystem: pip
     directory: /
-    target-branch: master
+    target-branch: develop
     labels:
       - "meta: deps"
     schedule:

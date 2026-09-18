@@ -156,3 +156,83 @@ jobs:
         with:
           file: coverage.lcov
           format: lcov
+
+  # Dependabot opens against the default branch whenever target-branch is
+  # absent, and its security updates ignore target-branch entirely and always
+  # use the default branch. Either route lands a commit on master, which
+  # re-diverges it from develop and turns the next release merge into a
+  # conflict resolution. Both invariants are one line of config each and
+  # neither announces itself when it changes, so assert them here.
+  repo-config:
+    name: Repository configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: '3.13'
+          enable-cache: false
+      - name: Dependabot and the default branch both point at develop
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          default_branch="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.default_branch')"
+          export DEFAULT_BRANCH="$default_branch"
+          uv run --no-project --with pyyaml python - <<'PY'
+          import os
+          import pathlib
+          import sys
+
+          import yaml
+
+          WANTED = 'develop'
+          problems: list[str] = []
+
+          default_branch: str = os.environ['DEFAULT_BRANCH']
+          if default_branch != WANTED:
+              problems.append(
+                  f'the default branch is {default_branch!r}, not {WANTED!r}. '
+                  f'Dependabot security updates always open against the '
+                  f'default branch and cannot be redirected.'
+              )
+
+          # The config file is optional: without it Dependabot still runs
+          # security updates, and those follow the default branch checked
+          # above. Once it exists, every entry has to name develop, because an
+          # entry without target-branch falls back to the default branch of
+          # the day rather than to develop by name.
+          config_path: pathlib.Path = pathlib.Path('.github/dependabot.yml')
+          updates: list[dict[str, object]] = []
+          if config_path.exists():
+              config: dict[str, object] = yaml.safe_load(
+                  config_path.read_text()
+              )
+              updates = config.get('updates') or []
+              if not updates:
+                  problems.append('.github/dependabot.yml declares no updates')
+
+              for entry in updates:
+                  ecosystem: object = entry.get('package-ecosystem', '<unnamed>')
+                  directory: object = entry.get('directory', '<unset>')
+                  target: object = entry.get('target-branch')
+                  if target != WANTED:
+                      problems.append(
+                          f'{ecosystem} in {directory} targets {target!r}, '
+                          f'not {WANTED!r}'
+                      )
+
+          if problems:
+              for problem in problems:
+                  print(f'error: {problem}', file=sys.stderr)
+              sys.exit(1)
+
+          print(
+              f'The default branch and {len(updates)} Dependabot update(s) '
+              f'all point at {WANTED!r}.'
+          )
+          PY
