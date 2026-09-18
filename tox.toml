@@ -40,7 +40,17 @@ commands = [['pytest', { replace = 'posargs', extend = true }]]
 labels = ['check']
 skip_install = true
 deps = ['ruff']
+pass_env = ['RUFF_OUTPUT_FORMAT']
 commands = [['ruff', 'check'], ['ruff', 'format', '--check']]
+
+# Applies every fix ruff has and never fails, so it can run ahead of the
+# gate above without hiding the findings ruff cannot fix itself.
+[env.ruff-fix]
+labels = ['fix']
+description = 'apply every fix ruff can make'
+skip_install = true
+deps = ['ruff']
+commands = [['ruff', 'check', '--fix', '--exit-zero'], ['ruff', 'format']]
 
 [env.mypy]
 labels = ['check']
