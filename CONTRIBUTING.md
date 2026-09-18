@@ -15,6 +15,28 @@ Tests require 100% branch coverage for code reachable on the current platform.
 Ruff checks formatting and lint rules. Mypy, basedpyright, pyrefly and ty check
 the package and tests. Tool versions remain unpinned so new releases are tested.
 
+## Formatting
+
+Do not spend time on quote styles and docstring capitalisation. Ruff fixes
+those itself, and the autofix.ci app commits the result to your pull request
+branch, so a lint failure on a fixable rule is nobody's homework. Apply the
+same fixes locally with:
+
+```console
+uv run tox -e ruff-fix
+```
+
+Installing the git hooks runs that on every commit, along with the pyproject
+and notebook checks:
+
+```console
+uvx lefthook install
+```
+
+What is left after the fixes is a real question, such as whether a
+`pytest.raises(match=...)` pattern was meant as a regular expression. Those
+still fail the build and want an answer rather than a rerun.
+
 To require live Redis coverage, start a disposable Redis server and run:
 
 ```console

@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [ruff, mypy, basedpyright, pyrefly, ty, codespell, repo-review, docs]
+        env: [mypy, basedpyright, pyrefly, ty, codespell, repo-review, docs]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -30,6 +30,30 @@ jobs:
         with:
           python-version: '3.13'
       - run: uv run tox -e ${{ matrix.env }}
+
+  # A quote style ruff can rewrite on its own is not worth a red cross on
+  # someone's first pull request, so pull requests get the fixes applied
+  # before the gate runs and only report what is left, which is always a
+  # question a person has to answer. autofix.yml pushes those same fixes
+  # to the branch. Pushes to develop and master check the tree as it is,
+  # so non-conforming code cannot land even with the app uninstalled.
+  ruff:
+    name: checks (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: '3.13'
+      - if: github.event_name == 'pull_request'
+        run: uv run tox -e ruff-fix
+      - run: uv run tox -e ruff
+        env:
+          RUFF_OUTPUT_FORMAT: >-
+            ${{ github.event_name == 'pull_request' && 'github' || 'full' }}
 
   zizmor:
     name: Workflow security
