@@ -578,9 +578,22 @@ class LockBase(
 
         Note:
             The defaults are resolved through `coalesce`, which uses an
-            identity check. Passing ``0`` or ``False`` therefore keeps that
-            value; only a literal `None` falls back to the default.
+            identity check. Passing ``0`` therefore keeps that value; only a
+            literal `None` falls back to the default. ``fail_when_locked``
+            remains a bool; ``timeout`` and ``check_interval`` reject bool
+            because ``bool`` subclasses ``int`` and would silently become
+            ``1`` / ``0`` seconds.
         """
+        # bool subclasses int; timeout=True would silently become 1 second
+        if isinstance(timeout, bool):
+            raise TypeError(
+                f"timeout must be a float or None, not bool (got {timeout!r})"
+            )
+        if isinstance(check_interval, bool):
+            raise TypeError(
+                "check_interval must be a float or None, not bool "
+                f"(got {check_interval!r})"
+            )
         self.timeout = coalesce(timeout, DEFAULT_TIMEOUT)
         self.check_interval = coalesce(check_interval, DEFAULT_CHECK_INTERVAL)
         self.fail_when_locked = coalesce(
