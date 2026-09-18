@@ -587,12 +587,12 @@ class LockBase(
         # bool subclasses int; timeout=True would silently become 1 second
         if isinstance(timeout, bool):
             raise TypeError(
-                f"timeout must be a float or None, not bool (got {timeout!r})"
+                f'timeout must be a float or None, not bool (got {timeout!r})'
             )
         if isinstance(check_interval, bool):
             raise TypeError(
-                "check_interval must be a float or None, not bool "
-                f"(got {check_interval!r})"
+                'check_interval must be a float or None, not bool '
+                f'(got {check_interval!r})'
             )
         self.timeout = coalesce(timeout, DEFAULT_TIMEOUT)
         self.check_interval = coalesce(check_interval, DEFAULT_CHECK_INTERVAL)
