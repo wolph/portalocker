@@ -1,3 +1,17 @@
+4.4.0:
+
+ * Deprecated passing a bool as ``timeout`` or ``check_interval``.
+   ``bool`` subclasses ``int``, so ``Lock(timeout=True)`` has always
+   meant one second and ``timeout=False`` zero, rather than anything the
+   caller intended. The value is still honoured and now warns, and it
+   raises ``TypeError`` in 5.0. Reported and originally patched by Jon
+   Bailey.
+ * Pull requests no longer fail on lint findings ruff can fix by itself.
+   CI applies those fixes and the autofix.ci app commits them to the
+   branch, forks included, so the build only stops for findings that
+   need a decision, such as whether a ``pytest.raises`` pattern was
+   meant as a regular expression. No library code changed for this.
+
 4.3.2:
 
  * Restored the coverage badge. CI now merges the coverage data from
