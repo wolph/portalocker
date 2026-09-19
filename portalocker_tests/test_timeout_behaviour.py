@@ -95,17 +95,18 @@ def test_timeout_generator_zero_interval_keeps_floor(tmpfile):
     assert attempts < 100
 
 
-def test_timeout_rejects_bool(tmpfile):
-    """Bool subclasses int; timeout=True must not silently become 1 second."""
-    with pytest.raises(TypeError, match=r'timeout.*bool'):
-        portalocker.Lock(tmpfile, timeout=True)
-    with pytest.raises(TypeError, match=r'timeout.*bool'):
-        portalocker.Lock(tmpfile, timeout=False)
+def test_timeout_bool_warns(tmpfile):
+    """Bool subclasses int, so timeout=True quietly means one second."""
+    for value, seconds in ((True, 1), (False, 0)):
+        with pytest.warns(DeprecationWarning, match=r'timeout.*bool'):
+            lock = portalocker.Lock(tmpfile, timeout=value)
+        # Still honoured until 5.0, warning or not.
+        assert lock.timeout == seconds
 
 
-def test_check_interval_rejects_bool(tmpfile):
-    """Bool subclasses int; check_interval=True must not silently become 1."""
-    with pytest.raises(TypeError, match=r'check_interval.*bool'):
-        portalocker.Lock(tmpfile, check_interval=True)
-    with pytest.raises(TypeError, match=r'check_interval.*bool'):
-        portalocker.Lock(tmpfile, check_interval=False)
+def test_check_interval_bool_warns(tmpfile):
+    """Bool subclasses int, so check_interval=True quietly means one."""
+    for value, seconds in ((True, 1), (False, 0)):
+        with pytest.warns(DeprecationWarning, match=r'check_interval.*bool'):
+            lock = portalocker.Lock(tmpfile, check_interval=value)
+        assert lock.check_interval == seconds
