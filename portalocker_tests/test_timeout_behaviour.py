@@ -93,3 +93,20 @@ def test_timeout_generator_zero_interval_keeps_floor(tmpfile):
     # The 1ms sleep floor allows roughly 50 attempts in 50ms. Hundreds
     # would mean the floor is gone and the generator spins flat out.
     assert attempts < 100
+
+
+def test_timeout_bool_warns(tmpfile):
+    """Bool subclasses int, so timeout=True quietly means one second."""
+    for value, seconds in ((True, 1), (False, 0)):
+        with pytest.warns(DeprecationWarning, match=r'timeout.*bool'):
+            lock = portalocker.Lock(tmpfile, timeout=value)
+        # Still honoured until 5.0, warning or not.
+        assert lock.timeout == seconds
+
+
+def test_check_interval_bool_warns(tmpfile):
+    """Bool subclasses int, so check_interval=True quietly means one."""
+    for value, seconds in ((True, 1), (False, 0)):
+        with pytest.warns(DeprecationWarning, match=r'check_interval.*bool'):
+            lock = portalocker.Lock(tmpfile, check_interval=value)
+        assert lock.check_interval == seconds

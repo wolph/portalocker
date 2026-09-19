@@ -576,11 +576,45 @@ class LockBase(
             fail_when_locked: Value for the `fail_when_locked` attribute.
                 `None` selects `DEFAULT_FAIL_WHEN_LOCKED`.
 
+        Warns:
+            DeprecationWarning: When ``timeout`` or ``check_interval``
+                is a bool. The stacklevel is computed by
+                `_stacklevel_beyond_module`, so the warning names the
+                caller's own file however many subclass constructors sit
+                between them and here.
+
         Note:
             The defaults are resolved through `coalesce`, which uses an
-            identity check. Passing ``0`` or ``False`` therefore keeps that
-            value; only a literal `None` falls back to the default.
+            identity check. Passing ``0`` therefore keeps that value; only a
+            literal `None` falls back to the default. ``fail_when_locked``
+            remains a bool.
+
+        .. deprecated:: 4.4.0
+            Passing a bool as ``timeout`` or ``check_interval``. ``bool``
+            subclasses `int`, so ``True`` means one second and ``False``
+            means zero rather than anything the caller intended. It still
+            behaves that way for now and will raise `TypeError` in 5.0.
         """
+        # bool subclasses int, so timeout=True silently means one second.
+        # Raising here would break code that works today, so the bool is
+        # still honoured and only warned about until 5.0.
+        # Typed as object because `float` already covers `bool` through
+        # the numeric tower, so a narrower type makes the isinstance
+        # check look unreachable to a type checker.
+        checked: tuple[tuple[str, object], ...] = (
+            ('timeout', timeout),
+            ('check_interval', check_interval),
+        )
+        for name, value in checked:
+            if isinstance(value, bool):
+                warnings.warn(
+                    f'{name}={value!r} is a bool. bool subclasses '
+                    f'int, so this means {int(value)}. Pass a number '
+                    f'or None instead. Passing a bool will raise '
+                    f'TypeError in portalocker 5.0.',
+                    DeprecationWarning,
+                    stacklevel=_stacklevel_beyond_module(),
+                )
         self.timeout = coalesce(timeout, DEFAULT_TIMEOUT)
         self.check_interval = coalesce(check_interval, DEFAULT_CHECK_INTERVAL)
         self.fail_when_locked = coalesce(
