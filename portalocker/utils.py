@@ -293,6 +293,10 @@ def open_atomic(
     handle itself is fine: the file is synchronized through a fresh
     descriptor instead.
 
+    Relative destinations are anchored when entering the context, so a
+    working-directory change in the body does not redirect publication
+    or temporary-file cleanup.
+
     Note:
         The destination *content* is synchronized to disk before
         publication, but the directory entry is not (no ``fsync`` on the
@@ -324,6 +328,8 @@ def open_atomic(
         path = filename
     else:
         path = pathlib.Path(filename)
+
+    path = path.absolute()
 
     if path.exists():
         raise FileExistsError(

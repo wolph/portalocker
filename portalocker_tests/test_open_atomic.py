@@ -13,6 +13,72 @@ import pytest
 
 import portalocker
 
+
+@pytest.mark.parametrize('absolute', [False, True])
+@pytest.mark.parametrize('as_string', [False, True])
+@pytest.mark.parametrize('close_in_body', [False, True])
+def test_open_atomic_publishes_after_chdir(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    absolute: bool,
+    as_string: bool,
+    close_in_body: bool,
+) -> None:
+    """Publication stays in the directory where the context was entered."""
+    original = tmp_path / 'original'
+    other = tmp_path / 'other'
+    original.mkdir()
+    other.mkdir()
+    monkeypatch.chdir(original)
+    target = pathlib.Path('result.bin')
+    if absolute:
+        target = original / target
+    filename = str(target) if as_string else target
+
+    with portalocker.open_atomic(filename) as file_handle:
+        temporary = typing.cast(typing.BinaryIO, file_handle)
+        temporary.write(b'complete payload')
+        if close_in_body:
+            temporary.close()
+        monkeypatch.chdir(other)
+
+    assert (original / 'result.bin').read_bytes() == b'complete payload'
+    assert list(original.iterdir()) == [original / 'result.bin']
+    assert not any(other.iterdir())
+
+
+@pytest.mark.parametrize('absolute', [False, True])
+@pytest.mark.parametrize('as_string', [False, True])
+def test_open_atomic_cleans_up_after_chdir(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    absolute: bool,
+    as_string: bool,
+) -> None:
+    """A failing body removes its temporary file after changing directory."""
+    original = tmp_path / 'original'
+    other = tmp_path / 'other'
+    original.mkdir()
+    other.mkdir()
+    monkeypatch.chdir(original)
+    target = pathlib.Path('result.bin')
+    if absolute:
+        target = original / target
+    filename = str(target) if as_string else target
+
+    with (
+        pytest.raises(RuntimeError, match='body failed'),
+        portalocker.open_atomic(filename) as file_handle,
+    ):
+        temporary = typing.cast(typing.BinaryIO, file_handle)
+        temporary.write(b'incomplete payload')
+        monkeypatch.chdir(other)
+        raise RuntimeError('body failed')
+
+    assert not any(original.iterdir())
+    assert not any(other.iterdir())
+
+
 # The hard link publication (and therefore its rename fallback for
 # filesystems without hard links) only exists on the POSIX code path.
 # Windows always publishes with an atomic rename.
