@@ -1,3 +1,14 @@
+4.4.1:
+
+ * ``open_atomic`` now anchors a relative destination when the context is
+   entered, so a working-directory change inside the body no longer makes
+   publication raise ``FileNotFoundError`` or leaves the temporary file
+   behind after a failing body. As a consequence the ``name`` of the
+   yielded handle and the paths in its ``FileExistsError`` messages are
+   now absolute. Reported and fixed by Luochenchen.
+ * Refreshed the pinned revisions of the CI actions, ``setup-uv`` and
+   ``codeql-action`` among them. No library code changed for this.
+
 4.4.0:
 
  * Deprecated passing a bool as ``timeout`` or ``check_interval``.
