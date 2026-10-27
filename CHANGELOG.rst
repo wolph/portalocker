@@ -1,3 +1,12 @@
+4.4.2:
+
+ * The build backend requirement is now ``uv_build>=0.11,<1`` instead of
+   ``<0.13``. Every uv minor so far shipped without a change to the
+   ``uv_build`` configuration, and the old bound only stopped other build
+   frontends and distribution packagers, Fedora with uv 0.13 among them,
+   from building the sdist. No library code changed for this. Reported
+   and originally patched by Jeremy Cline.
+
 4.4.1:
 
  * ``open_atomic`` now anchors a relative destination when the context is

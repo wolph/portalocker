@@ -1,10 +1,10 @@
 [build-system]
 build-backend = 'uv_build'
-requires = ['uv_build>=0.11,<0.13']
+requires = ['uv_build>=0.11,<1']
 
 [project]
 name = 'portalocker'
-version = '4.4.1'
+version = '4.4.2'
 dynamic = []
 description = 'Cross-platform file locking, with Redis, PID-file and bounded-semaphore locks'
 readme = 'README.md'
