@@ -3139,6 +3139,33 @@ class BoundedSemaphore(LockBase['Lock | None']):
                 stacklevel=2,
             )
 
+    def __getstate__(self) -> dict[str, typing.Any]:
+        """Return configuration for transferring an unheld semaphore.
+
+        The local thread lock is recreated by the recipient. A held slot
+        cannot be transferred: its open filehandle and ownership belong
+        to the instance that acquired it.
+
+        Raises:
+            TypeError: This semaphore currently holds a slot.
+        """
+        with self._state_lock:
+            if self.lock is not None:
+                raise TypeError('Cannot transfer an acquired semaphore')
+            state = vars(self).copy()
+            del state['_state_lock']
+            return state
+
+    def __setstate__(self, state: dict[str, typing.Any]) -> None:
+        """Restore configuration with process-local synchronization.
+
+        Args:
+            state: The unheld configuration returned by `__getstate__`.
+        """
+        vars(self).update(state)
+        self._state_lock = threading.RLock()
+        _live_locks.add(self)
+
     def get_filenames(self) -> typing.Sequence[pathlib.Path]:
         """Return the path of every slot, in order.
 
@@ -3388,6 +3415,10 @@ class NamedBoundedSemaphore(BoundedSemaphore):
     don't specify a name, a random name will be generated.  This means that
     you can't use the same semaphore in multiple processes unless you pass the
     semaphore object to the other processes.
+
+    Pass the object before acquiring a slot. Pickling or copying an
+    acquired semaphore raises `TypeError`; only the configuration of an
+    unheld semaphore is transferred, with a fresh local thread lock.
 
     The slot files live in `directory`, the shared system temporary
     directory by default. Prefer a private directory that no tmp cleaner
