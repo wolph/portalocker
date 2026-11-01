@@ -1,3 +1,11 @@
+Unreleased:
+
+ * Unheld bounded semaphores can again be passed to spawned worker
+   processes. Pickle and copy operations recreate the local thread lock
+   while preserving the shared slot configuration. Transferring an
+   acquired semaphore raises ``TypeError`` instead of copying ownership
+   of its open filehandle.
+
 4.4.2:
 
  * The build backend requirement is now ``uv_build>=0.11,<1`` instead of
