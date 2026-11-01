@@ -215,3 +215,58 @@ def test_restored_semaphore_reinitializes_its_state_lock_after_fork(
                 process.join(10)
         parent.close()
         child.close()
+
+
+class _SlottedSemaphore(portalocker.BoundedSemaphore):
+    __slots__ = ('extra',)
+
+    def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.extra: str = 'spam'
+
+
+@pytest.mark.parametrize('method', ['pickle', 'copy', 'deepcopy'])
+def test_transfer_keeps_subclass_slots(
+    tmp_path: pathlib.Path,
+    method: str,
+) -> None:
+    # 4.4.2 copied slot attributes through object.__reduce_ex__.
+    semaphore = _SlottedSemaphore(
+        1, name='slotted', directory=str(tmp_path), timeout=0
+    )
+    restored = restore(semaphore, method)
+    assert isinstance(restored, _SlottedSemaphore)
+    assert restored.extra == 'spam'
+    assert restored.lock is None
+
+
+class _BareSemaphore(portalocker.BoundedSemaphore):
+    def __init__(self) -> None:  # noqa: D107 - skips the base constructor
+        self.maximum: int = 2
+        self.name: str = 'bare'
+        self.filename_pattern: str = '{name}.{number:02d}.lock'
+        self.directory: str = ''
+        self.lock: utils.Lock | None = None
+
+
+def test_copy_of_subclass_without_base_init() -> None:
+    # 4.4.2 copied such an instance, which has no state lock to guard.
+    semaphore = _BareSemaphore()
+    restored = copy.copy(semaphore)
+    assert isinstance(restored, _BareSemaphore)
+    assert restored.maximum == 2
+    assert isinstance(restored._state_lock, type(threading.RLock()))
+
+
+class _UnassignedSlotSemaphore(portalocker.BoundedSemaphore):
+    __slots__ = 'unset'
+
+
+def test_transfer_skips_an_unassigned_slot(tmp_path: pathlib.Path) -> None:
+    # A declared but never assigned slot has no value to carry over.
+    semaphore = _UnassignedSlotSemaphore(
+        1, name='unset-slot', directory=str(tmp_path), timeout=0
+    )
+    restored = copy.copy(semaphore)
+    assert isinstance(restored, _UnassignedSlotSemaphore)
+    assert not hasattr(restored, 'unset')

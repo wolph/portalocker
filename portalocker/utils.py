@@ -3023,6 +3023,19 @@ class _PidFileLockFailClosedContext(
         return self._lock.__exit__(exc_type, exc_value, traceback)
 
 
+def _slot_names(cls: type) -> list[str]:
+    """Return every ``__slots__`` name declared along the MRO of ``cls``."""
+    names: list[str] = []
+    for klass in cls.__mro__:
+        slots: str | typing.Iterable[str] = klass.__dict__.get('__slots__', ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        names.extend(
+            name for name in slots if name not in {'__dict__', '__weakref__'}
+        )
+    return names
+
+
 class BoundedSemaphore(LockBase['Lock | None']):
     """
     Bounded semaphore to prevent too many parallel processes from running.
@@ -3149,11 +3162,22 @@ class BoundedSemaphore(LockBase['Lock | None']):
         Raises:
             TypeError: This semaphore currently holds a slot.
         """
-        with self._state_lock:
-            if self.lock is not None:
+        # A subclass that skipped the base constructor has no state lock and
+        # cannot hold a slot, so there is nothing to guard. 4.4.2 copied it.
+        state_lock: threading.RLock | None = getattr(self, '_state_lock', None)
+        guard: typing.ContextManager[typing.Any] = (
+            contextlib.nullcontext() if state_lock is None else state_lock
+        )
+        with guard:
+            if getattr(self, 'lock', None) is not None:
                 raise TypeError('Cannot transfer an acquired semaphore')
             state = vars(self).copy()
-            del state['_state_lock']
+            state.pop('_state_lock', None)
+            # `vars()` misses what a subclass keeps in `__slots__`. 4.4.2
+            # copied those through `object.__reduce_ex__`.
+            for name in _slot_names(type(self)):
+                if hasattr(self, name):
+                    state[name] = getattr(self, name)
             return state
 
     def __setstate__(self, state: dict[str, typing.Any]) -> None:
@@ -3162,7 +3186,8 @@ class BoundedSemaphore(LockBase['Lock | None']):
         Args:
             state: The unheld configuration returned by `__getstate__`.
         """
-        vars(self).update(state)
+        for name, value in state.items():
+            setattr(self, name, value)
         self._state_lock = threading.RLock()
         _live_locks.add(self)
 
