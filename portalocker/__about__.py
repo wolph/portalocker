@@ -5,7 +5,8 @@ metadata and falling back to parsing the local ``pyproject.toml`` when
 needed.
 """
 
-import re
+import os
+import stat
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 
@@ -15,13 +16,67 @@ __email__ = 'wolph@wol.ph'
 __description__ = 'Wraps the portalocker recipe for easy usage'
 __url__ = 'https://github.com/WoLpH/portalocker'
 
+#: Bytes of ``pyproject.toml`` the fallback is prepared to read. The
+#: ``[project]`` table of this package sits in the first few kilobytes
+#: of its own file; anything larger than this is not that file.
+_PYPROJECT_READ_LIMIT: int = 64 * 1024
+
+
+def _read_prefix(path: Path, limit: int) -> str | None:
+    """Read at most ``limit`` bytes from the regular file at ``path``.
+
+    The probe runs at import time against a directory the package does
+    not own (the one above it), so it never follows a symlink, never
+    reads anything but a regular file, and never reads more than
+    ``limit`` bytes. Undecodable bytes are replaced rather than raised.
+
+    Args:
+        path: The file to read.
+        limit: The number of bytes to read at most.
+
+    Returns:
+        The decoded prefix, or ``None`` when the file could not be read
+        or is not a regular file.
+    """
+    flags: int = (
+        os.O_RDONLY
+        | getattr(os, 'O_NOFOLLOW', 0)
+        | getattr(os, 'O_NONBLOCK', 0)
+        | getattr(os, 'O_CLOEXEC', 0)
+        | getattr(os, 'O_BINARY', 0)
+    )
+    try:
+        fd: int = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        return os.read(fd, limit).decode('utf-8', errors='replace')
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _unquote(value: str) -> str | None:
+    """Return the content of a single or double quoted TOML string."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in '\'"':
+        return value[1:-1]
+    return None
+
 
 def _read_pyproject_version(path: Path) -> str | None:
     """Read the version from a ``pyproject.toml`` file if available.
 
-    This uses a small regex parser that looks for the ``[project]`` table
-    and extracts the ``version`` value. It's intentionally minimal to avoid
-    runtime dependencies while keeping types precise.
+    A single linear pass over a bounded prefix of the file: only a
+    ``version`` key inside the ``[project]`` table counts, and only
+    when that table's ``name`` is this package. A ``pyproject.toml`` of
+    some other project above a vendored copy therefore never supplies
+    the version, and a huge planted file cannot stall the import. It is
+    intentionally minimal to avoid runtime dependencies while keeping
+    types precise.
 
     Args:
         path: Path to the ``pyproject.toml`` file.
@@ -29,16 +84,31 @@ def _read_pyproject_version(path: Path) -> str | None:
     Returns:
         The version string if it could be determined, otherwise ``None``.
     """
-    try:
-        content = path.read_text(encoding='utf-8')
-    except Exception:
+    content: str | None = _read_prefix(path, _PYPROJECT_READ_LIMIT)
+    if content is None:
         return None
 
-    match = re.search(
-        r"(?ms)^\[project\].*?^version\s*=\s*['\"]([^'\"]+)['\"]",
-        content,
-    )
-    return match.group(1) if match else None
+    in_project: bool = False
+    name: str | None = None
+    version: str | None = None
+    for raw_line in content.splitlines():
+        line: str = raw_line.strip()
+        if line.startswith('['):
+            if in_project:
+                break
+            in_project = line.rstrip() == '[project]'
+            continue
+        if not in_project or '=' not in line:
+            continue
+        key, _, value = line.partition('=')
+        key = key.strip()
+        if key == 'name':
+            name = _unquote(value)
+        elif key == 'version':
+            version = _unquote(value)
+    if name != __package_name__:
+        return None
+    return version
 
 
 def get_version() -> str:

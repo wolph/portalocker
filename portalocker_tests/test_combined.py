@@ -226,3 +226,23 @@ def test_combine_without_ruff_logs_and_still_runs(
     assert 'Ruff is not installed' in caplog.text
     # The smoke run of the combined file still happened.
     assert [sys.executable, str(output_file)] in calls
+
+
+def test_combine_bakes_the_version_string(tmp_path, monkeypatch):
+    """The vendorable file carries a literal version, not a probe.
+
+    ``__about__`` resolves the version at import time through installed
+    metadata and, failing that, a ``pyproject.toml`` above the package.
+    A single vendored file has neither, so the probe would read a file
+    the vendoring project does not own. ``combine`` therefore writes the
+    resolved version as a literal and the probe never runs there.
+    """
+    from portalocker import __about__
+
+    monkeypatch.setattr(subprocess, 'run', lambda *a, **k: None)
+    output_file = tmp_path / 'combined.py'
+    __main__.main(['combine', '--output-file', str(output_file)])
+    text = output_file.read_text()
+
+    assert '__version__ = get_version()' not in text
+    assert f'__version__ = {__about__.__version__!r}' in text
