@@ -35,9 +35,10 @@ import typing
 import fakeredis
 import pytest
 from redis import client
+from redis.connection import ConnectionPool
 
 import portalocker
-from portalocker import redis, utils
+from portalocker import exceptions, redis, utils
 
 from . import test_redis as _shared
 from .test_redis import ConnectionFactory, _disable_ping_handler, _wait_for
@@ -1037,3 +1038,134 @@ def test_slot_names_follow_copyreg() -> None:
         __slots__ = '__bare'
 
     assert redis._slot_names(_) == ['__bare', 'plain']
+
+
+@pytest.mark.parametrize(
+    ('payload', 'expected'),
+    [
+        (b'{"message": "ping"}', {'message': 'ping'}),
+        (bytearray(b'{"message": "ping"}'), {'message': 'ping'}),
+        (b'\xff\xfe', None),
+        (b'{' * 5000, None),
+        (b'[1]', None),
+        (None, None),
+        (42, None),
+    ],
+    ids=[
+        'bytes',
+        'bytearray',
+        'not-utf8',
+        'oversized',
+        'not-an-object',
+        'none',
+        'integer',
+    ],
+)
+def test_decode_frame_accepts_bytes_as_the_release_did(
+    payload: typing.Any, expected: dict[str, typing.Any] | None
+) -> None:
+    """A byte payload is a record when it decodes, as json.loads allowed."""
+    assert redis._decode_frame(payload) == expected
+
+
+def _bytes_client(factory: ConnectionFactory) -> client.Redis:
+    """A client on the same server that returns bytes, redis-py's default."""
+    pool: ConnectionPool = factory().connection_pool
+    pool_type: typing.Any = type(pool)
+    raw_pool: ConnectionPool = pool_type(
+        connection_class=pool.connection_class,
+        **{**pool.connection_kwargs, 'decode_responses': False},
+    )
+    return client.Redis(connection_pool=raw_pool)
+
+
+def test_holder_on_a_bytes_factory_client_answers_pings(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """A factory client with ``decode_responses=False`` keeps working."""
+    channel: str = str(random.random())
+    bytes_client: client.Redis = _bytes_client(redis_connection)
+    holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        subscription_connection_factory=lambda: bytes_client,
+        self_check_interval=0.05,
+        interrupt_on_lost=False,
+    )
+    prober: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        timeout=1,
+        unavailable_timeout=0.5,
+    )
+    holder.acquire()
+    try:
+        holders: list[redis.RedisLockHolder] = prober.probe(timeout=1)
+        assert [h.holder_id for h in holders] == [holder.holder_id]
+        time.sleep(0.3)
+        assert not holder.lost
+        holder.ensure_held()
+        with pytest.raises(exceptions.AlreadyLocked):
+            prober.acquire(timeout=0.3, fail_when_locked=True)
+    finally:
+        holder.release()
+        prober.release()
+
+
+class _PickyPool(ConnectionPool):
+    """A pool whose constructor the response-client derivation cannot call."""
+
+    def __init__(self, token: str, **kwargs: typing.Any) -> None:
+        self.token: str = token
+        super().__init__(**kwargs)
+
+
+def test_bytes_command_connection_behind_an_unclonable_pool_keeps_the_lock(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """The fallback reads byte replies on the command connection itself."""
+    channel: str = str(random.random())
+    pool: ConnectionPool = _bytes_client(redis_connection).connection_pool
+    picky: client.Redis = client.Redis(
+        connection_pool=_PickyPool(
+            'spam',
+            connection_class=pool.connection_class,
+            **pool.connection_kwargs,
+        ),
+    )
+    holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=picky,
+        thread_sleep_time=0.01,
+        subscription_connection_factory=lambda: redis_connection(),
+        self_check_interval=0.05,
+        interrupt_on_lost=False,
+    )
+    other: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        timeout=1,
+        unavailable_timeout=0.5,
+    )
+    other_holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+    )
+    other_holder.acquire()
+    try:
+        assert holder._get_response_client(picky) is picky
+        holders: list[redis.RedisLockHolder] = holder.probe(timeout=1)
+        assert [h.holder_id for h in holders] == [other_holder.holder_id]
+    finally:
+        other_holder.release()
+    holder.acquire()
+    try:
+        time.sleep(0.3)
+        assert not holder.lost
+        holder.ensure_held()
+        assert [h.holder_id for h in other.probe(timeout=1)] == [
+            holder.holder_id
+        ]
+    finally:
+        holder.release()

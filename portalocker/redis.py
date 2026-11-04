@@ -183,14 +183,16 @@ def _decode_frame(raw_data: typing.Any) -> dict[str, typing.Any] | None:
 
     The lock channel and every response channel are writable by any
     client of the server, so a frame can be anything at all. Only a
-    string of at most `_MAX_FRAME_CHARS` characters that decodes to a
-    JSON object is accepted; everything else - bytes, oversized
-    payloads, invalid JSON, numbers past the integer conversion limit,
-    nesting deep enough to exhaust the parser, non-object documents -
-    yields `None`. Catching every `Exception` is deliberate: the
-    decoder raises plain `ValueError`, `RecursionError` and
-    `MemoryError` as well as `JSONDecodeError`, and none of them may
-    reach the worker's loss classifier.
+    string, or UTF-8 bytes from a client that does not decode responses
+    (redis-py's default, which the release accepted through
+    ``json.loads``), of at most `_MAX_FRAME_CHARS` characters or bytes
+    that decodes to a JSON object is accepted; everything else -
+    oversized payloads, bytes that are not UTF-8, invalid JSON, numbers
+    past the integer conversion limit, nesting deep enough to exhaust
+    the parser, non-object documents - yields `None`. Catching every
+    `Exception` is deliberate: the decoder raises plain `ValueError`,
+    `RecursionError` and `MemoryError` as well as `JSONDecodeError`,
+    and none of them may reach the worker's loss classifier.
 
     Args:
         raw_data: The payload exactly as received.
@@ -198,7 +200,9 @@ def _decode_frame(raw_data: typing.Any) -> dict[str, typing.Any] | None:
     Returns:
         The decoded object, or `None` when the frame is not a record.
     """
-    if not isinstance(raw_data, str) or len(raw_data) > _MAX_FRAME_CHARS:
+    if not isinstance(raw_data, (str, bytes, bytearray)):
+        return None
+    if len(raw_data) > _MAX_FRAME_CHARS:
         return None
     try:
         data: typing.Any = json.loads(raw_data)
