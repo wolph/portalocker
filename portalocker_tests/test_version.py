@@ -246,3 +246,64 @@ def test_read_pyproject_version_ignores_an_unquoted_version(
     )
 
     assert about._read_pyproject_version(path) is None
+
+
+@pytest.mark.parametrize(
+    ('toml', 'expected'),
+    [
+        ("[project]\nname = 'portalocker'\nversion = '9.9.9' # c\n", '9.9.9'),
+        ('[project]\nname = "portalocker"\nversion = """9.9.9"""\n', None),
+        ("[project]\nname = 'portalocker'\nversion = ''\n", None),
+        ("[project]\nname = 'Portalocker'\nversion = '9.9.9'\n", '9.9.9'),
+        ("[project]\nname = 'porta_locker'\nversion = '9.9.9'\n", None),
+        ("[project]\nname = 'portalocker'\nversion = '9.9.9\n", None),
+        ("[project]\nversion = '9.9.9'\n", None),
+        ("[project]\nname = 'portalocker'\nversion = '9.9.9' x\n", None),
+    ],
+    ids=[
+        'trailing-comment',
+        'triple-quoted',
+        'empty',
+        'case-insensitive-name',
+        'other-normalised-name',
+        'mismatched-quotes',
+        'no-name',
+        'trailing-junk',
+    ],
+)
+def test_read_pyproject_version_toml_edge_cases(
+    tmp_path: Path, toml: str, expected: str | None
+) -> None:
+    """Valid TOML shapes read as TOML would, invalid ones as nothing."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_text(toml, encoding='utf-8')
+
+    assert about._read_pyproject_version(path) == expected
+
+
+def test_read_pyproject_version_follows_a_symlinked_file(
+    tmp_path: Path,
+) -> None:
+    """A symlinked pyproject.toml (monorepo layouts) still resolves."""
+    import portalocker.__about__ as about
+
+    real = tmp_path / 'real.toml'
+    real.write_text("[project]\nname = 'portalocker'\nversion = '9.9.9'\n")
+    link = tmp_path / 'pyproject.toml'
+    link.symlink_to(real)
+
+    assert about._read_pyproject_version(link) == '9.9.9'
+
+
+def test_read_pyproject_version_rejects_undecodable_bytes(
+    tmp_path: Path,
+) -> None:
+    """A file that is not UTF-8 reads as nothing, as before."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_bytes(b"[project]\nname = 'portalocker'\nversion = '9.\xff9'\n")
+
+    assert about._read_pyproject_version(path) is None

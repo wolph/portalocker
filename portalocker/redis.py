@@ -214,15 +214,18 @@ def _read_frame(
     timeout: float,
     ignore_subscribe_messages: bool = False,
 ) -> dict[str, typing.Any] | None:
-    """Read one pubsub frame, treating an undecodable one as none.
+    """Read one pubsub frame with the typed shape the lock expects.
 
-    A response channel is writable by any client of the server, and a
-    client built with strict response decoding (redis-py's default,
-    and what a caller-supplied command connection or
-    ``subscription_connection_factory`` client usually carries) raises
-    ``UnicodeDecodeError`` from inside ``get_message`` for a frame that
-    is not UTF-8. The frame was consumed before the decode ran, so the
-    connection stays usable and the frame can simply count as noise.
+    A thin wrapper around ``get_message``: redis-py does not annotate
+    it, and the two keyword shapes the lock uses are kept apart so test
+    doubles that only accept ``timeout`` keep working. Errors propagate.
+    A decode error on a strict connection is deliberately *not* caught
+    here: redis-py's pure-python parser stays in error after one
+    undecodable frame, so swallowing the exception would leave a reader
+    that never sees another frame while reporting the lock held. The
+    lock avoids the error instead, by reading replies through a client
+    that decodes with replacement (see `RedisLock._get_response_client`
+    and `RedisLock._make_subscription_client`).
 
     Args:
         pubsub: The subscription to read from.
@@ -230,25 +233,61 @@ def _read_frame(
         ignore_subscribe_messages: Passed through to redis-py.
 
     Returns:
-        The frame, or `None` when nothing arrived or the frame could
-        not be decoded.
+        The frame, or `None` when nothing arrived.
     """
-    try:
-        if ignore_subscribe_messages:
-            return typing.cast(
-                'dict[str, typing.Any] | None',
-                pubsub.get_message(
-                    ignore_subscribe_messages=True,
-                    timeout=timeout,
-                ),
-            )
+    if ignore_subscribe_messages:
         return typing.cast(
             'dict[str, typing.Any] | None',
-            pubsub.get_message(timeout=timeout),
+            pubsub.get_message(
+                ignore_subscribe_messages=True,
+                timeout=timeout,
+            ),
         )
-    except UnicodeDecodeError:
-        logger.debug('dropped an undecodable pubsub frame')
-        return None
+    return typing.cast(
+        'dict[str, typing.Any] | None',
+        pubsub.get_message(timeout=timeout),
+    )
+
+
+def _slot_names(cls: type) -> list[str]:
+    """Return every ``__slots__`` name of ``cls`` and its bases, mangled.
+
+    Mirrors what copyreg collects for pickling: the ``__dict__`` and
+    ``__weakref__`` pseudo slots are skipped and a private name is
+    mangled the way the class body stored it.
+    """
+    names: list[str] = []
+    for klass in cls.__mro__:
+        declared: typing.Any = klass.__dict__.get('__slots__')
+        if declared is None:
+            continue
+        if isinstance(declared, str):
+            declared = [declared]
+        for name in declared:
+            if name in ('__dict__', '__weakref__'):
+                continue
+            if name.startswith('__') and not name.endswith('__'):
+                stripped: str = klass.__name__.lstrip('_')
+                if stripped:
+                    name = f'_{stripped}{name}'
+            names.append(name)
+    return names
+
+
+def _restore_copy_state(twin: typing.Any, state: typing.Any) -> None:
+    """Apply `RedisLock._copy_state` output the way ``copy`` would."""
+    setstate: typing.Any = getattr(twin, '__setstate__', None)
+    if callable(setstate):
+        setstate(state)
+        return
+    slots: dict[str, typing.Any] = {}
+    if isinstance(state, tuple):
+        state, slots = typing.cast(
+            'tuple[dict[str, typing.Any], dict[str, typing.Any]]', state
+        )
+    vars(twin).update(state)
+    for name, value in slots.items():
+        setattr(twin, name, value)
 
 
 def _keep_first_error(
@@ -1042,6 +1081,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         self.subscription_connection_factory = subscription_connection_factory
         self._subscription_client = None
         self._subscription_pid = None
+        self._response_client: redis.client.Redis | None = None
         # Guarded by the base class's `_state_lock` (created in
         # `super().__init__` below) from the moment a worker thread can
         # exist; only the constructor may assign without holding it.
@@ -1076,6 +1116,24 @@ class RedisLock(utils.LockBase['RedisLock']):
             fail_when_locked=fail_when_locked,
         )
 
+    def _copy_state(self) -> typing.Any:
+        """Return this lock's state in the shape ``copy.copy`` uses.
+
+        The instance dictionary alone, or a (dictionary, slot values)
+        pair when a subclass declares ``__slots__``: the state copyreg
+        builds for protocol 2 and above, so a subclass's ``__setstate__``
+        receives what it received before `__copy__` existed.
+        """
+        state: dict[str, typing.Any] = dict(vars(self))
+        slots: dict[str, typing.Any] = {
+            name: getattr(self, name)
+            for name in _slot_names(type(self))
+            if hasattr(self, name)
+        }
+        if slots:
+            return state, slots
+        return state
+
     def __copy__(self) -> RedisLock:
         """Return a fresh idle lock with the same configuration.
 
@@ -1101,7 +1159,11 @@ class RedisLock(utils.LockBase['RedisLock']):
                 'first or construct a new one'
             )
         twin: RedisLock = type(self).__new__(type(self))
-        vars(twin).update(vars(self))
+        # The same restore step `copy.copy` ran before this method
+        # existed: copyreg's state shape, handed to the subclass's own
+        # `__setstate__` when it has one, so slot values and state hooks
+        # of a subclass survive the copy.
+        _restore_copy_state(twin, self._copy_state())
         twin.holder_id = uuid.uuid4().hex
         twin.writer_elected = False
         twin.mode = (
@@ -1113,6 +1175,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         twin.pubsub = None
         twin._subscription_client = None
         twin._subscription_pid = None
+        twin._response_client = None
         twin._lock_state = _LockState.IDLE
         twin._lost_error = None
         twin._next_self_check = 0.0
@@ -1541,6 +1604,93 @@ class RedisLock(utils.LockBase['RedisLock']):
                 'subscription_connection_factory to build one yourself',
             ) from error
         return redis.client.Redis(connection_pool=subscription_pool)
+
+    def _get_response_client(
+        self,
+        connection: redis.client.Redis,
+    ) -> redis.client.Redis:
+        """Return the client that probe and self-check replies are read on.
+
+        Every reply arrives on a response channel any client of the
+        server can publish to, and a strict command connection raises
+        ``UnicodeDecodeError`` from inside the read for a frame that is
+        not UTF-8; worse, redis-py's pure-python parser then stays in
+        error for every later read on that connection. The replies are
+        therefore read on a client derived from the command
+        connection's pool, exactly like `_make_subscription_client`
+        derives the subscription client, with ``decode_responses=True``
+        and ``encoding_errors='replace'`` so an undecodable frame
+        decodes to replacement characters and is dropped as a
+        non-record by the parser. The client is built once per lock,
+        shared by every probe and self-check, and closed by `release`.
+
+        A pool the derivation cannot clone (an exotic pool class, a
+        cluster-style client without a pool) falls back to the command
+        connection itself, which is what portalocker 4.4.2 read replies
+        on, so such a setup loses nothing it had.
+
+        Args:
+            connection: The command connection to derive from.
+
+        Returns:
+            The tolerant response client, or ``connection`` when none
+            could be derived.
+        """
+        with self._state_lock:
+            if self._response_client is not None:
+                return self._response_client
+        try:
+            pool: redis.connection.ConnectionPool = connection.connection_pool
+            response_kwargs: dict[str, typing.Any] = {
+                key: value
+                for key, value in typing.cast(
+                    'dict[str, typing.Any]',
+                    connection.get_connection_kwargs(),
+                ).items()
+                if 'maint' not in key and key != 'connection_class'
+            }
+            response_kwargs.update(
+                decode_responses=True,
+                encoding_errors='replace',
+                protocol=2,
+            )
+            response_pool: redis.connection.ConnectionPool = type(pool)(
+                connection_class=pool.connection_class,
+                **response_kwargs,
+            )
+        except (TypeError, AttributeError):
+            return connection
+        response_client: redis.client.Redis = redis.client.Redis(
+            connection_pool=response_pool,
+        )
+        with self._state_lock:
+            existing: redis.client.Redis | None = self._response_client
+            if existing is None:
+                self._response_client = response_client
+                return response_client
+        # Another thread derived one first; keep that one.
+        response_client.close()
+        response_pool.disconnect()
+        return existing
+
+    def _close_response_client(
+        self,
+        first_error: Exception | None,
+    ) -> Exception | None:
+        """Close the response client, folding failures like the rest."""
+        with self._state_lock:
+            response_client: redis.client.Redis | None = self._response_client
+            self._response_client = None
+        if response_client is not None:
+            try:
+                response_client.close()
+            except Exception as error:
+                first_error = _keep_first_error(first_error, error)
+            try:
+                response_client.connection_pool.disconnect()
+            except Exception as error:
+                first_error = _keep_first_error(first_error, error)
+        return first_error
 
     def _start_subscription(
         self,
@@ -2012,7 +2162,9 @@ class RedisLock(utils.LockBase['RedisLock']):
             self._expected_ping_nonce = nonce
             self._seen_ping_nonce = None
         response_channel: str = f'{self.channel}-{uuid.uuid4().hex}'
-        response_pubsub: redis.client.PubSub = self._get_pubsub(connection)
+        response_pubsub: redis.client.PubSub = self._get_pubsub(
+            self._get_response_client(connection),
+        )
         try:
             response_pubsub.subscribe(response_channel)
             if not self._await_self_check_frame(
@@ -2789,7 +2941,9 @@ class RedisLock(utils.LockBase['RedisLock']):
         """
         response_channel: str = f'{self.channel}-{uuid.uuid4().hex}'
         check_interval: float = min(self.thread_sleep_time, timeout / 10)
-        pubsub: redis.client.PubSub = self._get_pubsub(connection)
+        pubsub: redis.client.PubSub = self._get_pubsub(
+            self._get_response_client(connection),
+        )
         holders: dict[str, RedisLockHolder] = {}
         try:
             pubsub.subscribe(response_channel)
@@ -4543,6 +4697,11 @@ class RedisLock(utils.LockBase['RedisLock']):
             self._unsubscribe()
         except Exception as error:
             first_error = error
+        if same_process:
+            first_error = self._close_response_client(first_error)
+        else:
+            with self._state_lock:
+                self._response_client = None
 
         # Only close connections we created ourselves; caller-supplied ones
         # are left untouched. Clear it even when closing fails so a later

@@ -634,11 +634,12 @@ def _forger(
     connection_factory: ConnectionFactory,
     channel: str,
     reply: typing.Callable[[dict[str, typing.Any]], bytes | str | None],
-) -> tuple[threading.Thread, threading.Event, client.PubSub]:
+) -> tuple[threading.Thread, threading.Event]:
     """Start a thread that answers every ping on ``channel`` with ``reply``.
 
     ``reply`` receives the decoded ping and returns the payload to
     publish on its response channel, or ``None`` to publish nothing.
+    The thread owns its subscription and closes it when ``stop`` is set.
     """
     forger_connection: client.Redis = connection_factory()
     raw_connection: typing.Any = connection_factory()
@@ -650,23 +651,28 @@ def _forger(
     stop = threading.Event()
 
     def run() -> None:
-        while not stop.is_set():
-            message: typing.Any = forger.get_message(timeout=0.01)
-            if not message or message.get('type') != 'message':
-                continue
-            ping: dict[str, typing.Any] | None = redis._decode_frame(
-                message.get('data'),
-            )
-            if ping is None:
-                continue
-            response_channel: typing.Any = ping.get('response_channel')
-            payload: bytes | str | None = reply(ping)
-            if isinstance(response_channel, str) and payload is not None:
-                raw_connection.publish(response_channel, payload)
+        try:
+            while not stop.is_set():
+                message: typing.Any = forger.get_message(timeout=0.01)
+                if not message or message.get('type') != 'message':
+                    continue
+                ping: dict[str, typing.Any] | None = redis._decode_frame(
+                    message.get('data'),
+                )
+                if ping is None:
+                    continue
+                response_channel: typing.Any = ping.get('response_channel')
+                payload: bytes | str | None = reply(ping)
+                if isinstance(response_channel, str) and payload is not None:
+                    raw_connection.publish(response_channel, payload)
+        finally:
+            forger.close()
+            forger_connection.close()
+            raw_connection.close()
 
     thread = threading.Thread(target=run, daemon=True)
     thread.start()
-    return thread, stop, forger
+    return thread, stop
 
 
 def test_self_check_survives_a_flood_of_foreign_nonces(
@@ -742,7 +748,7 @@ def test_probe_survives_undecodable_frames_on_its_response_channel(
         interrupt_on_lost=False,
     )
     holder.acquire()
-    thread, stop, forger = _forger(
+    thread, stop = _forger(
         redis_connection, channel, lambda _ping: b'\xff\xfe\xfd'
     )
     contender: redis.RedisLock = redis.RedisLock(
@@ -757,8 +763,7 @@ def test_probe_survives_undecodable_frames_on_its_response_channel(
         assert not holder.lost
     finally:
         stop.set()
-        thread.join(timeout=2)
-        forger.close()
+        thread.join(timeout=5)
         contender.release()
         holder.release()
 
@@ -777,7 +782,7 @@ def test_self_check_survives_undecodable_frames_on_its_response_channel(
         interrupt_on_lost=False,
     )
     lock.acquire()
-    thread, stop, forger = _forger(
+    thread, stop = _forger(
         redis_connection, channel, lambda _ping: b'\xff\xfe\xfd'
     )
     try:
@@ -786,15 +791,24 @@ def test_self_check_survives_undecodable_frames_on_its_response_channel(
         lock.ensure_held()
     finally:
         stop.set()
-        thread.join(timeout=2)
-        forger.close()
+        thread.join(timeout=5)
         lock.release()
 
 
-def test_strict_factory_client_survives_a_non_utf8_frame() -> None:
-    """A strictly decoding factory client drops the frame instead of dying."""
+def test_strict_factory_client_loses_the_lock_loudly_on_a_non_utf8_frame() -> (
+    None
+):
+    """A strictly decoding factory client is a loss, reported at once.
+
+    redis-py's pure-python parser stays in error after one undecodable
+    frame on a strict connection, so a reader that swallowed the error
+    would go deaf while still reporting the lock held. The documented
+    contract stands: a factory client must decode with replacement, and
+    one that does not loses the lock the moment the frame arrives.
+    """
     server: fakeredis.FakeServer = fakeredis.FakeServer()
     channel: str = str(random.random())
+    lost_calls: list[redis.RedisLock] = []
     lock: redis.RedisLock = redis.RedisLock(
         channel,
         connection=fakeredis.FakeStrictRedis(
@@ -802,6 +816,7 @@ def test_strict_factory_client_survives_a_non_utf8_frame() -> None:
         ),
         thread_sleep_time=0.01,
         interrupt_on_lost=False,
+        on_lost=lost_calls.append,
         subscription_connection_factory=lambda: fakeredis.FakeStrictRedis(
             server=server, decode_responses=True
         ),
@@ -809,13 +824,76 @@ def test_strict_factory_client_survives_a_non_utf8_frame() -> None:
     raw: client.Redis = fakeredis.FakeStrictRedis(server=server)
     lock.acquire()
     try:
-        raw.publish(channel, b'\xff\xfe')
-        time.sleep(0.1)
-        assert not lock.lost
         worker: redis.PubSubWorkerThread | None = lock.thread
-        assert worker is not None and worker.is_alive()
+        assert worker is not None
+        raw.publish(channel, b'\xff\xfe')
+        assert _wait_for(lambda: not worker.is_alive(), timeout=5.0)
+        assert lock.lost
+        assert lost_calls == [lock]
     finally:
         lock.release()
+
+
+def test_response_client_decodes_with_replacement(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """Probe and self-check replies are read through a tolerant client."""
+    connection: client.Redis = redis_connection()
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=connection,
+    )
+
+    response_client: client.Redis = lock._get_response_client(connection)
+
+    assert response_client is not connection
+    kwargs: typing.Any = response_client.get_connection_kwargs()
+    assert kwargs.get('encoding_errors') == 'replace'
+    assert kwargs.get('decode_responses') is True
+    assert lock._get_response_client(connection) is response_client
+    lock.release()
+    assert lock._response_client is None
+
+
+def test_response_client_falls_back_to_the_command_connection() -> None:
+    """A pool the derivation cannot clone keeps the released behaviour."""
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+
+    class Exotic:
+        connection_pool: typing.Any = object()
+
+        def get_connection_kwargs(self) -> dict[str, typing.Any]:
+            raise AttributeError('no kwargs')
+
+    exotic: typing.Any = Exotic()
+    assert lock._get_response_client(exotic) is exotic
+    lock.release()
+
+
+class _RestoreCounting:
+    """Mixin that counts how often its state was restored."""
+
+    restored: int = 0
+
+    def __setstate__(self, state: dict[str, typing.Any]) -> None:
+        vars(self).update(state)
+        type(self).restored += 1
+
+
+class _CountingRedisLock(_RestoreCounting, redis.RedisLock):
+    pass
+
+
+def test_copy_honours_a_subclass_setstate() -> None:
+    """An idle copy goes through the subclass's own __setstate__."""
+    _CountingRedisLock.restored = 0
+    lock: _CountingRedisLock = _CountingRedisLock(str(random.random()))
+
+    twin: redis.RedisLock = copy.copy(lock)
+
+    assert isinstance(twin, _CountingRedisLock)
+    assert _CountingRedisLock.restored == 1
+    assert twin.holder_id != lock.holder_id
 
 
 def test_held_subscription_service_is_capped_per_poll() -> None:
@@ -853,3 +931,109 @@ def test_held_subscription_service_is_capped_per_poll() -> None:
     assert replied is False
     assert len(reads) % redis._HELD_SERVICE_FRAMES == 0
     assert len(reads) >= redis._HELD_SERVICE_FRAMES
+
+
+def test_response_client_race_keeps_the_first_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two threads deriving at once keep one client and close the other."""
+    decoding, _raw = _fake_server_pair()
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    first: redis.RedisLock | None = None
+    pool_type: type = type(decoding.connection_pool)
+    original_init: typing.Callable[..., None] = getattr(  # noqa: B009
+        pool_type, '__init__'
+    )
+
+    def racing_init(
+        self: typing.Any, *args: typing.Any, **kwargs: typing.Any
+    ) -> None:
+        original_init(self, *args, **kwargs)
+        # Simulate the other thread winning while this clone was built.
+        if lock._response_client is None:
+            lock._response_client = typing.cast('client.Redis', first)
+
+    winner: client.Redis = fakeredis.FakeStrictRedis(
+        server=fakeredis.FakeServer(), decode_responses=True
+    )
+    first = typing.cast('redis.RedisLock', winner)
+    monkeypatch.setattr(pool_type, '__init__', racing_init)
+
+    assert lock._get_response_client(decoding) is winner
+    lock.release()
+
+
+def test_release_folds_response_client_close_errors() -> None:
+    """A response client that fails to close reports the first error."""
+    decoding, _raw = _fake_server_pair()
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=decoding,
+    )
+    response_client: client.Redis = lock._get_response_client(decoding)
+
+    def failing_close() -> None:
+        raise RuntimeError('close failed')
+
+    def failing_disconnect(*_args: typing.Any, **_kwargs: typing.Any) -> None:
+        raise RuntimeError('disconnect failed')
+
+    setattr(response_client, 'close', failing_close)  # noqa: B010
+    setattr(  # noqa: B010
+        response_client.connection_pool, 'disconnect', failing_disconnect
+    )
+
+    with pytest.raises(RuntimeError, match='close failed'):
+        lock.release()
+    assert lock._response_client is None
+
+
+class _SlottedRedisLock(redis.RedisLock):
+    __slots__ = ('extra',)
+    extra: str
+
+
+def test_copy_keeps_a_subclass_slot_value() -> None:
+    """An idle copy carries slot values, as the released copy did."""
+    lock: _SlottedRedisLock = _SlottedRedisLock(str(random.random()))
+    lock.extra = 'spam'
+
+    twin: redis.RedisLock = copy.copy(lock)
+
+    assert isinstance(twin, _SlottedRedisLock)
+    assert twin.extra == 'spam'
+    assert twin.holder_id != lock.holder_id
+
+
+class _PrivateSlotRedisLock(redis.RedisLock):
+    __slots__ = ('__secret',)
+
+    def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.__secret = 'eggs'
+
+    @property
+    def secret(self) -> str:
+        return self.__secret
+
+
+def test_copy_keeps_a_mangled_private_slot() -> None:
+    """A private slot name is read under its mangled name."""
+    lock: _PrivateSlotRedisLock = _PrivateSlotRedisLock(str(random.random()))
+
+    twin: redis.RedisLock = copy.copy(lock)
+
+    assert isinstance(twin, _PrivateSlotRedisLock)
+    assert twin.secret == 'eggs'
+
+
+def test_slot_names_follow_copyreg() -> None:
+    """Pseudo slots are skipped, a string form and bare classes are read."""
+
+    class Base:
+        __slots__ = ('__dict__', '__weakref__', 'plain')
+
+    class _(Base):  # noqa: N801 - an all-underscore name is never mangled
+        __slots__ = '__bare'
+
+    assert redis._slot_names(_) == ['__bare', 'plain']

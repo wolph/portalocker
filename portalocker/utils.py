@@ -229,6 +229,15 @@ def _verify_lock_descriptor(fd: int, path: str, nonblock: int) -> None:
             for a file with more than one link.
     """
     entry: os.stat_result = os.fstat(fd)
+    if stat.S_ISDIR(entry.st_mode):
+        # The error a plain open raised for a directory, kept so an
+        # ``except IsADirectoryError`` around a read-mode lock still
+        # catches it.
+        raise IsADirectoryError(
+            errno.EISDIR,
+            os.strerror(errno.EISDIR),
+            path,
+        )
     if not stat.S_ISREG(entry.st_mode):
         raise OSError(
             errno.EINVAL,
@@ -373,18 +382,14 @@ def _require_written_inode(name: str, written: os.stat_result) -> None:
         written: The identity of the inode `open_atomic` wrote.
 
     Raises:
-        OSError: ``name`` is missing, is not a regular file, or names a
-            different inode. Raised with ``ESTALE``, never as
-            `FileExistsError`, so it cannot be mistaken for the
-            destination existing.
+        FileNotFoundError: ``name`` is missing, the error the publication
+            primitive raised for that case before the identity check
+            existed.
+        OSError: ``name`` is not a regular file or names a different
+            inode. Raised with ``ESTALE``, never as `FileExistsError`,
+            so it cannot be mistaken for the destination existing.
     """
-    try:
-        entry: os.stat_result = os.lstat(name)
-    except OSError as error:
-        raise OSError(
-            _STALE_ERRNO,
-            f'temporary file {name!r} disappeared before publication',
-        ) from error
+    entry: os.stat_result = os.lstat(name)
     if not _is_written_inode(entry, written):
         raise OSError(
             _STALE_ERRNO,
@@ -1787,7 +1792,8 @@ class Lock(LockBase[IOT]):
         caller-supplied ``opener`` takes over that responsibility.
         """
         open_kwargs: dict[str, typing.Any] = self.file_open_kwargs
-        if os.name == 'posix' and 'opener' not in open_kwargs:
+        # ``opener=None`` is the builtin default, not a custom opener.
+        if os.name == 'posix' and open_kwargs.get('opener') is None:
             open_kwargs = {**open_kwargs, 'opener': _guarded_opener}
         return typing.cast(
             'IOT',

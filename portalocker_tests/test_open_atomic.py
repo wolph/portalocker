@@ -685,7 +685,11 @@ def test_open_atomic_syncs_closed_handle_without_reopening_by_name(
 def test_open_atomic_refuses_a_vanished_temporary_entry(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A temporary name that disappeared is reported, not published."""
+    """A temporary name that disappeared is reported as missing.
+
+    The error type is the one 4.4.2 raised from the link call, so an
+    ``except FileNotFoundError`` around ``open_atomic`` keeps working.
+    """
     destination: pathlib.Path = tmp_path / 'result.bin'
 
     with (
@@ -696,7 +700,7 @@ def test_open_atomic_refuses_a_vanished_temporary_entry(
         temporary.write(b'caller payload')
         pathlib.Path(temporary.name).unlink()
 
-    assert info.value.errno == portalocker.utils._STALE_ERRNO
+    assert isinstance(info.value, FileNotFoundError)
     assert not destination.exists()
 
 

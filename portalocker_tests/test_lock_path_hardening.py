@@ -351,3 +351,37 @@ def test_read_pid_rejects_more_than_twenty_digits(
     lock: portalocker.PidFileLock = portalocker.PidFileLock(pid_path)
 
     assert lock.read_pid() is None
+
+
+@posix_only
+def test_explicit_opener_none_keeps_the_guard(tmp_path: pathlib.Path) -> None:
+    """``opener=None`` is the builtin default, not a custom opener."""
+    target: pathlib.Path = tmp_path / 'target.txt'
+    target.write_text('precious')
+    link: pathlib.Path = tmp_path / 'lock'
+    link.symlink_to(target)
+
+    lock: portalocker.Lock[typing.IO[str]] = portalocker.Lock(
+        link,
+        'a',
+        timeout=0,
+        opener=None,
+    )
+    with pytest.raises(OSError) as info:
+        lock.acquire()
+
+    assert info.value.errno == errno.ELOOP
+
+
+@posix_only
+def test_directory_at_lock_path_raises_is_a_directory_error(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A directory keeps raising ``IsADirectoryError`` in read modes too."""
+    lock: portalocker.Lock[typing.IO[str]] = portalocker.Lock(
+        tmp_path,
+        'r',
+        timeout=0,
+    )
+    with pytest.raises(IsADirectoryError):
+        lock.acquire()
