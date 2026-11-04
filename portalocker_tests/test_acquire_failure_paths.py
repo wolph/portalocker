@@ -401,3 +401,51 @@ def test_rlock_interrupt_at_publication_keeps_count_and_handle_in_sync(
     probe = portalocker.Lock(tmpfile, timeout=0, fail_when_locked=True)
     probe.acquire()
     probe.release()
+
+
+@pytest.mark.parametrize('lock_class', [portalocker.Lock, portalocker.RLock])
+def test_acquire_interrupt_after_publication_unpublishes(
+    tmpfile: str,
+    lock_class: type[portalocker.Lock],
+) -> None:
+    """An interrupt leaving the publication scope rolls the record back.
+
+    Staged on the state lock's ``__exit__``: the handle was recorded, so
+    the rollback must forget it again before unlocking and closing it,
+    or ``release`` would later operate on a closed handle.
+    """
+    opened: list[typing.IO[typing.Any]] = []
+    real_get_fh = portalocker.Lock._get_fh
+
+    def recording_get_fh(self: portalocker.Lock) -> typing.IO[typing.Any]:
+        fh = real_get_fh(self)
+        opened.append(fh)
+        return fh
+
+    class ExitInterruptingStateLock:
+        def __init__(self) -> None:
+            self.exits: int = 0
+
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *_exc: object) -> None:
+            self.exits += 1
+            if self.exits == 1 + (lock_class is portalocker.RLock):
+                raise KeyboardInterrupt
+
+    lock = lock_class(tmpfile, timeout=0)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(portalocker.Lock, '_get_fh', recording_get_fh)
+        patch.setattr(lock, '_state_lock', ExitInterruptingStateLock())
+        with pytest.raises(KeyboardInterrupt):
+            lock.acquire()
+
+    assert lock.fh is None
+    assert getattr(lock, '_acquire_count', 0) == 0
+    assert len(opened) == 1
+    assert opened[0].closed
+
+    probe = portalocker.Lock(tmpfile, timeout=0, fail_when_locked=True)
+    probe.acquire()
+    probe.release()

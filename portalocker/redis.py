@@ -170,6 +170,12 @@ _MAX_FRAME_CHARS = 4096
 #: flight is seen, but a flood of frames on the response channel must
 #: not keep it reading forever.
 _SURPLUS_DRAIN_FRAMES = 16
+#: Frames `RedisLock._await_self_check_frame` services from the held
+#: subscription per polling interval. One read per interval let a
+#: flood of pings on the channel queue the check's own ping behind the
+#: noise for longer than the deadline; draining the buffer keeps the
+#: handler current, and the cap keeps the response channel polled.
+_HELD_SERVICE_FRAMES = 64
 
 
 def _decode_frame(raw_data: typing.Any) -> dict[str, typing.Any] | None:
@@ -201,6 +207,48 @@ def _decode_frame(raw_data: typing.Any) -> dict[str, typing.Any] | None:
     if not isinstance(data, dict):
         return None
     return typing.cast('dict[str, typing.Any]', data)
+
+
+def _read_frame(
+    pubsub: redis.client.PubSub,
+    timeout: float,
+    ignore_subscribe_messages: bool = False,
+) -> dict[str, typing.Any] | None:
+    """Read one pubsub frame, treating an undecodable one as none.
+
+    A response channel is writable by any client of the server, and a
+    client built with strict response decoding (redis-py's default,
+    and what a caller-supplied command connection or
+    ``subscription_connection_factory`` client usually carries) raises
+    ``UnicodeDecodeError`` from inside ``get_message`` for a frame that
+    is not UTF-8. The frame was consumed before the decode ran, so the
+    connection stays usable and the frame can simply count as noise.
+
+    Args:
+        pubsub: The subscription to read from.
+        timeout: Seconds the read may block.
+        ignore_subscribe_messages: Passed through to redis-py.
+
+    Returns:
+        The frame, or `None` when nothing arrived or the frame could
+        not be decoded.
+    """
+    try:
+        if ignore_subscribe_messages:
+            return typing.cast(
+                'dict[str, typing.Any] | None',
+                pubsub.get_message(
+                    ignore_subscribe_messages=True,
+                    timeout=timeout,
+                ),
+            )
+        return typing.cast(
+            'dict[str, typing.Any] | None',
+            pubsub.get_message(timeout=timeout),
+        )
+    except UnicodeDecodeError:
+        logger.debug('dropped an undecodable pubsub frame')
+        return None
 
 
 def _keep_first_error(
@@ -632,9 +680,10 @@ class PubSubWorkerThread(redis.client.PubSubWorkerThread):
         """
         while not self._stop_requested.is_set():
             try:
-                pubsub.get_message(
+                _read_frame(
+                    pubsub,
+                    self.sleep_time,
                     ignore_subscribe_messages=True,
-                    timeout=self.sleep_time,
                 )
                 if self._tick is not None:
                     self._tick(pubsub)
@@ -1004,6 +1053,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         # held subscription, and the nonce the liveness check in flight
         # is waiting for. Both guarded by `_state_lock`; see
         # `_await_own_echo`.
+        self._expected_ping_nonce: str | None = None
         self._seen_ping_nonce: str | None = None
         self._foreign_subscribers_warned: bool = False
         # Guards every `mode` and `writer_elected` transition made once
@@ -1067,6 +1117,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         twin._lost_error = None
         twin._next_self_check = 0.0
         twin._fence_token = None
+        twin._expected_ping_nonce = None
         twin._seen_ping_nonce = None
         twin._foreign_subscribers_warned = False
         twin._state_lock = threading.RLock()
@@ -1210,7 +1261,12 @@ class RedisLock(utils.LockBase['RedisLock']):
         nonce: typing.Any = data_dict.get('nonce')
         if isinstance(nonce, str):
             with self._state_lock:
-                self._seen_ping_nonce = nonce
+                # Only the nonce a check of this lock is waiting for is
+                # recorded: any client can publish pings with nonces of
+                # its own, and letting those overwrite the record would
+                # erase the evidence a passing check already earned.
+                if nonce == self._expected_ping_nonce:
+                    self._seen_ping_nonce = nonce
 
         connection: redis.client.Redis | None = self.connection
         if connection is None:
@@ -1646,9 +1702,9 @@ class RedisLock(utils.LockBase['RedisLock']):
         first: bool = True
         while first or time.monotonic() < deadline:
             first = False
-            confirmation: dict[str, typing.Any] | None = typing.cast(
-                'dict[str, typing.Any] | None',
-                pubsub.get_message(timeout=check_interval),
+            confirmation: dict[str, typing.Any] | None = _read_frame(
+                pubsub,
+                check_interval,
             )
             if confirmation and confirmation.get('type') == 'subscribe':
                 return
@@ -1953,6 +2009,7 @@ class RedisLock(utils.LockBase['RedisLock']):
         poll: float = min(self.thread_sleep_time, budget / 10)
         nonce: str = uuid.uuid4().hex
         with self._state_lock:
+            self._expected_ping_nonce = nonce
             self._seen_ping_nonce = None
         response_channel: str = f'{self.channel}-{uuid.uuid4().hex}'
         response_pubsub: redis.client.PubSub = self._get_pubsub(connection)
@@ -1991,6 +2048,8 @@ class RedisLock(utils.LockBase['RedisLock']):
                 expected_state,
             )
         finally:
+            with self._state_lock:
+                self._expected_ping_nonce = None
             response_pubsub.close()
 
     def _await_self_check_frame(
@@ -2041,22 +2100,25 @@ class RedisLock(utils.LockBase['RedisLock']):
             with self._state_lock:
                 if self._lock_state is not expected_state:
                     raise _SelfCheckAbandoned
-            frame: dict[str, typing.Any] | None = typing.cast(
-                'dict[str, typing.Any] | None',
-                response_pubsub.get_message(timeout=poll),
+            frame: dict[str, typing.Any] | None = _read_frame(
+                response_pubsub,
+                poll,
             )
             while frame is not None:
                 if predicate(frame):
                     return True
-                frame = typing.cast(
-                    'dict[str, typing.Any] | None',
-                    response_pubsub.get_message(timeout=0),
-                )
+                frame = _read_frame(response_pubsub, 0)
             if held_pubsub is not None:
-                held_pubsub.get_message(
-                    ignore_subscribe_messages=True,
-                    timeout=0,
-                )
+                for _ in range(_HELD_SERVICE_FRAMES):
+                    if (
+                        _read_frame(
+                            held_pubsub,
+                            0,
+                            ignore_subscribe_messages=True,
+                        )
+                        is None
+                    ):
+                        break
         return False
 
     def _is_own_probe_reply(
@@ -2551,15 +2613,17 @@ class RedisLock(utils.LockBase['RedisLock']):
         grace: float = min(_PROBE_REPLY_GRACE, check_interval)
         trusted: bool = True
         frames: int = 0
-        message: dict[str, typing.Any] | None = typing.cast(
-            'dict[str, typing.Any] | None',
-            pubsub.get_message(timeout=check_interval),
+        message: dict[str, typing.Any] | None = _read_frame(
+            pubsub,
+            check_interval,
         )
         while message is not None:
             frames += 1
             if frames > expected_subscribers + _SURPLUS_DRAIN_FRAMES:
-                # A flood (duplicates, noise) must not pin this pass:
-                # the caller's deadline and count bracket take over.
+                # A flood (duplicates, noise) must not pin this pass,
+                # and it must not be decided from either: whatever a
+                # flood is hiding behind the cap was never read.
+                trusted = False
                 break
             if message.get('type') == 'message':
                 legacy_index: int = sum(
@@ -2577,18 +2641,12 @@ class RedisLock(utils.LockBase['RedisLock']):
                 )
                 if distinct > expected_subscribers:
                     trusted = False
-            message = typing.cast(
-                'dict[str, typing.Any] | None',
-                pubsub.get_message(timeout=0),
-            )
+            message = _read_frame(pubsub, 0)
             if message is None and grace > 0:
                 # The buffer is empty but the next reply may be in
                 # flight, and one short real wait collects it in this
                 # pass.
-                message = typing.cast(
-                    'dict[str, typing.Any] | None',
-                    pubsub.get_message(timeout=grace),
-                )
+                message = _read_frame(pubsub, grace)
         return trusted
 
     def _reply_is_consistent(
@@ -2736,9 +2794,9 @@ class RedisLock(utils.LockBase['RedisLock']):
         try:
             pubsub.subscribe(response_channel)
             for _ in self._timeout_generator(timeout, check_interval):
-                confirmation: dict[str, typing.Any] | None = typing.cast(
-                    'dict[str, typing.Any] | None',
-                    pubsub.get_message(timeout=check_interval),
+                confirmation: dict[str, typing.Any] | None = _read_frame(
+                    pubsub,
+                    check_interval,
                 )
                 if confirmation and confirmation.get('type') == 'subscribe':
                     break

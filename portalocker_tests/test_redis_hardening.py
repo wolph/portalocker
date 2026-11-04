@@ -115,6 +115,8 @@ def test_channel_handler_is_total(data: str) -> None:
 def test_channel_handler_echoes_only_a_string_nonce() -> None:
     """A ping is answered either way; only a string nonce is echoed."""
     lock, published = _recording_lock()
+    with lock._state_lock:
+        lock._expected_ping_nonce = 'abc'
 
     lock.channel_handler(
         {
@@ -132,6 +134,15 @@ def test_channel_handler_echoes_only_a_string_nonce() -> None:
     assert [channel for channel, _ in published] == ['r', 'r']
     assert 'nonce' not in json.loads(published[0][1])
     assert json.loads(published[1][1])['nonce'] == 'abc'
+    assert lock._seen_ping_nonce == 'abc'
+
+    # A nonce nobody is waiting for is echoed but never recorded.
+    lock.channel_handler(
+        {
+            'type': 'message',
+            'data': json.dumps({'response_channel': 'r', 'nonce': 'other'}),
+        }
+    )
     assert lock._seen_ping_nonce == 'abc'
 
 
@@ -574,3 +585,271 @@ def test_forked_child_gets_its_own_holder_id() -> None:
     assert len(child_id) == 32
     assert child_id != parent_id
     assert lock.holder_id == parent_id
+
+
+def test_copy_of_lock_with_own_connection_does_not_share_it() -> None:
+    """A twin never closes a connection the original created."""
+    original: redis.RedisLock = redis.RedisLock(str(random.random()))
+
+    twin: redis.RedisLock = copy.copy(original)
+
+    assert original.close_connection
+    assert twin.connection is None
+
+
+def test_after_fork_hook_reallocates_holder_id() -> None:
+    """The fork hook gives every live lock a fresh holder identity."""
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    before: str = lock.holder_id
+
+    utils._reinit_state_locks_after_fork()
+
+    assert lock.holder_id != before
+    assert len(lock.holder_id) == 32
+
+
+def test_fenced_grant_confirm_abandons_when_the_lock_leaves_acquiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A release racing the fence confirm abandons the attempt quietly."""
+    decoding, _raw = _fake_server_pair()
+    lock: redis.RedisLock = redis.RedisLock(
+        str(random.random()),
+        connection=decoding,
+        fencing=True,
+    )
+
+    def abandoned(*_args: typing.Any, **_kwargs: typing.Any) -> bool:
+        raise redis._SelfCheckAbandoned
+
+    monkeypatch.setattr(lock, '_await_own_echo', abandoned)
+
+    assert lock._confirm_fenced_grant(decoding) is False
+
+
+# --- review follow-ups: nonce clobbering, drain cap, response decoding -----
+
+
+def _forger(
+    connection_factory: ConnectionFactory,
+    channel: str,
+    reply: typing.Callable[[dict[str, typing.Any]], bytes | str | None],
+) -> tuple[threading.Thread, threading.Event, client.PubSub]:
+    """Start a thread that answers every ping on ``channel`` with ``reply``.
+
+    ``reply`` receives the decoded ping and returns the payload to
+    publish on its response channel, or ``None`` to publish nothing.
+    """
+    forger_connection: client.Redis = connection_factory()
+    raw_connection: typing.Any = connection_factory()
+    forger: client.PubSub = typing.cast(
+        'client.PubSub',
+        forger_connection.pubsub(),  # type: ignore[no-untyped-call]
+    )
+    forger.subscribe(channel)
+    stop = threading.Event()
+
+    def run() -> None:
+        while not stop.is_set():
+            message: typing.Any = forger.get_message(timeout=0.01)
+            if not message or message.get('type') != 'message':
+                continue
+            ping: dict[str, typing.Any] | None = redis._decode_frame(
+                message.get('data'),
+            )
+            if ping is None:
+                continue
+            response_channel: typing.Any = ping.get('response_channel')
+            payload: bytes | str | None = reply(ping)
+            if isinstance(response_channel, str) and payload is not None:
+                raw_connection.publish(response_channel, payload)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread, stop, forger
+
+
+def test_self_check_survives_a_flood_of_foreign_nonces(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """Pings with other nonces must not erase the check's own evidence."""
+    channel: str = str(random.random())
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        unavailable_timeout=0.5,
+        self_check_interval=0.2,
+        interrupt_on_lost=False,
+    )
+    noise: client.Redis = redis_connection()
+    stop = threading.Event()
+    sent: list[int] = []
+
+    def flood() -> None:
+        while not stop.is_set():
+            noise.publish(
+                channel,
+                json.dumps(
+                    {
+                        'message': 'ping',
+                        'response_channel': f'{channel}-noise',
+                        'nonce': os.urandom(16).hex(),
+                    }
+                ),
+            )
+            sent.append(1)
+            time.sleep(0.005)
+
+    thread = threading.Thread(target=flood, daemon=True)
+    lock.acquire()
+    try:
+        thread.start()
+        time.sleep(1.0)
+        assert len(sent) > 20, 'the flood never ran'
+        assert not lock.lost
+        lock.ensure_held()
+        worker: redis.PubSubWorkerThread | None = lock.thread
+        assert worker is not None and worker.is_alive()
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        lock.release()
+
+
+def test_probe_flood_past_the_drain_cap_is_inconclusive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flood of duplicates cannot hide a forged surplus behind the cap."""
+    decoding, _raw = _fake_server_pair()
+    lock: redis.RedisLock = redis.RedisLock('c', connection=decoding)
+    frames = [_record(lock.holder_id, 'pending'), _record('b' * 32, 'shared')]
+    frames += [_record('b' * 32, 'shared')] * (redis._SURPLUS_DRAIN_FRAMES + 5)
+    frames.append(_record('c' * 32, 'shared'))
+
+    assert _scripted_probe(lock, monkeypatch, frames, 2) is None
+
+
+def test_probe_survives_undecodable_frames_on_its_response_channel(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """Garbage bytes on a response channel do not abort the acquire."""
+    channel: str = str(random.random())
+    holder: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        interrupt_on_lost=False,
+    )
+    holder.acquire()
+    thread, stop, forger = _forger(
+        redis_connection, channel, lambda _ping: b'\xff\xfe\xfd'
+    )
+    contender: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        unavailable_timeout=0.3,
+    )
+    try:
+        with pytest.raises(portalocker.AlreadyLocked):
+            contender.acquire(timeout=0.5, fail_when_locked=True)
+        assert not holder.lost
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        forger.close()
+        contender.release()
+        holder.release()
+
+
+def test_self_check_survives_undecodable_frames_on_its_response_channel(
+    redis_connection: ConnectionFactory,
+) -> None:
+    """Garbage bytes on the self-check's response channel are not a loss."""
+    channel: str = str(random.random())
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=redis_connection(),
+        thread_sleep_time=0.01,
+        unavailable_timeout=0.5,
+        self_check_interval=0.05,
+        interrupt_on_lost=False,
+    )
+    lock.acquire()
+    thread, stop, forger = _forger(
+        redis_connection, channel, lambda _ping: b'\xff\xfe\xfd'
+    )
+    try:
+        time.sleep(0.5)
+        assert not lock.lost
+        lock.ensure_held()
+    finally:
+        stop.set()
+        thread.join(timeout=2)
+        forger.close()
+        lock.release()
+
+
+def test_strict_factory_client_survives_a_non_utf8_frame() -> None:
+    """A strictly decoding factory client drops the frame instead of dying."""
+    server: fakeredis.FakeServer = fakeredis.FakeServer()
+    channel: str = str(random.random())
+    lock: redis.RedisLock = redis.RedisLock(
+        channel,
+        connection=fakeredis.FakeStrictRedis(
+            server=server, decode_responses=True
+        ),
+        thread_sleep_time=0.01,
+        interrupt_on_lost=False,
+        subscription_connection_factory=lambda: fakeredis.FakeStrictRedis(
+            server=server, decode_responses=True
+        ),
+    )
+    raw: client.Redis = fakeredis.FakeStrictRedis(server=server)
+    lock.acquire()
+    try:
+        raw.publish(channel, b'\xff\xfe')
+        time.sleep(0.1)
+        assert not lock.lost
+        worker: redis.PubSubWorkerThread | None = lock.thread
+        assert worker is not None and worker.is_alive()
+    finally:
+        lock.release()
+
+
+def test_held_subscription_service_is_capped_per_poll() -> None:
+    """A held subscription that never empties is serviced a bounded amount.
+
+    Without the cap a flood on the lock channel would keep the check
+    reading the held side forever and never poll its response channel.
+    """
+    lock: redis.RedisLock = redis.RedisLock(str(random.random()))
+    with lock._state_lock:
+        lock._lock_state = redis._LockState.HELD
+    response: _ScriptedPubSub = _ScriptedPubSub([])
+    reads: list[int] = []
+
+    class EndlessHeld:
+        def get_message(
+            self,
+            timeout: float = 0.0,
+            ignore_subscribe_messages: bool = False,
+        ) -> dict[str, typing.Any]:
+            reads.append(1)
+            return {'type': 'message', 'data': 'noise'}
+
+    deadline: float = time.monotonic() + 0.05
+    replied: bool = lock._await_self_check_frame(
+        typing.cast('client.PubSub', response),
+        typing.cast('client.PubSub', EndlessHeld()),
+        deadline,
+        0.001,
+        lambda _frame: False,
+    )
+    with lock._state_lock:
+        lock._lock_state = redis._LockState.IDLE
+
+    assert replied is False
+    assert len(reads) % redis._HELD_SERVICE_FRAMES == 0
+    assert len(reads) >= redis._HELD_SERVICE_FRAMES

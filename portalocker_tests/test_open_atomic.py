@@ -679,3 +679,169 @@ def test_open_atomic_syncs_closed_handle_without_reopening_by_name(
 
     assert not destination.exists()
     assert victim.read_bytes() == b'victim payload'
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='entry swapping is POSIX only')
+def test_open_atomic_refuses_a_vanished_temporary_entry(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A temporary name that disappeared is reported, not published."""
+    destination: pathlib.Path = tmp_path / 'result.bin'
+
+    with (
+        pytest.raises(OSError) as info,
+        portalocker.open_atomic(destination) as file_handle,
+    ):
+        temporary = typing.cast(typing.BinaryIO, file_handle)
+        temporary.write(b'caller payload')
+        pathlib.Path(temporary.name).unlink()
+
+    assert info.value.errno == portalocker.utils._STALE_ERRNO
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='hard links are POSIX only')
+def test_open_atomic_unlinks_a_destination_that_links_a_swapped_inode(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A swap that beats the pre-link check is caught after the link.
+
+    ``os.link`` is replaced by one that links a decoy instead of the
+    written inode, standing in for a swap landing between the identity
+    check and the link call. The destination entry that resulted must
+    be removed again and the publication must fail.
+    """
+    destination: pathlib.Path = tmp_path / 'result.bin'
+    decoy: pathlib.Path = tmp_path / 'decoy.bin'
+    decoy.write_bytes(b'decoy')
+    real_link = os.link
+
+    def link_decoy(
+        src: typing.Any, dst: typing.Any, **kwargs: typing.Any
+    ) -> None:
+        real_link(decoy, dst, **kwargs)
+
+    monkeypatch.setattr(portalocker.utils, '_PROC_FD_LINKS', False)
+    monkeypatch.setattr(os, 'link', link_decoy)
+    with (
+        pytest.raises(OSError) as info,
+        portalocker.open_atomic(destination) as file_handle,
+    ):
+        typing.cast(typing.BinaryIO, file_handle).write(b'caller payload')
+
+    assert info.value.errno == portalocker.utils._STALE_ERRNO
+    assert not destination.exists()
+    assert decoy.read_bytes() == b'decoy'
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='hard links are POSIX only')
+def test_open_atomic_rename_fallback_refuses_a_swapped_inode(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a filesystem without hard links the rename is checked too."""
+    destination: pathlib.Path = tmp_path / 'result.bin'
+    decoy: pathlib.Path = tmp_path / 'decoy.bin'
+    decoy.write_bytes(b'decoy')
+    real_rename = os.rename
+
+    def refuse_link(*_args: typing.Any, **_kwargs: typing.Any) -> None:
+        raise OSError(errno.ENOTSUP, 'no hard links here')
+
+    def rename_decoy(
+        src: typing.Any, dst: typing.Any, **kwargs: typing.Any
+    ) -> None:
+        real_rename(decoy, dst, **kwargs)
+
+    monkeypatch.setattr(portalocker.utils, '_PROC_FD_LINKS', False)
+    monkeypatch.setattr(os, 'link', refuse_link)
+    monkeypatch.setattr(os, 'rename', rename_decoy)
+    with (
+        pytest.raises(OSError) as info,
+        portalocker.open_atomic(destination) as file_handle,
+    ):
+        typing.cast(typing.BinaryIO, file_handle).write(b'caller payload')
+
+    assert info.value.errno == portalocker.utils._STALE_ERRNO
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='hard links are POSIX only')
+def test_open_atomic_links_from_the_descriptor_where_supported(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``/proc/self/fd`` links the temporary name is never used."""
+    destination: pathlib.Path = tmp_path / 'result.bin'
+    sources: list[str] = []
+    real_link = os.link
+    temp_names: list[str] = []
+    real_open_exclusive = portalocker.utils._open_exclusive_temp
+
+    def recording_open_exclusive(
+        path: pathlib.Path, binary: bool
+    ) -> tuple[typing.IO[typing.Any], str]:
+        handle, name = real_open_exclusive(path, binary)
+        temp_names.append(name)
+        return handle, name
+
+    def link_from_descriptor(
+        src: typing.Any, dst: typing.Any, **kwargs: typing.Any
+    ) -> None:
+        sources.append(str(src))
+        # macOS has no /proc: resolve the descriptor link by hand.
+        real_link(temp_names[-1], dst)
+
+    monkeypatch.setattr(portalocker.utils, '_PROC_FD_LINKS', True)
+    monkeypatch.setattr(
+        portalocker.utils, '_open_exclusive_temp', recording_open_exclusive
+    )
+    monkeypatch.setattr(os, 'link', link_from_descriptor)
+    with portalocker.open_atomic(destination) as file_handle:
+        typing.cast(typing.BinaryIO, file_handle).write(b'payload')
+
+    assert sources and sources[0].startswith('/proc/self/fd/')
+    assert destination.read_bytes() == b'payload'
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='hard links are POSIX only')
+@pytest.mark.parametrize('proc_present', [False, True])
+def test_open_atomic_descriptor_link_failure_handling(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    proc_present: bool,
+) -> None:
+    """ENOENT without ``/proc`` falls back by name; otherwise it raises."""
+    destination: pathlib.Path = tmp_path / 'result.bin'
+    real_link = os.link
+    real_exists = os.path.exists
+
+    def failing_descriptor_link(
+        src: typing.Any, dst: typing.Any, **kwargs: typing.Any
+    ) -> None:
+        if str(src).startswith('/proc/self/fd/'):
+            raise OSError(errno.ENOENT, 'no /proc here')
+        real_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(portalocker.utils, '_PROC_FD_LINKS', True)
+    monkeypatch.setattr(os, 'link', failing_descriptor_link)
+    monkeypatch.setattr(
+        os.path,
+        'exists',
+        lambda p: (
+            proc_present if str(p) == '/proc/self/fd' else real_exists(p)
+        ),
+    )
+    if proc_present:
+        with (
+            pytest.raises(OSError) as info,
+            portalocker.open_atomic(destination) as file_handle,
+        ):
+            typing.cast(typing.BinaryIO, file_handle).write(b'payload')
+        assert info.value.errno == errno.ENOENT
+        assert not destination.exists()
+    else:
+        with portalocker.open_atomic(destination) as file_handle:
+            typing.cast(typing.BinaryIO, file_handle).write(b'payload')
+        assert destination.read_bytes() == b'payload'

@@ -246,3 +246,9 @@ def test_combine_bakes_the_version_string(tmp_path, monkeypatch):
 
     assert '__version__ = get_version()' not in text
     assert f'__version__ = {__about__.__version__!r}' in text
+
+
+def test_bake_version_requires_the_probe_line():
+    """A missing probe line is a loud error, not a silent omission."""
+    with pytest.raises(ValueError, match='probe line'):
+        __main__._bake_version(['x = 1\n'])

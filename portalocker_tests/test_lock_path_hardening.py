@@ -311,3 +311,43 @@ def test_write_pid_leaves_no_predictable_temp_file(
     )
     assert not list(tmp_path.glob('*.tmp'))
     assert not list(tmp_path.glob('.portalocker.*'))
+
+
+@posix_only
+def test_lock_refuses_a_fifo_opened_read_write(tmp_path: pathlib.Path) -> None:
+    """A FIFO that opens without blocking is still refused after fstat."""
+    fifo: pathlib.Path = tmp_path / 'lock'
+    os.mkfifo(fifo)
+
+    lock: portalocker.Lock[typing.IO[str]] = portalocker.Lock(
+        fifo,
+        'r+',
+        timeout=0,
+    )
+    with pytest.raises(OSError) as info:
+        lock.acquire()
+
+    assert info.value.errno == errno.EINVAL
+
+
+@posix_only
+def test_read_pid_returns_none_for_a_directory(tmp_path: pathlib.Path) -> None:
+    """A directory at the pid path is unreadable, with an EINVAL error."""
+    lock: portalocker.PidFileLock = portalocker.PidFileLock(tmp_path)
+
+    pid, error = lock._read_pid()
+
+    assert pid is None
+    assert isinstance(error, OSError)
+    assert error.errno == errno.EINVAL
+
+
+def test_read_pid_rejects_more_than_twenty_digits(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Twenty-one digits are junk even though they fit the read bound."""
+    pid_path: pathlib.Path = tmp_path / 'daemon.pid'
+    pid_path.write_bytes(b'1' * 21)
+    lock: portalocker.PidFileLock = portalocker.PidFileLock(pid_path)
+
+    assert lock.read_pid() is None

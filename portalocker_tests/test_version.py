@@ -205,3 +205,44 @@ def test_read_pyproject_version_reads_the_real_pyproject() -> None:
     assert about._read_pyproject_version(root / 'pyproject.toml') == (
         portalocker.__version__
     )
+
+
+def test_read_prefix_returns_none_for_a_directory(tmp_path: Path) -> None:
+    """A directory (not a regular file) reads as nothing."""
+    import portalocker.__about__ as about
+
+    assert about._read_prefix(tmp_path, 10) is None
+
+
+def test_read_prefix_returns_none_when_the_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read error after the open is swallowed like an open error."""
+    import os
+
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_text("[project]\nname = 'portalocker'\n", encoding='utf-8')
+
+    def failing_read(_fd: int, _limit: int) -> bytes:
+        raise OSError('read failed')
+
+    monkeypatch.setattr(os, 'read', failing_read)
+
+    assert about._read_prefix(path, 10) is None
+
+
+def test_read_pyproject_version_ignores_an_unquoted_version(
+    tmp_path: Path,
+) -> None:
+    """Only a quoted TOML string is a version."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_text(
+        "[project]\nname = 'portalocker'\nversion = 1.2\n",
+        encoding='utf-8',
+    )
+
+    assert about._read_pyproject_version(path) is None

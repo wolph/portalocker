@@ -148,6 +148,10 @@ def _annotate_preserved_payload(error: BaseException, temp_name: str) -> None:
 #: then an `OSError` beats an endless loop.
 _TEMP_NAME_ATTEMPTS: int = 10000
 
+#: Whether `_link_written_inode` may link straight from the open
+#: descriptor through ``/proc/self/fd``, which only Linux supports.
+_PROC_FD_LINKS: bool = sys.platform.startswith('linux')
+
 #: Errno for "the name no longer refers to the file we wrote": a
 #: temporary entry that was swapped under `open_atomic` before or during
 #: publication. ``ESTALE`` where the platform defines it, ``EIO``
@@ -237,7 +241,7 @@ def _verify_lock_descriptor(fd: int, path: str, nonblock: int) -> None:
             f'lock path {path!r} has {entry.st_nlink} links',
             path,
         )
-    if nonblock:
+    if nonblock:  # pragma: no branch - platform constant
         # Only reached on POSIX, where the module exists; importing it
         # here keeps the module importable on Windows.
         import fcntl  # noqa: PLC0415
@@ -404,7 +408,7 @@ def _link_written_inode(
     publishes a swapped entry: a destination that does not carry the
     written identity is unlinked again before the error is raised.
     """
-    if sys.platform.startswith('linux'):
+    if _PROC_FD_LINKS:
         try:
             os.link(f'/proc/self/fd/{fd}', path, follow_symlinks=True)
         except OSError as error:
@@ -484,6 +488,11 @@ def _publish_exclusive(
             ) from link_error
         os.rename(temp_name, path)
         if not _is_written_inode(os.lstat(path), written):
+            # The entry now at the destination is the swapped one this
+            # rename moved there, so removing it is undoing this
+            # publication, not touching anybody else's file.
+            with contextlib.suppress(OSError):
+                os.unlink(path)
             raise OSError(
                 _STALE_ERRNO,
                 f'temporary file {temp_name!r} was replaced during '
