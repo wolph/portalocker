@@ -166,7 +166,11 @@ Costs:
   location exempt from cleanup for anything long running, and prefer a
   private directory on multi-user systems: a slot file owned by another
   user typically raises ``PermissionError`` out of ``acquire`` instead
-  of counting as busy.
+  of counting as busy, and because the slot names are predictable, any
+  other user of a shared directory can create or lock them in advance
+  and deny the semaphore. A symlink or FIFO planted at a slot path is
+  refused rather than followed, but only a private directory keeps other
+  users out.
 
 >>> import portalocker
 >>> semaphore = portalocker.BoundedSemaphore(2, name='workers', directory='')

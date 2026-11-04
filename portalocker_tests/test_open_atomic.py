@@ -616,3 +616,66 @@ def test_open_atomic_removes_temporary_file_on_keyboard_interrupt(
 
     assert not target.exists()
     assert not any(tmp_path.iterdir()), 'the interrupt leaked a temp file'
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='entry swapping is POSIX only')
+@pytest.mark.parametrize('planted', ['regular', 'symlink'])
+def test_open_atomic_refuses_a_swapped_temporary_entry(
+    tmp_path: pathlib.Path,
+    planted: str,
+) -> None:
+    """The inode the body wrote is the only thing that may be published.
+
+    Somebody who can write to the destination directory swaps the entry
+    at the temporary name while the body runs. Publication must notice
+    that the entry no longer names the written inode and refuse, leaving
+    the destination absent and the planted target untouched.
+    """
+    destination: pathlib.Path = tmp_path / 'result.bin'
+    victim: pathlib.Path = tmp_path / 'victim.bin'
+    victim.write_bytes(b'victim payload')
+
+    with (
+        pytest.raises(OSError) as info,
+        portalocker.open_atomic(destination) as file_handle,
+    ):
+        temporary = typing.cast(typing.BinaryIO, file_handle)
+        temporary.write(b'caller payload')
+        temporary.flush()
+        temp_name: pathlib.Path = pathlib.Path(temporary.name)
+        temp_name.unlink()
+        if planted == 'regular':
+            temp_name.write_bytes(b'planted payload')
+        else:
+            temp_name.symlink_to(victim)
+
+    assert not isinstance(info.value, FileExistsError)
+    assert not destination.exists()
+    assert victim.read_bytes() == b'victim payload'
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='entry swapping is POSIX only')
+def test_open_atomic_syncs_closed_handle_without_reopening_by_name(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A body that closed the handle is synced through the kept
+    descriptor, so swapping the entry afterwards cannot redirect the
+    fsync or the publication to a planted file.
+    """
+    destination: pathlib.Path = tmp_path / 'result.bin'
+    victim: pathlib.Path = tmp_path / 'victim.bin'
+    victim.write_bytes(b'victim payload')
+
+    with (
+        pytest.raises(OSError),
+        portalocker.open_atomic(destination) as file_handle,
+    ):
+        temporary = typing.cast(typing.BinaryIO, file_handle)
+        temporary.write(b'caller payload')
+        temp_name = pathlib.Path(temporary.name)
+        temporary.close()
+        temp_name.unlink()
+        temp_name.symlink_to(victim)
+
+    assert not destination.exists()
+    assert victim.read_bytes() == b'victim payload'

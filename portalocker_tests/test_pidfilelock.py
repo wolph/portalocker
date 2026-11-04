@@ -27,6 +27,27 @@ import portalocker
 from portalocker import utils
 
 
+def _pid_temp_file_matcher(pid_file: Path) -> typing.Callable[[object], bool]:
+    """Return a predicate for the random temporary file next to ``pid_file``.
+
+    `PidFileLock._write_pid` publishes the PID through the same
+    exclusively created ``.portalocker.<16 hex>.tmp`` file `open_atomic`
+    uses, so the exact name cannot be predicted and the tests match its
+    shape in the PID file's directory instead.
+    """
+    directory: Path = pid_file.parent
+
+    def matches(file: object) -> bool:
+        path: Path = Path(str(file))
+        return (
+            path.parent == directory
+            and path.name.startswith('.portalocker.')
+            and path.name.endswith('.tmp')
+        )
+
+    return matches
+
+
 class _FailingPidFile:
     def __init__(
         self,
@@ -611,10 +632,11 @@ def test_pidfilelock_releases_sidecar_on_publication_failure(
 ) -> None:
     """#116: every PID-publication failure rolls back the sidecar."""
     pid_file: Path = tmp_path / 'pidfilelock_writefail.pid'
-    # The PID is published through a temporary file that `os.replace`
-    # moves over the PID file, so the failures are injected on that
-    # temporary path rather than on the PID file itself.
-    pid_temp_file: str = f'{pid_file}.{os.getpid()}.tmp'
+    # The PID is published through an exclusively created, randomly
+    # named temporary file that `os.replace` moves over the PID file, so
+    # the failures are injected on that temporary path (recognised by
+    # its shape, since the name is random) rather than on the PID file.
+    is_pid_temp_file = _pid_temp_file_matcher(pid_file)
     real_open: typing.Callable[..., typing.TextIO] = typing.cast(
         typing.Callable[..., typing.TextIO],
         builtins.open,
@@ -631,7 +653,7 @@ def test_pidfilelock_releases_sidecar_on_publication_failure(
         *args: typing.Any,
         **kwargs: typing.Any,
     ) -> typing.TextIO:
-        if str(file) != pid_temp_file:
+        if not is_pid_temp_file(file):
             return real_open(file, *args, **kwargs)
         if failure_stage == 'open':
             raise OSError('open failed')
@@ -665,7 +687,7 @@ def test_pidfilelock_releases_sidecar_on_publication_failure(
 
     assert failing_lock._inner_lock is None
     assert not failing_lock._acquired_lock
-    assert not os.path.exists(pid_temp_file), (
+    assert not list(tmp_path.glob('.portalocker.*.tmp')), (
         'the failed publication left its temporary file behind'
     )
 
@@ -707,7 +729,7 @@ def test_pidfilelock_preserves_write_error_when_pid_close_fails(
 ) -> None:
     """#116: PID close failure is secondary to the publication failure."""
     pid_file: Path = tmp_path / 'pidfilelock_writeclosefail.pid'
-    pid_temp_file: str = f'{pid_file}.{os.getpid()}.tmp'
+    is_pid_temp_file = _pid_temp_file_matcher(pid_file)
     real_open: typing.Callable[..., typing.TextIO] = typing.cast(
         typing.Callable[..., typing.TextIO],
         builtins.open,
@@ -719,7 +741,7 @@ def test_pidfilelock_preserves_write_error_when_pid_close_fails(
         **kwargs: typing.Any,
     ) -> typing.TextIO:
         wrapped: typing.TextIO = real_open(file, *args, **kwargs)
-        if str(file) != pid_temp_file:
+        if not is_pid_temp_file(file):
             return wrapped
         return typing.cast(
             typing.TextIO,
@@ -919,7 +941,7 @@ def test_pidfilelock_preserves_pid_close_error_after_rollback_failures(
 ) -> None:
     """#116: rollback causes retain the earlier PID-close failure."""
     pid_file: Path = tmp_path / 'pidfilelock_all_cleanup_failures.pid'
-    pid_temp_file: str = f'{pid_file}.{os.getpid()}.tmp'
+    is_pid_temp_file = _pid_temp_file_matcher(pid_file)
     real_open: typing.Callable[..., typing.TextIO] = typing.cast(
         typing.Callable[..., typing.TextIO],
         builtins.open,
@@ -933,7 +955,7 @@ def test_pidfilelock_preserves_pid_close_error_after_rollback_failures(
         **kwargs: typing.Any,
     ) -> typing.TextIO:
         wrapped: typing.TextIO = real_open(file, *args, **kwargs)
-        if str(file) != pid_temp_file:
+        if not is_pid_temp_file(file):
             return wrapped
         return typing.cast(
             typing.TextIO,
