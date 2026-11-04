@@ -25,6 +25,7 @@ import pytest
 
 import portalocker
 from portalocker import exceptions
+from portalocker.types import Mode
 
 posix_only = pytest.mark.skipif(
     os.name != 'posix',
@@ -46,7 +47,7 @@ def test_lock_refuses_symlink_at_lock_path(
 
     lock: portalocker.Lock[typing.Any] = portalocker.Lock(
         link,
-        lock_mode,  # type: ignore[arg-type]
+        typing.cast('Mode', lock_mode),
         timeout=0,
     )
     with pytest.raises(OSError) as info:

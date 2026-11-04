@@ -701,6 +701,7 @@ def _reinit_state_locks_after_fork() -> None:
             )
             if reinit is not None:
                 reinit()  # pragma: not-posix
+        lock._after_fork_in_child()  # pyright: ignore[reportPrivateUsage]
 
 
 # Windows has no fork, and no `os.register_at_fork` to register with. The
@@ -895,6 +896,17 @@ class LockBase(
             The locks to reinitialize; the state lock alone here.
         """
         return (self._state_lock,)
+
+    def _after_fork_in_child(self) -> None:
+        """Adjust per-process state in a freshly forked child.
+
+        Called by `_reinit_state_locks_after_fork` for every live lock
+        after its Python locks were reset, before the child runs any
+        code of its own. The base class has nothing per process beyond
+        those locks; `~portalocker.redis.RedisLock` draws a fresh holder
+        identity here so a forked sibling is a distinct holder on the
+        wire.
+        """
 
     @abc.abstractmethod
     def acquire(
