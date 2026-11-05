@@ -3024,7 +3024,13 @@ class _PidFileLockFailClosedContext(
 
 
 def _slot_names(cls: type) -> list[str]:
-    """Return every ``__slots__`` name declared along the MRO of ``cls``."""
+    """Return the storage name of every ``__slots__`` entry along the MRO.
+
+    A private slot (``__value``) is stored under the name Python mangled
+    for its declaring class (``_Semaphore__value``), so that is the name
+    returned, the same list ``copyreg._slotnames`` builds for pickling.
+    The ``__dict__`` and ``__weakref__`` pseudo slots are skipped.
+    """
     names: list[str] = []
     for klass in cls.__mro__:
         slots: str | typing.Iterable[str] = klass.__dict__.get('__slots__', ())
