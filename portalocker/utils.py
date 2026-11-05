@@ -3374,6 +3374,63 @@ def _slot_names(cls: type) -> list[str]:
     return names
 
 
+def _default_semaphore_directory() -> str:
+    """Return the default slot directory of a semaphore, not yet created.
+
+    On POSIX a per-user directory ``portalocker-<uid>`` under the system
+    temporary directory, which `_ensure_private_directory` creates with
+    mode ``0700`` on the first acquire. Windows temporary directories
+    are per user already, so there the system temporary directory itself
+    is the default.
+    """
+    base: str = tempfile.gettempdir()
+    if os.name != 'posix':
+        return base
+    return os.path.join(base, f'portalocker-{os.getuid()}')
+
+
+def _ensure_private_directory(path: str) -> None:
+    """Create ``path`` as a ``0700`` directory of this user, or refuse it.
+
+    The slot names of a semaphore are predictable, so the directory they
+    live in must not be writable by other local users. The directory is
+    created when missing, verified to be a real directory (a planted
+    symlink is refused rather than followed) owned by the current user,
+    and its mode is tightened to ``0700`` when it was ours but open.
+    A no-op outside POSIX.
+
+    Args:
+        path: The directory to create or verify.
+
+    Raises:
+        NotADirectoryError: Something that is not a directory, a symlink
+            included, sits at ``path``.
+        PermissionError: The directory is owned by another user.
+        FileNotFoundError: The parent directory does not exist.
+    """
+    if os.name != 'posix':
+        return
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(path, 0o700)
+    entry: os.stat_result = os.lstat(path)
+    if not stat.S_ISDIR(entry.st_mode):
+        raise OSError(
+            errno.ENOTDIR,
+            f'semaphore directory {path!r} is not a directory',
+            path,
+        )
+    uid: int = os.getuid()
+    if entry.st_uid != uid:
+        raise PermissionError(
+            errno.EACCES,
+            f'semaphore directory {path!r} is owned by uid {entry.st_uid}, '
+            f'not by uid {uid}',
+            path,
+        )
+    if stat.S_IMODE(entry.st_mode) != 0o700:
+        os.chmod(path, 0o700)
+
+
 class BoundedSemaphore(LockBase['Lock | None']):
     """
     Bounded semaphore to prevent too many parallel processes from running.
@@ -3400,17 +3457,24 @@ class BoundedSemaphore(LockBase['Lock | None']):
     The slot files must survive for as long as a slot is held. A slot
     file that something else deletes mid-hold silently admits an extra
     holder, because the operating system lock lives on the deleted inode
-    where no new acquirer can see it. The default `directory` is the
-    system temporary directory, which tmp cleaners prune on many systems,
-    so point `directory` somewhere exempt from cleanup for anything long
-    running. On a multi-user system prefer a private directory as well: a
-    slot file created by another user is typically not writable for you,
-    and `acquire` then raises `PermissionError` instead of treating the
-    slot as busy. The slot names are predictable, so in a directory
-    shared with other local users anybody can create or lock the slot
-    files in advance and deny the semaphore; a planted symlink or FIFO
-    at a slot path is refused rather than followed (see `Lock._get_fh`),
-    but only a private ``directory`` keeps other users out.
+    where no new acquirer can see it. The default `directory` is a
+    private per-user directory ``portalocker-<uid>`` under the system
+    temporary directory on POSIX, created with mode ``0700`` on the
+    first acquire and refused when another user owns it or a symlink
+    sits at its path. On Windows, where temporary directories are per
+    user already, the default is the system temporary directory itself.
+    Tmp cleaners prune both on many systems, so point `directory`
+    somewhere exempt from cleanup for anything long running. The slot
+    names are predictable, so in a `directory` shared with other local
+    users anybody can create or lock the slot files in advance and deny
+    the semaphore, and a slot file created by another user is typically
+    not writable for you, which makes `acquire` raise `PermissionError`
+    instead of treating the slot as busy. A planted symlink or FIFO at a
+    slot path is refused rather than followed (see `Lock._get_fh`), but
+    only a private ``directory`` keeps other users out. Up to 4.4.2 the
+    default was the shared temporary directory itself, so a process on
+    4.4.2 or older and one on this release do not share default slots:
+    pass the same explicit `directory` to both during a mixed upgrade.
 
     Prefer `NamedBoundedSemaphore`, a drop-in replacement for this class.
     Without an explicit `name` this class falls back to the shared default
@@ -3437,7 +3501,7 @@ class BoundedSemaphore(LockBase['Lock | None']):
         maximum: int,
         name: str = 'bounded_semaphore',
         filename_pattern: str = '{name}.{number:02d}.lock',
-        directory: str = tempfile.gettempdir(),
+        directory: str | None = None,
         timeout: float | None = DEFAULT_TIMEOUT,
         check_interval: float | None = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool | None = True,
@@ -3452,10 +3516,11 @@ class BoundedSemaphore(LockBase['Lock | None']):
                 the class documentation.
             filename_pattern: Pattern for the lock file names, formatted
                 with ``name`` and ``number``.
-            directory: Directory holding the lock files, the system
-                temporary directory by default. It must already exist;
-                acquiring inside a missing directory raises
-                `FileNotFoundError`.
+            directory: Directory holding the lock files. `None`, the
+                default, selects the private per-user directory described
+                in the class documentation, created on the first acquire.
+                An explicit directory must already exist; acquiring inside
+                a missing directory raises `FileNotFoundError`.
             timeout: See `LockBase`.
             check_interval: See `LockBase`.
             fail_when_locked: See `LockBase`. Defaults to `True` here.
@@ -3472,7 +3537,10 @@ class BoundedSemaphore(LockBase['Lock | None']):
         self.maximum = maximum
         self.name = name
         self.filename_pattern = filename_pattern
-        self.directory = directory
+        self._directory_is_default: bool = directory is None
+        self.directory: str = (
+            _default_semaphore_directory() if directory is None else directory
+        )
         self.lock = None
         super().__init__(
             timeout=timeout,
@@ -3700,6 +3768,10 @@ class BoundedSemaphore(LockBase['Lock | None']):
         """
         if self.lock is not None:
             raise exceptions.LockException('Already locked')
+        # A subclass that skipped the base constructor has no flag and
+        # uses whatever directory it set itself.
+        if getattr(self, '_directory_is_default', False):
+            _ensure_private_directory(self.directory)
         filename: Filename
         for filename in filenames:
             logger.debug('trying lock for %r', filename)
@@ -3807,7 +3879,7 @@ class NamedBoundedSemaphore(BoundedSemaphore):
         maximum: int,
         name: str | None = None,
         filename_pattern: str = '{name}.{number:02d}.lock',
-        directory: str = tempfile.gettempdir(),
+        directory: str | None = None,
         timeout: float | None = DEFAULT_TIMEOUT,
         check_interval: float | None = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool | None = True,
@@ -3820,7 +3892,8 @@ class NamedBoundedSemaphore(BoundedSemaphore):
                 generates a random one, which only makes sense when the
                 semaphore object itself is handed to the other processes.
             filename_pattern: Pattern for the lock file names.
-            directory: Directory holding the lock files.
+            directory: Directory holding the lock files, see
+                `BoundedSemaphore` for the private per-user default.
             timeout: See `LockBase`.
             check_interval: See `LockBase`.
             fail_when_locked: See `LockBase`.

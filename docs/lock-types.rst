@@ -161,16 +161,24 @@ Costs:
 - The slot files must survive while their slots are held. A slot file
   that is deleted externally mid-hold silently admits an extra holder
   (the operating system lock lives on the deleted inode, invisible to
-  new acquirers), and the default ``directory`` is the system temporary
-  directory, exactly where tmp cleaners prune. Point ``directory`` at a
-  location exempt from cleanup for anything long running, and prefer a
-  private directory on multi-user systems: a slot file owned by another
-  user typically raises ``PermissionError`` out of ``acquire`` instead
-  of counting as busy, and because the slot names are predictable, any
-  other user of a shared directory can create or lock them in advance
-  and deny the semaphore. A symlink or FIFO planted at a slot path is
-  refused rather than followed, but only a private directory keeps other
-  users out.
+  new acquirers), and the default ``directory`` lives under the system
+  temporary directory, exactly where tmp cleaners prune. Point
+  ``directory`` at a location exempt from cleanup for anything long
+  running.
+- The default ``directory`` is private to the user: on POSIX a
+  ``portalocker-<uid>`` directory under the system temporary directory,
+  created with mode ``0700`` on the first acquire and refused when
+  another user owns it or a symlink sits at its path. On Windows the
+  per-user temporary directory itself. Keep an explicit ``directory``
+  private as well: the slot names are predictable, so any other user of
+  a shared directory can create or lock them in advance and deny the
+  semaphore, and a slot file owned by another user typically raises
+  ``PermissionError`` out of ``acquire`` instead of counting as busy. A
+  symlink or FIFO planted at a slot path is refused rather than followed,
+  but only a private directory keeps other users out. Up to 4.4.2 the
+  default was the shared temporary directory itself, so a process on an
+  older release and one on this release do not share default slots. Pass
+  both the same explicit ``directory`` during a mixed upgrade.
 
 >>> import portalocker
 >>> semaphore = portalocker.BoundedSemaphore(2, name='workers', directory='')
