@@ -270,3 +270,43 @@ def test_transfer_skips_an_unassigned_slot(tmp_path: pathlib.Path) -> None:
     restored = copy.copy(semaphore)
     assert isinstance(restored, _UnassignedSlotSemaphore)
     assert not hasattr(restored, 'unset')
+
+
+class _ObjectProtocolSemaphore(portalocker.BoundedSemaphore):
+    """A subclass returning the object protocol state pair."""
+
+    __slots__ = ('extra',)
+
+    def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.extra = 'spam'
+
+    def __getstate__(self) -> typing.Any:
+        mapping: dict[str, typing.Any] = dict(vars(self))
+        mapping.pop('_state_lock', None)
+        return mapping, {'extra': self.extra}
+
+
+@pytest.mark.parametrize('method', ['copy', 'deepcopy', 'pickle'])
+def test_setstate_accepts_the_object_protocol_tuple(
+    tmp_path: pathlib.Path, method: str
+) -> None:
+    """A subclass handing back the stdlib's state pair is restored as before.
+
+    4.4.2 rebuilt such a subclass through ``object.__reduce_ex__``. The
+    base ``__setstate__`` that replaced it must take the same shape.
+    """
+    original = _ObjectProtocolSemaphore(
+        1, name='protocol', directory=str(tmp_path)
+    )
+    if method == 'copy':
+        restored = copy.copy(original)
+    elif method == 'deepcopy':
+        restored = copy.deepcopy(original)
+    else:
+        restored = pickle.loads(pickle.dumps(original))  # noqa: S301
+
+    assert restored.extra == 'spam'
+    assert restored.name == 'protocol'
+    assert restored.lock is None
+    assert restored._state_lock is not original._state_lock

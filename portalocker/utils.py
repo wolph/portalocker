@@ -3166,9 +3166,13 @@ class BoundedSemaphore(LockBase['Lock | None']):
     def __getstate__(self) -> dict[str, typing.Any]:
         """Return configuration for transferring an unheld semaphore.
 
-        The local thread lock is recreated by the recipient. A held slot
-        cannot be transferred: its open filehandle and ownership belong
-        to the instance that acquired it.
+        The state is one flat dictionary with the slot values of a
+        slotted subclass merged in, not the ``(dictionary, slot values)``
+        pair ``object.__getstate__`` builds, so a subclass that calls
+        ``super().__getstate__()`` gets a dictionary. The local thread
+        lock is recreated by the recipient. A held slot cannot be
+        transferred: its open filehandle and ownership belong to the
+        instance that acquired it.
 
         Raises:
             TypeError: This semaphore currently holds a slot.
@@ -3191,13 +3195,25 @@ class BoundedSemaphore(LockBase['Lock | None']):
                     state[name] = getattr(self, name)
             return state
 
-    def __setstate__(self, state: dict[str, typing.Any]) -> None:
+    def __setstate__(self, state: typing.Any) -> None:
         """Restore configuration with process-local synchronization.
 
         Args:
-            state: The unheld configuration returned by `__getstate__`.
+            state: The unheld configuration returned by `__getstate__`: a
+                flat dictionary, or the ``(dictionary, slot values)`` pair
+                ``object.__getstate__`` builds for a slotted class, which
+                a subclass with its own ``__getstate__`` may hand back as
+                it could before 4.4.2 grew this method.
         """
-        for name, value in state.items():
+        restored: dict[str, typing.Any]
+        if isinstance(state, tuple):
+            pair: tuple[typing.Any, typing.Any] = typing.cast(
+                'tuple[typing.Any, typing.Any]', state
+            )
+            restored = {**(pair[0] or {}), **(pair[1] or {})}
+        else:
+            restored = state
+        for name, value in restored.items():
             setattr(self, name, value)
         self._state_lock = threading.RLock()
         _live_locks.add(self)
