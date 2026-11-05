@@ -5,6 +5,8 @@ Unreleased:
    while preserving the shared slot configuration. Transferring an
    acquired semaphore raises ``TypeError`` instead of copying ownership
    of its open filehandle.
+ * Private slot attributes declared by semaphore subclasses, including
+   inherited private slots, survive pickle and copy operations.
 
 4.4.2:
 

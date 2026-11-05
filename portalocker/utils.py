@@ -3030,9 +3030,14 @@ def _slot_names(cls: type) -> list[str]:
         slots: str | typing.Iterable[str] = klass.__dict__.get('__slots__', ())
         if isinstance(slots, str):
             slots = (slots,)
-        names.extend(
-            name for name in slots if name not in {'__dict__', '__weakref__'}
-        )
+        for name in slots:
+            if name in {'__dict__', '__weakref__'}:
+                continue
+            if name.startswith('__') and not name.endswith('__'):
+                class_name = klass.__name__.lstrip('_')
+                if class_name:
+                    name = f'_{class_name}{name}'
+            names.append(name)
     return names
 
 
