@@ -1169,3 +1169,26 @@ def test_bytes_command_connection_behind_an_unclonable_pool_keeps_the_lock(
         ]
     finally:
         holder.release()
+
+
+class _OwnShapeRedisLock(redis.RedisLock):
+    """A subclass that owns its state shape through both hooks."""
+
+    def __getstate__(self) -> dict[str, typing.Any]:
+        return {'shape': 'custom', 'rest': dict(vars(self))}
+
+    def __setstate__(self, state: dict[str, typing.Any]) -> None:
+        assert state['shape'] == 'custom'
+        vars(self).update(state['rest'])
+        self.restored_from = state['shape']
+
+
+def test_copy_goes_through_a_subclass_getstate() -> None:
+    """A subclass with its own hook pair sees its own shape on copy."""
+    lock: _OwnShapeRedisLock = _OwnShapeRedisLock(str(random.random()))
+
+    twin: redis.RedisLock = copy.copy(lock)
+
+    assert isinstance(twin, _OwnShapeRedisLock)
+    assert twin.restored_from == 'custom'
+    assert twin.holder_id != lock.holder_id

@@ -1123,11 +1123,20 @@ class RedisLock(utils.LockBase['RedisLock']):
     def _copy_state(self) -> typing.Any:
         """Return this lock's state in the shape ``copy.copy`` uses.
 
-        The instance dictionary alone, or a (dictionary, slot values)
-        pair when a subclass declares ``__slots__``: the state copyreg
-        builds for protocol 2 and above, so a subclass's ``__setstate__``
-        receives what it received before `__copy__` existed.
+        A subclass's own ``__getstate__`` when it defines one, which is
+        what ``__reduce_ex__`` called before `__copy__` existed.
+        Otherwise the instance dictionary alone, or a (dictionary, slot
+        values) pair when a subclass declares ``__slots__``: the state
+        copyreg builds for protocol 2 and above, so a subclass's
+        ``__setstate__`` receives what it received before `__copy__`
+        existed.
         """
+        getstate: typing.Any = getattr(type(self), '__getstate__', None)
+        if getstate is not None and getstate is not getattr(
+            object, '__getstate__', None
+        ):
+            own_getstate: typing.Any = getattr(self, '__getstate__')  # noqa: B009
+            return own_getstate()
         state: dict[str, typing.Any] = dict(vars(self))
         slots: dict[str, typing.Any] = {
             name: getattr(self, name)
