@@ -31,7 +31,9 @@ def _read_prefix(path: Path, limit: int) -> str | None:
     file, never blocks on a FIFO, and never reads more than ``limit``
     bytes. A symlinked file is followed, as it was before the bound
     existed, since some checkout layouts link their ``pyproject.toml``.
-    A file that is not UTF-8 reads as nothing, as before.
+    A file that is not UTF-8 reads as nothing, as before. A multibyte
+    character that the bound cuts in half is dropped and the prefix
+    before it is returned.
 
     Args:
         path: The file to read.
@@ -54,11 +56,22 @@ def _read_prefix(path: Path, limit: int) -> str | None:
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
-        return os.read(fd, limit).decode('utf-8')
-    except (OSError, UnicodeDecodeError):
+        raw: bytes = os.read(fd, limit)
+    except OSError:
         return None
     finally:
         os.close(fd)
+    try:
+        return raw.decode('utf-8')
+    except UnicodeDecodeError as error:
+        cut_by_bound: bool = (
+            len(raw) == limit
+            and error.end == len(raw)
+            and error.reason == 'unexpected end of data'
+        )
+        if not cut_by_bound:
+            return None
+        return raw[: error.start].decode('utf-8')
 
 
 def _unquote(value: str) -> str | None:

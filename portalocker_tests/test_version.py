@@ -307,3 +307,29 @@ def test_read_pyproject_version_rejects_undecodable_bytes(
     path.write_bytes(b"[project]\nname = 'portalocker'\nversion = '9.\xff9'\n")
 
     assert about._read_pyproject_version(path) is None
+
+
+def test_read_prefix_drops_a_multibyte_character_cut_by_the_limit(
+    tmp_path: Path,
+) -> None:
+    """A character straddling the bound is dropped, the rest is read."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    body = 'x' * 15 + 'é' + 'tail'
+    path.write_bytes(body.encode('utf-8'))
+
+    assert about._read_prefix(path, 16) == 'x' * 15
+
+
+def test_read_prefix_keeps_rejecting_undecodable_bytes(tmp_path: Path) -> None:
+    """An invalid byte inside the bound still reads as nothing."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_bytes(b'x' * 5 + b'\xff' + b'x' * 20)
+
+    assert about._read_prefix(path, 16) is None
+    truncated = tmp_path / 'short.toml'
+    truncated.write_bytes(b'x' * 5 + 'é'.encode()[:1])
+    assert about._read_prefix(truncated, 16) is None
