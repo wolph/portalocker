@@ -553,7 +553,9 @@ def test_fenced_grant_is_abandoned_when_subscription_dies_at_incr(
     try:
         assert incr_calls[0] == 1
         assert lock.fence_token == incr_calls[-1]
-        assert lock.fence_token is not None and lock.fence_token >= 2
+        token: int | None = lock.fence_token
+        assert token is not None
+        assert token >= 2
     finally:
         lock.release()
 

@@ -138,7 +138,7 @@ def test_default_directory_on_windows_is_the_temp_dir(
 
     assert utils._default_semaphore_directory() == str(temp_root)
     utils._ensure_private_directory(str(temp_root))
-    assert not _expected_default(temp_root).exists()
+    assert not list(temp_root.glob('portalocker-*'))
 
 
 @posix_only

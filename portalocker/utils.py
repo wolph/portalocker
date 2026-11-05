@@ -51,7 +51,6 @@ import os
 import pathlib
 import random
 import stat
-import sys
 import tempfile
 import threading
 import time
@@ -148,9 +147,6 @@ def _annotate_preserved_payload(error: BaseException, temp_name: str) -> None:
 #: then an `OSError` beats an endless loop.
 _TEMP_NAME_ATTEMPTS: int = 10000
 
-#: Whether `_link_written_inode` may link straight from the open
-#: descriptor through ``/proc/self/fd``, which only Linux supports.
-_PROC_FD_LINKS: bool = sys.platform.startswith('linux')
 
 #: Errno for "the name no longer refers to the file we wrote": a
 #: temporary entry that was swapped under `open_atomic` before or during
@@ -401,28 +397,19 @@ def _link_written_inode(
     temp_name: str,
     path: pathlib.Path,
     written: os.stat_result,
-    fd: int,
 ) -> None:  # pragma: not-posix
     """Hard link the written inode at ``path`` without trusting a name.
 
-    Linux can link straight from the open descriptor through
-    ``/proc/self/fd``, which needs no path lookup at all. Elsewhere the
-    temporary name is verified immediately before the link and the
+    The temporary name is verified immediately before the link and the
     freshly created destination entry is verified immediately after,
     which narrows the window to the link call itself and never
     publishes a swapped entry: a destination that does not carry the
     written identity is unlinked again before the error is raised.
+    Linking straight from the open descriptor through ``/proc/self/fd``
+    would close that window on Linux, but ``os.link`` only follows that
+    magic link on some Python versions, so every platform publishes by
+    name.
     """
-    if _PROC_FD_LINKS:
-        try:
-            os.link(f'/proc/self/fd/{fd}', path, follow_symlinks=True)
-        except OSError as error:
-            # Only a missing or unmounted /proc falls through to the
-            # by-name path; anything else is the link's own verdict.
-            if error.errno != errno.ENOENT or os.path.exists('/proc/self/fd'):
-                raise
-        else:
-            return
     _require_written_inode(temp_name, written)
     os.link(temp_name, path)
     if not _is_written_inode(os.lstat(path), written):
@@ -438,7 +425,6 @@ def _publish_exclusive(
     temp_name: str,
     path: pathlib.Path,
     written: os.stat_result,
-    fd: int,
 ) -> None:
     """Publish the written inode at ``path``, refusing an existing target.
 
@@ -460,8 +446,10 @@ def _publish_exclusive(
     Args:
         temp_name: The written and synchronized temporary file.
         path: The destination. Its directory already exists.
-        written: The identity of the written inode.
-        fd: An open descriptor on the written inode.
+        written: The identity of the written inode. On Windows every
+            descriptor on it is closed by the time this runs, since the
+            rename refuses an open file. On POSIX `open_atomic` keeps one
+            open so the inode cannot be freed and its number reused.
 
     Raises:
         FileExistsError: The destination exists, either reported by the
@@ -474,7 +462,7 @@ def _publish_exclusive(
         os.rename(temp_name, path)
         return
     try:  # pragma: not-posix
-        _link_written_inode(temp_name, path, written, fd)
+        _link_written_inode(temp_name, path, written)
     except OSError as link_error:  # pragma: not-posix
         if link_error.errno not in _HARD_LINK_FALLBACK_ERRNOS:
             raise
@@ -594,11 +582,17 @@ def open_atomic(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     temp_fh, temp_name = _open_exclusive_temp(path, binary)
-    # The written inode is pinned by its identity and by a private
-    # duplicate of the descriptor. Every later step is checked against
-    # that identity rather than trusting whatever the temporary name
-    # resolves to by then, because the directory is shared with other
-    # writers by this function's own threat model.
+    # The written inode is pinned by its identity and, on POSIX, by a
+    # private duplicate of the descriptor that stays open until the
+    # publication is done: an inode with an open descriptor cannot be
+    # freed, so its number cannot be reused by a file another writer
+    # plants at the temporary name to pass the identity check. Every
+    # later step is checked against that identity rather than trusting
+    # whatever the temporary name resolves to by then, because the
+    # directory is shared with other writers by this function's own
+    # threat model. The duplicate also synchronizes the payload when
+    # the body closed the handle. Windows refuses to rename an open
+    # file, so there it is closed right before publication.
     written: os.stat_result = os.fstat(temp_fh.fileno())
     sync_fd: int = os.dup(temp_fh.fileno())
     try:
@@ -607,9 +601,6 @@ def open_atomic(
                 yield temp_fh
                 if not temp_fh.closed:
                     temp_fh.flush()
-            # The body may have closed the handle itself; the duplicate
-            # descriptor still names the written inode, so no reopen by
-            # name is needed to synchronize it.
             os.fsync(sync_fd)
         except BaseException:
             # The caller's body (or the flush) failed: there is no
@@ -620,16 +611,21 @@ def open_atomic(
             with contextlib.suppress(Exception):
                 os.remove(temp_name)
             raise
-
+        if os.name == 'nt':  # pragma: not-nt
+            os.close(sync_fd)
+            sync_fd = -1
         try:
-            _publish_exclusive(temp_name, path, written, sync_fd)
+            _publish_exclusive(temp_name, path, written)
         except Exception as error:
             # Keep the temporary file: deleting it here would silently
             # destroy the payload the caller just wrote.
             _annotate_preserved_payload(error, temp_name)
             raise
     finally:
-        os.close(sync_fd)
+        # Only Windows closed it early, so the false branch is not
+        # reachable on POSIX.
+        if sync_fd != -1:  # pragma: no branch - platform constant
+            os.close(sync_fd)
 
     with contextlib.suppress(Exception):
         os.remove(temp_name)

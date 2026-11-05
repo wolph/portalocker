@@ -726,7 +726,6 @@ def test_open_atomic_unlinks_a_destination_that_links_a_swapped_inode(
     ) -> None:
         real_link(decoy, dst, **kwargs)
 
-    monkeypatch.setattr(portalocker.utils, '_PROC_FD_LINKS', False)
     monkeypatch.setattr(os, 'link', link_decoy)
     with (
         pytest.raises(OSError) as info,
@@ -758,7 +757,6 @@ def test_open_atomic_rename_fallback_refuses_a_swapped_inode(
     ) -> None:
         real_rename(decoy, dst, **kwargs)
 
-    monkeypatch.setattr(portalocker.utils, '_PROC_FD_LINKS', False)
     monkeypatch.setattr(os, 'link', refuse_link)
     monkeypatch.setattr(os, 'rename', rename_decoy)
     with (
@@ -771,81 +769,48 @@ def test_open_atomic_rename_fallback_refuses_a_swapped_inode(
     assert not destination.exists()
 
 
-@pytest.mark.skipif(os.name != 'posix', reason='hard links are POSIX only')
-def test_open_atomic_links_from_the_descriptor_where_supported(
+@pytest.mark.skipif(
+    os.name != 'posix', reason='descriptor tables are POSIX only'
+)
+def test_open_atomic_keeps_a_descriptor_on_the_inode_while_publishing(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With ``/proc/self/fd`` links the temporary name is never used."""
+    """The written inode stays pinned by a descriptor during publication.
+
+    With every descriptor closed, another writer with access to the
+    directory could unlink the temporary file and get its inode number
+    reused by a file of their own, which the identity check would then
+    accept. An open descriptor keeps the inode allocated.
+    """
     destination: pathlib.Path = tmp_path / 'result.bin'
-    sources: list[str] = []
-    real_link = os.link
-    temp_names: list[str] = []
-    real_open_exclusive = portalocker.utils._open_exclusive_temp
+    real_publish = portalocker.utils._publish_exclusive
+    pinned: list[bool] = []
 
-    def recording_open_exclusive(
-        path: pathlib.Path, binary: bool
-    ) -> tuple[typing.IO[typing.Any], str]:
-        handle, name = real_open_exclusive(path, binary)
-        temp_names.append(name)
-        return handle, name
+    def open_descriptor_on(written: os.stat_result) -> bool:
+        for name in os.listdir('/dev/fd'):
+            try:
+                entry: os.stat_result = os.fstat(int(name))
+            except OSError:
+                continue
+            if (entry.st_dev, entry.st_ino) == (
+                written.st_dev,
+                written.st_ino,
+            ):
+                return True
+        return False
 
-    def link_from_descriptor(
-        src: typing.Any, dst: typing.Any, **kwargs: typing.Any
+    def observing_publish(
+        temp_name: str, path: pathlib.Path, written: os.stat_result
     ) -> None:
-        sources.append(str(src))
-        # macOS has no /proc: resolve the descriptor link by hand.
-        real_link(temp_names[-1], dst)
+        pinned.append(open_descriptor_on(written))
+        real_publish(temp_name, path, written)
 
-    monkeypatch.setattr(portalocker.utils, '_PROC_FD_LINKS', True)
     monkeypatch.setattr(
-        portalocker.utils, '_open_exclusive_temp', recording_open_exclusive
+        portalocker.utils, '_publish_exclusive', observing_publish
     )
-    monkeypatch.setattr(os, 'link', link_from_descriptor)
     with portalocker.open_atomic(destination) as file_handle:
         typing.cast(typing.BinaryIO, file_handle).write(b'payload')
 
-    assert sources and sources[0].startswith('/proc/self/fd/')
+    assert pinned == [True]
     assert destination.read_bytes() == b'payload'
-
-
-@pytest.mark.skipif(os.name != 'posix', reason='hard links are POSIX only')
-@pytest.mark.parametrize('proc_present', [False, True])
-def test_open_atomic_descriptor_link_failure_handling(
-    tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
-    proc_present: bool,
-) -> None:
-    """ENOENT without ``/proc`` falls back by name; otherwise it raises."""
-    destination: pathlib.Path = tmp_path / 'result.bin'
-    real_link = os.link
-    real_exists = os.path.exists
-
-    def failing_descriptor_link(
-        src: typing.Any, dst: typing.Any, **kwargs: typing.Any
-    ) -> None:
-        if str(src).startswith('/proc/self/fd/'):
-            raise OSError(errno.ENOENT, 'no /proc here')
-        real_link(src, dst, **kwargs)
-
-    monkeypatch.setattr(portalocker.utils, '_PROC_FD_LINKS', True)
-    monkeypatch.setattr(os, 'link', failing_descriptor_link)
-    monkeypatch.setattr(
-        os.path,
-        'exists',
-        lambda p: (
-            proc_present if str(p) == '/proc/self/fd' else real_exists(p)
-        ),
-    )
-    if proc_present:
-        with (
-            pytest.raises(OSError) as info,
-            portalocker.open_atomic(destination) as file_handle,
-        ):
-            typing.cast(typing.BinaryIO, file_handle).write(b'payload')
-        assert info.value.errno == errno.ENOENT
-        assert not destination.exists()
-    else:
-        with portalocker.open_atomic(destination) as file_handle:
-            typing.cast(typing.BinaryIO, file_handle).write(b'payload')
-        assert destination.read_bytes() == b'payload'
