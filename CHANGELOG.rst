@@ -1,5 +1,44 @@
 Unreleased:
 
+ * The default ``directory`` of ``BoundedSemaphore`` and
+   ``NamedBoundedSemaphore`` is now a private per-user directory under
+   the system temporary directory (``portalocker-<uid>``, mode ``0700``,
+   on POSIX), created on the first acquire and refused when another user
+   owns it or a symlink sits at its path. The slot names are
+   predictable, so the shared temporary directory let any local user
+   create or lock them in advance. A process on 4.4.2 and one on this
+   release no longer share default-directory slots: pass both the same
+   explicit ``directory`` during a mixed upgrade. Windows keeps the
+   per-user temporary directory. Found by a security audit.
+ * ``Lock`` and the classes built on it refuse a symlink, hard link,
+   FIFO or device at the lock path on POSIX (``OSError`` from
+   ``acquire``) instead of opening through it, so a planted link can no
+   longer make a lock truncate or lock another file. A caller-supplied
+   ``opener`` replaces that guard.
+ * ``PidFileLock`` writes its PID through a random, exclusively created
+   ``.portalocker.<hex>.tmp`` file instead of the predictable
+   ``<filename>.<pid>.tmp``, and ``read_pid`` reads only a regular file,
+   at most 64 bytes, instead of blocking on a FIFO.
+ * ``open_atomic`` publishes the inode it wrote, refuses with
+   ``OSError(ESTALE)`` when its temporary name was swapped underneath
+   it, and never leaves a swapped destination in place.
+ * An ``acquire`` interrupted between taking the operating system lock
+   and recording the handle rolls the lock back instead of stranding it.
+ * The version fallback that reads ``pyproject.toml`` from a source
+   checkout is bounded to 64 KiB, never blocks on a FIFO and accepts
+   only a ``[project]`` table named ``portalocker``. ``python -m
+   portalocker combine`` bakes the version into the combined file.
+ * ``RedisLock`` ignores hostile pubsub frames (non-UTF-8, oversized,
+   deeply nested) instead of losing every holder to one, treats forged
+   or conflicting probe replies as inconclusive, confirms a fenced grant
+   through its own subscription, warns once per acquire about a silent
+   foreign subscriber, refuses to copy while held and gives a forked
+   child its own ``holder_id``. Probe and self-check replies are read on
+   a client that decodes with replacement, so one hostile byte on a
+   response channel no longer reaps a healthy holder.
+ * The autofix workflow runs on pull requests only with a pinned ruff,
+   and the master sync token is available only to jobs in the ``pypi``
+   environment.
  * Unheld bounded semaphores can again be passed to spawned worker
    processes. Pickle and copy operations recreate the local thread lock
    while preserving the shared slot configuration. Transferring an

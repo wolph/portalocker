@@ -50,6 +50,7 @@ import logging
 import os
 import pathlib
 import random
+import stat
 import tempfile
 import threading
 import time
@@ -147,6 +148,156 @@ def _annotate_preserved_payload(error: BaseException, temp_name: str) -> None:
 _TEMP_NAME_ATTEMPTS: int = 10000
 
 
+#: Errno for "the name no longer refers to the file we wrote": a
+#: temporary entry that was swapped under `open_atomic` before or during
+#: publication. ``ESTALE`` where the platform defines it, ``EIO``
+#: otherwise. Deliberately never ``EEXIST``, so the error cannot be
+#: mistaken for the destination existing.
+_STALE_ERRNO: int = getattr(errno, 'ESTALE', errno.EIO)
+
+#: Bytes `PidFileLock._read_pid` reads at most. A 64-bit ``pid_max`` is
+#: twenty digits; anything longer is junk, and the bound keeps a device
+#: or a huge file planted at the pid path from being read in full.
+_PID_FILE_READ_LIMIT: int = 64
+
+
+def _read_regular_file_bounded(filename: str, limit: int) -> bytes:
+    """Read at most ``limit + 1`` bytes from the regular file at ``filename``.
+
+    The open refuses a final-component symlink (``O_NOFOLLOW``) and does
+    not block on a FIFO (``O_NONBLOCK``), and the descriptor is checked
+    to be a regular file before anything is read, so a FIFO, a device
+    or a symlink planted at the path reads as unreadable instead of
+    hanging or streaming. Each flag is looked up with ``getattr`` so
+    Windows, which lacks them, keeps its plain open.
+
+    Args:
+        filename: The path to read.
+        limit: The number of bytes the caller is prepared to accept.
+            One more byte is read so the caller can tell a file that is
+            exactly ``limit`` bytes long from a longer one.
+
+    Returns:
+        The leading bytes of the file, at most ``limit + 1`` of them.
+
+    Raises:
+        OSError: The open failed, or the path is not a regular file
+            (``EINVAL``).
+    """
+    flags: int = (
+        os.O_RDONLY
+        | getattr(os, 'O_NOFOLLOW', 0)
+        | getattr(os, 'O_NONBLOCK', 0)
+        | getattr(os, 'O_CLOEXEC', 0)
+        | getattr(os, 'O_BINARY', 0)
+    )
+    fd: int = os.open(filename, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(
+                errno.EINVAL,
+                f'{filename!r} is not a regular file',
+                filename,
+            )
+        chunks: list[bytes] = []
+        remaining: int = limit + 1
+        while remaining > 0:
+            chunk: bytes = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b''.join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _verify_lock_descriptor(fd: int, path: str, nonblock: int) -> None:
+    """Check that ``fd`` names a regular, singly linked file, or raise.
+
+    Args:
+        fd: The descriptor `_guarded_opener` just opened.
+        path: The lock path, for the error message.
+        nonblock: The ``O_NONBLOCK`` flag to clear again, or zero.
+
+    Raises:
+        OSError: ``EINVAL`` for anything but a regular file, ``EMLINK``
+            for a file with more than one link.
+    """
+    entry: os.stat_result = os.fstat(fd)
+    if stat.S_ISDIR(entry.st_mode):
+        # The error a plain open raised for a directory, kept so an
+        # ``except IsADirectoryError`` around a read-mode lock still
+        # catches it.
+        raise IsADirectoryError(
+            errno.EISDIR,
+            os.strerror(errno.EISDIR),
+            path,
+        )
+    if not stat.S_ISREG(entry.st_mode):
+        raise OSError(
+            errno.EINVAL,
+            f'lock path {path!r} is not a regular file',
+            path,
+        )
+    if entry.st_nlink != 1:
+        raise OSError(
+            errno.EMLINK,
+            f'lock path {path!r} has {entry.st_nlink} links',
+            path,
+        )
+    if nonblock:  # pragma: no branch - platform constant
+        # Only reached on POSIX, where the module exists; importing it
+        # here keeps the module importable on Windows.
+        import fcntl  # noqa: PLC0415
+
+        fcntl.fcntl(
+            fd,
+            fcntl.F_SETFL,
+            fcntl.fcntl(fd, fcntl.F_GETFL) & ~nonblock,
+        )
+
+
+def _guarded_opener(path: str, flags: int) -> int:  # pragma: not-posix
+    """Open a lock path without following a planted entry.
+
+    The default ``opener`` of `Lock._get_fh` on POSIX. ``O_NOFOLLOW``
+    refuses a symlink as the final path component (``ELOOP``) and
+    ``O_NONBLOCK`` keeps the open from blocking on a FIFO; the
+    descriptor is then checked by `_verify_lock_descriptor` to be a
+    regular file with exactly one link, so a FIFO, a device or a hard
+    link to somebody else's file is refused (``EINVAL`` and ``EMLINK``)
+    before the lock is taken and before a mode ``w`` lock truncates it.
+    The non-blocking flag is cleared again afterwards, so the handle
+    behaves exactly like one from the builtin opener. The mode
+    ``0o666`` is what the builtin opener passes, so created files get
+    the same umask-adjusted mode.
+
+    Args:
+        path: The lock path.
+        flags: The flags the builtin ``open`` derived from the mode.
+
+    Returns:
+        The opened descriptor.
+
+    Raises:
+        OSError: The open failed or the path names anything other than a
+            regular file with a single link.
+    """
+    nonblock: int = getattr(os, 'O_NONBLOCK', 0)
+    fd: int = os.open(
+        path,
+        flags | getattr(os, 'O_NOFOLLOW', 0) | nonblock,
+        0o666,
+    )
+    try:
+        _verify_lock_descriptor(fd, path, nonblock)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def _open_exclusive_temp(
     path: pathlib.Path,
     binary: bool,
@@ -214,8 +365,68 @@ def _open_exclusive_temp(
     )
 
 
-def _publish_exclusive(temp_name: str, path: pathlib.Path) -> None:
-    """Publish ``temp_name`` at ``path``, refusing an existing target.
+def _is_written_inode(entry: os.stat_result, written: os.stat_result) -> bool:
+    """Report whether ``entry`` is the regular file ``written`` describes."""
+    return stat.S_ISREG(entry.st_mode) and os.path.samestat(entry, written)
+
+
+def _require_written_inode(name: str, written: os.stat_result) -> None:
+    """Refuse to go on when ``name`` no longer names the written inode.
+
+    Args:
+        name: The temporary path about to be published by name.
+        written: The identity of the inode `open_atomic` wrote.
+
+    Raises:
+        FileNotFoundError: ``name`` is missing, the error the publication
+            primitive raised for that case before the identity check
+            existed.
+        OSError: ``name`` is not a regular file or names a different
+            inode. Raised with ``ESTALE``, never as `FileExistsError`,
+            so it cannot be mistaken for the destination existing.
+    """
+    entry: os.stat_result = os.lstat(name)
+    if not _is_written_inode(entry, written):
+        raise OSError(
+            _STALE_ERRNO,
+            f'temporary file {name!r} was replaced before publication',
+        )
+
+
+def _link_written_inode(
+    temp_name: str,
+    path: pathlib.Path,
+    written: os.stat_result,
+) -> None:  # pragma: not-posix
+    """Hard link the written inode at ``path`` without trusting a name.
+
+    The temporary name is verified immediately before the link and the
+    freshly created destination entry is verified immediately after,
+    which narrows the window to the link call itself and never
+    publishes a swapped entry: a destination that does not carry the
+    written identity is unlinked again before the error is raised.
+    Linking straight from the open descriptor through ``/proc/self/fd``
+    would close that window on Linux, but ``os.link`` only follows that
+    magic link on some Python versions, so every platform publishes by
+    name.
+    """
+    _require_written_inode(temp_name, written)
+    os.link(temp_name, path)
+    if not _is_written_inode(os.lstat(path), written):
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise OSError(
+            _STALE_ERRNO,
+            f'temporary file {temp_name!r} was replaced during publication',
+        )
+
+
+def _publish_exclusive(
+    temp_name: str,
+    path: pathlib.Path,
+    written: os.stat_result,
+) -> None:
+    """Publish the written inode at ``path``, refusing an existing target.
 
     Windows renames, which refuses an existing destination on its own.
     POSIX hard links, and on filesystems that cannot hard link (errno in
@@ -223,34 +434,63 @@ def _publish_exclusive(temp_name: str, path: pathlib.Path) -> None:
     rename. The fallback keeps the content atomic but cannot reliably
     refuse concurrent publishers. See the `open_atomic` docstring.
 
+    Every by-name step verifies that ``temp_name`` still names the inode
+    `open_atomic` wrote (``written``) immediately before it runs, and
+    that the destination carries that identity immediately after, so an
+    entry another writer planted at the temporary name is never
+    published. ``EPERM`` from the link is only treated as "no hard link
+    support" while the temporary name still names the written inode;
+    on Linux ``fs.protected_hardlinks`` reports a swapped inode with
+    the same errno.
+
     Args:
         temp_name: The written and synchronized temporary file.
         path: The destination. Its directory already exists.
+        written: The identity of the written inode. On Windows every
+            descriptor on it is closed by the time this runs, since the
+            rename refuses an open file. On POSIX `open_atomic` keeps one
+            open so the inode cannot be freed and its number reused.
 
     Raises:
         FileExistsError: The destination exists, either reported by the
             platform primitive or found by the fallback's check.
-        OSError: The publication primitive failed for another reason.
+        OSError: The publication primitive failed for another reason,
+            or ``temp_name`` no longer named the written inode.
     """
     if os.name == 'nt':  # pragma: not-nt
+        _require_written_inode(temp_name, written)
         os.rename(temp_name, path)
-    else:  # pragma: not-posix
-        try:
-            os.link(temp_name, path)
-        except OSError as link_error:
-            if link_error.errno not in _HARD_LINK_FALLBACK_ERRNOS:
-                raise
-            # No hard link support here (exFAT, some SMB/NFS/FUSE): fall
-            # back to check-then-rename. `lexists` instead of `exists` so
-            # a dangling symlink destination is refused the way the hard
-            # link refuses it, rather than silently replaced.
-            if os.path.lexists(path):
-                raise FileExistsError(
-                    errno.EEXIST,
-                    os.strerror(errno.EEXIST),
-                    str(path),
-                ) from link_error
-            os.rename(temp_name, path)
+        return
+    try:  # pragma: not-posix
+        _link_written_inode(temp_name, path, written)
+    except OSError as link_error:  # pragma: not-posix
+        if link_error.errno not in _HARD_LINK_FALLBACK_ERRNOS:
+            raise
+        # No hard link support here (exFAT, some SMB/NFS/FUSE): fall
+        # back to check-then-rename. `lexists` instead of `exists` so
+        # a dangling symlink destination is refused the way the hard
+        # link refuses it, rather than silently replaced. The identity
+        # check first: a swapped source also fails the link with EPERM
+        # under fs.protected_hardlinks, and must not be renamed.
+        _require_written_inode(temp_name, written)
+        if os.path.lexists(path):
+            raise FileExistsError(
+                errno.EEXIST,
+                os.strerror(errno.EEXIST),
+                str(path),
+            ) from link_error
+        os.rename(temp_name, path)
+        if not _is_written_inode(os.lstat(path), written):
+            # The entry now at the destination is the swapped one this
+            # rename moved there, so removing it is undoing this
+            # publication, not touching anybody else's file.
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+            raise OSError(
+                _STALE_ERRNO,
+                f'temporary file {temp_name!r} was replaced during '
+                'publication',
+            ) from link_error
 
 
 @contextlib.contextmanager
@@ -342,37 +582,50 @@ def open_atomic(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     temp_fh, temp_name = _open_exclusive_temp(path, binary)
+    # The written inode is pinned by its identity and, on POSIX, by a
+    # private duplicate of the descriptor that stays open until the
+    # publication is done: an inode with an open descriptor cannot be
+    # freed, so its number cannot be reused by a file another writer
+    # plants at the temporary name to pass the identity check. Every
+    # later step is checked against that identity rather than trusting
+    # whatever the temporary name resolves to by then, because the
+    # directory is shared with other writers by this function's own
+    # threat model. The duplicate also synchronizes the payload when
+    # the body closed the handle. Windows refuses to rename an open
+    # file, so there it is closed right before publication.
+    written: os.stat_result = os.fstat(temp_fh.fileno())
+    sync_fd: int = os.dup(temp_fh.fileno())
     try:
-        with temp_fh:
-            yield temp_fh
-            if temp_fh.closed:
-                # The body closed the handle itself, so reopen briefly to
-                # keep the payload synchronized before publication.
-                sync_fd: int = os.open(temp_name, os.O_RDWR)
-                try:
-                    os.fsync(sync_fd)
-                finally:
-                    os.close(sync_fd)
-            else:
-                temp_fh.flush()
-                os.fsync(temp_fh.fileno())
-    except BaseException:
-        # The caller's body (or the flush) failed: there is no complete
-        # payload worth keeping, so remove the temporary file instead of
-        # leaking one per failed attempt.
-        with contextlib.suppress(Exception):
-            temp_fh.close()
-        with contextlib.suppress(Exception):
-            os.remove(temp_name)
-        raise
-
-    try:
-        _publish_exclusive(temp_name, path)
-    except Exception as error:
-        # Keep the temporary file: deleting it here would silently
-        # destroy the payload the caller just wrote.
-        _annotate_preserved_payload(error, temp_name)
-        raise
+        try:
+            with temp_fh:
+                yield temp_fh
+                if not temp_fh.closed:
+                    temp_fh.flush()
+            os.fsync(sync_fd)
+        except BaseException:
+            # The caller's body (or the flush) failed: there is no
+            # complete payload worth keeping, so remove the temporary
+            # file instead of leaking one per failed attempt.
+            with contextlib.suppress(Exception):
+                temp_fh.close()
+            with contextlib.suppress(Exception):
+                os.remove(temp_name)
+            raise
+        if os.name == 'nt':  # pragma: not-nt
+            os.close(sync_fd)
+            sync_fd = -1
+        try:
+            _publish_exclusive(temp_name, path, written)
+        except Exception as error:
+            # Keep the temporary file: deleting it here would silently
+            # destroy the payload the caller just wrote.
+            _annotate_preserved_payload(error, temp_name)
+            raise
+    finally:
+        # Only Windows closed it early, so the false branch is not
+        # reachable on POSIX.
+        if sync_fd != -1:  # pragma: no branch - platform constant
+            os.close(sync_fd)
 
     with contextlib.suppress(Exception):
         os.remove(temp_name)
@@ -458,6 +711,7 @@ def _reinit_state_locks_after_fork() -> None:
             )
             if reinit is not None:
                 reinit()  # pragma: not-posix
+        lock._after_fork_in_child()  # pyright: ignore[reportPrivateUsage]
 
 
 # Windows has no fork, and no `os.register_at_fork` to register with. The
@@ -652,6 +906,17 @@ class LockBase(
             The locks to reinitialize; the state lock alone here.
         """
         return (self._state_lock,)
+
+    def _after_fork_in_child(self) -> None:
+        """Adjust per-process state in a freshly forked child.
+
+        Called by `_reinit_state_locks_after_fork` for every live lock
+        after its Python locks were reset, before the child runs any
+        code of its own. The base class has nothing per process beyond
+        those locks; `~portalocker.redis.RedisLock` draws a fresh holder
+        identity here so a forked sibling is a distinct holder on the
+        wire.
+        """
 
     @abc.abstractmethod
     def acquire(
@@ -1066,7 +1331,13 @@ class Lock(LockBase[IOT]):
                 unlocking or closing in `release`, instead of swallowing
                 them. Off by default for backwards compatibility.
             **file_open_kwargs: Passed straight through to `open`, for
-                things like ``encoding`` or ``buffering``.
+                things like ``encoding`` or ``buffering``. On POSIX the
+                lock path is opened through a guarded ``opener`` that
+                refuses a symlink, a hard link or a FIFO planted at the
+                path (see `Lock._get_fh`); passing your own ``opener``
+                replaces that guard, so a custom opener takes over the
+                responsibility of keeping the lock file in a directory
+                only this lock's principal can write to.
 
         Warns:
             UserWarning: An explicit `timeout` was combined with blocking
@@ -1287,6 +1558,11 @@ class Lock(LockBase[IOT]):
 
             # Prepare the filehandle (truncate if needed)
             fh = self._prepare_locked_fh(fh)
+            # The publication runs inside the rollback scope: an
+            # interrupt landing on the state lock entry used to escape
+            # with the OS lock held by a descriptor no release could
+            # ever reach.
+            self._publish_fh(fh)
         except BaseException:
             # Every failed exit runs through here, interrupts included: a
             # `KeyboardInterrupt` in the retry sleep used to leak the
@@ -1294,17 +1570,38 @@ class Lock(LockBase[IOT]):
             # landing after a successful lock left the OS lock held by an
             # untracked descriptor with `release` a silent no-op. The
             # unlock is a harmless no-op on a descriptor that never got
-            # the lock, and both calls stay quiet so they cannot replace
+            # the lock, and all calls stay quiet so they cannot replace
             # whatever is propagating.
+            with contextlib.suppress(Exception):
+                self._unpublish_fh(fh)
             with contextlib.suppress(Exception):
                 portalocker.unlock(fh)
             with contextlib.suppress(Exception):
                 fh.close()
             raise
 
+        return fh
+
+    def _publish_fh(self, fh: IOT) -> None:
+        """Record the locked handle as held, under the state lock.
+
+        The single publication step of `acquire`. `RLock` overrides it
+        to bump its acquire count in the same scope, so the handle and
+        the count can never disagree.
+        """
         with self._state_lock:
             self.fh = fh
-        return fh
+
+    def _unpublish_fh(self, fh: IOT) -> None:
+        """Forget ``fh`` again if `Lock._publish_fh` already recorded it.
+
+        The rollback counterpart of `_publish_fh`, run when `acquire`
+        fails after the publication started. Comparing identities keeps
+        it from clearing a handle some other caller published since.
+        """
+        with self._state_lock:
+            if self.fh is fh:
+                self.fh = None
 
     def _prepare_locked_fh(self, fh: IOT) -> IOT:
         """Run `Lock._prepare_fh`, rolling the lock back when it fails.
@@ -1481,13 +1778,25 @@ class Lock(LockBase[IOT]):
                 )
 
     def _get_fh(self) -> IOT:
-        """Open the file and return the new, still unlocked filehandle."""
+        """Open the file and return the new, still unlocked filehandle.
+
+        On POSIX the file is opened through `_guarded_opener` unless the
+        caller supplied an ``opener`` of their own: a symlink, hard link
+        or FIFO planted at the lock path is refused instead of followed,
+        so a mode ``w`` lock can never truncate somebody else's file
+        through the lock path and `acquire` cannot block on a FIFO. A
+        caller-supplied ``opener`` takes over that responsibility.
+        """
+        open_kwargs: dict[str, typing.Any] = self.file_open_kwargs
+        # ``opener=None`` is the builtin default, not a custom opener.
+        if os.name == 'posix' and open_kwargs.get('opener') is None:
+            open_kwargs = {**open_kwargs, 'opener': _guarded_opener}
         return typing.cast(
             'IOT',
             open(  # noqa: SIM115
                 self.filename,
                 self.mode,
-                **self.file_open_kwargs,
+                **open_kwargs,
             ),
         )
 
@@ -1688,11 +1997,24 @@ class RLock(Lock[IOT]):
                 return self.fh
         # First acquire: take the OS lock outside the state lock, so a
         # blocking or retrying acquire cannot stall another thread's
-        # nested acquire or release behind it.
+        # nested acquire or release behind it. The count is bumped by
+        # `RLock._publish_fh`, in the same state lock scope that
+        # records the handle.
         fh = super().acquire(timeout, check_interval, fail_when_locked)
-        with self._state_lock:
-            self._acquire_count += 1
         return fh
+
+    def _publish_fh(self, fh: IOT) -> None:
+        """Record the handle and the first acquire in one scope."""
+        with self._state_lock:
+            self.fh = fh
+            self._acquire_count += 1
+
+    def _unpublish_fh(self, fh: IOT) -> None:
+        """Roll back `RLock._publish_fh`, count included."""
+        with self._state_lock:
+            if self.fh is fh:
+                self.fh = None
+                self._acquire_count = 0
 
     def release(self) -> None:
         """Drop one acquire, unlocking once the count reaches zero.
@@ -2291,12 +2613,18 @@ class PidFileLock(TemporaryFileLock):
         a close failure after a write failure is chained onto the original
         error instead of replacing it.
         """
-        temp_path: str = f'{self.filename}.{os.getpid()}.tmp'
-        pid_file: typing.TextIO = open(  # noqa: SIM115
-            temp_path,
-            'w',
-            encoding='ascii',
+        # The temporary file is created exclusively under a random name
+        # by the same helper `open_atomic` uses. The old predictable
+        # ``<filename>.<pid>.tmp`` name was opened without ``O_EXCL``,
+        # so an entry planted there by another writer in the directory
+        # was written through and then promoted to the pid file.
+        temp_fh, temp_path = _open_exclusive_temp(
+            pathlib.Path(self.filename),
+            binary=False,
         )
+        # The pid is ASCII digits, so the helper's locale text mode and
+        # the previous ``encoding='ascii'`` write the same bytes.
+        pid_file: typing.IO[str] = typing.cast('typing.IO[str]', temp_fh)
         try:
             try:
                 pid_file.write(str(os.getpid()))
@@ -2579,10 +2907,16 @@ class PidFileLock(TemporaryFileLock):
             not validate).
         """
         try:
-            with open(self.filename, 'rb') as f:
-                raw: bytes = f.read()
+            raw: bytes = _read_regular_file_bounded(
+                self.filename,
+                _PID_FILE_READ_LIMIT,
+            )
         except OSError as error:
             return None, error
+        if len(raw) > _PID_FILE_READ_LIMIT:
+            # Longer than any PID could be: junk, reported like other
+            # junk below, without ever reading the rest of the file.
+            return None, None
         # A valid PID is ASCII digits, so the file is read as bytes and
         # decoded as ASCII with undecodable bytes replaced: the
         # replacement characters fail the digit validation below exactly
@@ -3047,6 +3381,63 @@ def _slot_names(cls: type) -> list[str]:
     return names
 
 
+def _default_semaphore_directory() -> str:
+    """Return the default slot directory of a semaphore, not yet created.
+
+    On POSIX a per-user directory ``portalocker-<uid>`` under the system
+    temporary directory, which `_ensure_private_directory` creates with
+    mode ``0700`` on the first acquire. Windows temporary directories
+    are per user already, so there the system temporary directory itself
+    is the default.
+    """
+    base: str = tempfile.gettempdir()
+    if os.name != 'posix':
+        return base
+    return os.path.join(base, f'portalocker-{os.getuid()}')
+
+
+def _ensure_private_directory(path: str) -> None:
+    """Create ``path`` as a ``0700`` directory of this user, or refuse it.
+
+    The slot names of a semaphore are predictable, so the directory they
+    live in must not be writable by other local users. The directory is
+    created when missing, verified to be a real directory (a planted
+    symlink is refused rather than followed) owned by the current user,
+    and its mode is tightened to ``0700`` when it was ours but open.
+    A no-op outside POSIX.
+
+    Args:
+        path: The directory to create or verify.
+
+    Raises:
+        NotADirectoryError: Something that is not a directory, a symlink
+            included, sits at ``path``.
+        PermissionError: The directory is owned by another user.
+        FileNotFoundError: The parent directory does not exist.
+    """
+    if os.name != 'posix':
+        return
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(path, 0o700)
+    entry: os.stat_result = os.lstat(path)
+    if not stat.S_ISDIR(entry.st_mode):
+        raise OSError(
+            errno.ENOTDIR,
+            f'semaphore directory {path!r} is not a directory',
+            path,
+        )
+    uid: int = os.getuid()
+    if entry.st_uid != uid:
+        raise PermissionError(
+            errno.EACCES,
+            f'semaphore directory {path!r} is owned by uid {entry.st_uid}, '
+            f'not by uid {uid}',
+            path,
+        )
+    if stat.S_IMODE(entry.st_mode) != 0o700:
+        os.chmod(path, 0o700)
+
+
 class BoundedSemaphore(LockBase['Lock | None']):
     """
     Bounded semaphore to prevent too many parallel processes from running.
@@ -3073,13 +3464,24 @@ class BoundedSemaphore(LockBase['Lock | None']):
     The slot files must survive for as long as a slot is held. A slot
     file that something else deletes mid-hold silently admits an extra
     holder, because the operating system lock lives on the deleted inode
-    where no new acquirer can see it. The default `directory` is the
-    system temporary directory, which tmp cleaners prune on many systems,
-    so point `directory` somewhere exempt from cleanup for anything long
-    running. On a multi-user system prefer a private directory as well: a
-    slot file created by another user is typically not writable for you,
-    and `acquire` then raises `PermissionError` instead of treating the
-    slot as busy.
+    where no new acquirer can see it. The default `directory` is a
+    private per-user directory ``portalocker-<uid>`` under the system
+    temporary directory on POSIX, created with mode ``0700`` on the
+    first acquire and refused when another user owns it or a symlink
+    sits at its path. On Windows, where temporary directories are per
+    user already, the default is the system temporary directory itself.
+    Tmp cleaners prune both on many systems, so point `directory`
+    somewhere exempt from cleanup for anything long running. The slot
+    names are predictable, so in a `directory` shared with other local
+    users anybody can create or lock the slot files in advance and deny
+    the semaphore, and a slot file created by another user is typically
+    not writable for you, which makes `acquire` raise `PermissionError`
+    instead of treating the slot as busy. A planted symlink or FIFO at a
+    slot path is refused rather than followed (see `Lock._get_fh`), but
+    only a private ``directory`` keeps other users out. Up to 4.4.2 the
+    default was the shared temporary directory itself, so a process on
+    4.4.2 or older and one on this release do not share default slots:
+    pass the same explicit `directory` to both during a mixed upgrade.
 
     Prefer `NamedBoundedSemaphore`, a drop-in replacement for this class.
     Without an explicit `name` this class falls back to the shared default
@@ -3106,7 +3508,7 @@ class BoundedSemaphore(LockBase['Lock | None']):
         maximum: int,
         name: str = 'bounded_semaphore',
         filename_pattern: str = '{name}.{number:02d}.lock',
-        directory: str = tempfile.gettempdir(),
+        directory: str | None = None,
         timeout: float | None = DEFAULT_TIMEOUT,
         check_interval: float | None = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool | None = True,
@@ -3121,10 +3523,11 @@ class BoundedSemaphore(LockBase['Lock | None']):
                 the class documentation.
             filename_pattern: Pattern for the lock file names, formatted
                 with ``name`` and ``number``.
-            directory: Directory holding the lock files, the system
-                temporary directory by default. It must already exist;
-                acquiring inside a missing directory raises
-                `FileNotFoundError`.
+            directory: Directory holding the lock files. `None`, the
+                default, selects the private per-user directory described
+                in the class documentation, created on the first acquire.
+                An explicit directory must already exist; acquiring inside
+                a missing directory raises `FileNotFoundError`.
             timeout: See `LockBase`.
             check_interval: See `LockBase`.
             fail_when_locked: See `LockBase`. Defaults to `True` here.
@@ -3141,7 +3544,10 @@ class BoundedSemaphore(LockBase['Lock | None']):
         self.maximum = maximum
         self.name = name
         self.filename_pattern = filename_pattern
-        self.directory = directory
+        self._directory_is_default: bool = directory is None
+        self.directory: str = (
+            _default_semaphore_directory() if directory is None else directory
+        )
         self.lock = None
         super().__init__(
             timeout=timeout,
@@ -3385,6 +3791,10 @@ class BoundedSemaphore(LockBase['Lock | None']):
         """
         if self.lock is not None:
             raise exceptions.LockException('Already locked')
+        # A subclass that skipped the base constructor has no flag and
+        # uses whatever directory it set itself.
+        if getattr(self, '_directory_is_default', False):
+            _ensure_private_directory(self.directory)
         filename: Filename
         for filename in filenames:
             logger.debug('trying lock for %r', filename)
@@ -3492,7 +3902,7 @@ class NamedBoundedSemaphore(BoundedSemaphore):
         maximum: int,
         name: str | None = None,
         filename_pattern: str = '{name}.{number:02d}.lock',
-        directory: str = tempfile.gettempdir(),
+        directory: str | None = None,
         timeout: float | None = DEFAULT_TIMEOUT,
         check_interval: float | None = DEFAULT_CHECK_INTERVAL,
         fail_when_locked: bool | None = True,
@@ -3505,7 +3915,8 @@ class NamedBoundedSemaphore(BoundedSemaphore):
                 generates a random one, which only makes sense when the
                 semaphore object itself is handed to the other processes.
             filename_pattern: Pattern for the lock file names.
-            directory: Directory holding the lock files.
+            directory: Directory holding the lock files, see
+                `BoundedSemaphore` for the private per-user default.
             timeout: See `LockBase`.
             check_interval: See `LockBase`.
             fail_when_locked: See `LockBase`.

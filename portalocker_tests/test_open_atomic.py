@@ -616,3 +616,201 @@ def test_open_atomic_removes_temporary_file_on_keyboard_interrupt(
 
     assert not target.exists()
     assert not any(tmp_path.iterdir()), 'the interrupt leaked a temp file'
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='entry swapping is POSIX only')
+@pytest.mark.parametrize('planted', ['regular', 'symlink'])
+def test_open_atomic_refuses_a_swapped_temporary_entry(
+    tmp_path: pathlib.Path,
+    planted: str,
+) -> None:
+    """The inode the body wrote is the only thing that may be published.
+
+    Somebody who can write to the destination directory swaps the entry
+    at the temporary name while the body runs. Publication must notice
+    that the entry no longer names the written inode and refuse, leaving
+    the destination absent and the planted target untouched.
+    """
+    destination: pathlib.Path = tmp_path / 'result.bin'
+    victim: pathlib.Path = tmp_path / 'victim.bin'
+    victim.write_bytes(b'victim payload')
+
+    with (
+        pytest.raises(OSError) as info,
+        portalocker.open_atomic(destination) as file_handle,
+    ):
+        temporary = typing.cast(typing.BinaryIO, file_handle)
+        temporary.write(b'caller payload')
+        temporary.flush()
+        temp_name: pathlib.Path = pathlib.Path(temporary.name)
+        temp_name.unlink()
+        if planted == 'regular':
+            temp_name.write_bytes(b'planted payload')
+        else:
+            temp_name.symlink_to(victim)
+
+    assert not isinstance(info.value, FileExistsError)
+    assert not destination.exists()
+    assert victim.read_bytes() == b'victim payload'
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='entry swapping is POSIX only')
+def test_open_atomic_syncs_closed_handle_without_reopening_by_name(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A body that closed the handle is synced through the kept
+    descriptor, so swapping the entry afterwards cannot redirect the
+    fsync or the publication to a planted file.
+    """
+    destination: pathlib.Path = tmp_path / 'result.bin'
+    victim: pathlib.Path = tmp_path / 'victim.bin'
+    victim.write_bytes(b'victim payload')
+
+    with (
+        pytest.raises(OSError),
+        portalocker.open_atomic(destination) as file_handle,
+    ):
+        temporary = typing.cast(typing.BinaryIO, file_handle)
+        temporary.write(b'caller payload')
+        temp_name = pathlib.Path(temporary.name)
+        temporary.close()
+        temp_name.unlink()
+        temp_name.symlink_to(victim)
+
+    assert not destination.exists()
+    assert victim.read_bytes() == b'victim payload'
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='entry swapping is POSIX only')
+def test_open_atomic_refuses_a_vanished_temporary_entry(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A temporary name that disappeared is reported as missing.
+
+    The error type is the one 4.4.2 raised from the link call, so an
+    ``except FileNotFoundError`` around ``open_atomic`` keeps working.
+    """
+    destination: pathlib.Path = tmp_path / 'result.bin'
+
+    with (
+        pytest.raises(OSError) as info,
+        portalocker.open_atomic(destination) as file_handle,
+    ):
+        temporary = typing.cast(typing.BinaryIO, file_handle)
+        temporary.write(b'caller payload')
+        pathlib.Path(temporary.name).unlink()
+
+    assert isinstance(info.value, FileNotFoundError)
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='hard links are POSIX only')
+def test_open_atomic_unlinks_a_destination_that_links_a_swapped_inode(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A swap that beats the pre-link check is caught after the link.
+
+    ``os.link`` is replaced by one that links a decoy instead of the
+    written inode, standing in for a swap landing between the identity
+    check and the link call. The destination entry that resulted must
+    be removed again and the publication must fail.
+    """
+    destination: pathlib.Path = tmp_path / 'result.bin'
+    decoy: pathlib.Path = tmp_path / 'decoy.bin'
+    decoy.write_bytes(b'decoy')
+    real_link = os.link
+
+    def link_decoy(
+        src: typing.Any, dst: typing.Any, **kwargs: typing.Any
+    ) -> None:
+        real_link(decoy, dst, **kwargs)
+
+    monkeypatch.setattr(os, 'link', link_decoy)
+    with (
+        pytest.raises(OSError) as info,
+        portalocker.open_atomic(destination) as file_handle,
+    ):
+        typing.cast(typing.BinaryIO, file_handle).write(b'caller payload')
+
+    assert info.value.errno == portalocker.utils._STALE_ERRNO
+    assert not destination.exists()
+    assert decoy.read_bytes() == b'decoy'
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='hard links are POSIX only')
+def test_open_atomic_rename_fallback_refuses_a_swapped_inode(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a filesystem without hard links the rename is checked too."""
+    destination: pathlib.Path = tmp_path / 'result.bin'
+    decoy: pathlib.Path = tmp_path / 'decoy.bin'
+    decoy.write_bytes(b'decoy')
+    real_rename = os.rename
+
+    def refuse_link(*_args: typing.Any, **_kwargs: typing.Any) -> None:
+        raise OSError(errno.ENOTSUP, 'no hard links here')
+
+    def rename_decoy(
+        src: typing.Any, dst: typing.Any, **kwargs: typing.Any
+    ) -> None:
+        real_rename(decoy, dst, **kwargs)
+
+    monkeypatch.setattr(os, 'link', refuse_link)
+    monkeypatch.setattr(os, 'rename', rename_decoy)
+    with (
+        pytest.raises(OSError) as info,
+        portalocker.open_atomic(destination) as file_handle,
+    ):
+        typing.cast(typing.BinaryIO, file_handle).write(b'caller payload')
+
+    assert info.value.errno == portalocker.utils._STALE_ERRNO
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(
+    os.name != 'posix', reason='descriptor tables are POSIX only'
+)
+def test_open_atomic_keeps_a_descriptor_on_the_inode_while_publishing(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The written inode stays pinned by a descriptor during publication.
+
+    With every descriptor closed, another writer with access to the
+    directory could unlink the temporary file and get its inode number
+    reused by a file of their own, which the identity check would then
+    accept. An open descriptor keeps the inode allocated.
+    """
+    destination: pathlib.Path = tmp_path / 'result.bin'
+    real_publish = portalocker.utils._publish_exclusive
+    pinned: list[bool] = []
+
+    def open_descriptor_on(written: os.stat_result) -> bool:
+        for name in os.listdir('/dev/fd'):
+            try:
+                entry: os.stat_result = os.fstat(int(name))
+            except OSError:
+                continue
+            if (entry.st_dev, entry.st_ino) == (
+                written.st_dev,
+                written.st_ino,
+            ):
+                return True
+        return False
+
+    def observing_publish(
+        temp_name: str, path: pathlib.Path, written: os.stat_result
+    ) -> None:
+        pinned.append(open_descriptor_on(written))
+        real_publish(temp_name, path, written)
+
+    monkeypatch.setattr(
+        portalocker.utils, '_publish_exclusive', observing_publish
+    )
+    with portalocker.open_atomic(destination) as file_handle:
+        typing.cast(typing.BinaryIO, file_handle).write(b'payload')
+
+    assert pinned == [True]
+    assert destination.read_bytes() == b'payload'
