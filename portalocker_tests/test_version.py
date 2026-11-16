@@ -7,7 +7,8 @@ parser for pyproject.
 """
 
 import importlib
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -16,19 +17,26 @@ import portalocker
 
 
 @pytest.fixture()
-def reload_about() -> Callable[[], None]:
+def reload_about(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[Callable[[], None]]:
     """Return a function to reload portalocker.__about__ cleanly.
 
-    Returns:
+    The module is reloaded once more at teardown, after the test's
+    patches are undone, so a ``__version__`` computed under a patch
+    does not leak into later tests that read the real version.
+
+    Yields:
         A function to call which reloads portalocker.__about__.
     """
+    import portalocker.__about__ as about
 
     def _reload() -> None:
-        import portalocker.__about__ as about
-
         importlib.reload(about)
 
-    return _reload
+    yield _reload
+    monkeypatch.undo()
+    importlib.reload(about)
 
 
 def test_get_version_prefers_importlib_metadata(
@@ -48,14 +56,18 @@ def test_get_version_prefers_importlib_metadata(
 
 
 def test_get_version_fallback_pyproject(
-    monkeypatch: pytest.MonkeyPatch, reload_about: Callable[[], None]
+    monkeypatch: pytest.MonkeyPatch,
+    reload_about: Callable[[], None],
+    tmp_path: Path,
 ) -> None:
     """get_version should fall back to reading pyproject.toml.
 
-    This test patches importlib's metadata.version to raise and patches
-    pathlib.Path.read_text to return a minimal pyproject.toml with a
-    specific version. It then verifies both get_version() and module
-    import-time __version__ resolve to the expected fallback version.
+    This test patches importlib's metadata.version to raise and points
+    the package's resolved location at a temporary tree whose
+    ``pyproject.toml`` names this package with a specific version. It
+    then verifies both get_version() and module import-time __version__
+    resolve to the expected fallback version through the real bounded
+    reader.
     """
     import portalocker.__about__ as about
 
@@ -65,12 +77,14 @@ def test_get_version_fallback_pyproject(
     # Patch upstream importlib.metadata so the module alias picks it up
     monkeypatch.setattr('importlib.metadata.version', _raise, raising=True)
 
-    def fake_read_text(
-        _self: Path, encoding: str = 'utf-8', errors: str | None = None
-    ) -> str:
-        return "[project]\nname = 'portalocker'\nversion = '1.2.3'\n"
-
-    monkeypatch.setattr('pathlib.Path.read_text', fake_read_text, raising=True)
+    (tmp_path / 'pyproject.toml').write_text(
+        "[project]\nname = 'portalocker'\nversion = '1.2.3'\n",
+        encoding='utf-8',
+    )
+    fake_location: Path = tmp_path / 'portalocker' / '__about__.py'
+    monkeypatch.setattr(
+        Path, 'resolve', lambda _self, strict=False: fake_location
+    )
 
     # get_version should now read the fallback version
     assert about.get_version() == '1.2.3'
@@ -135,3 +149,187 @@ def test_get_version_last_resort_default(
     )
 
     assert about.get_version() == '0.0.0'
+
+
+def test_read_pyproject_version_is_bounded_and_linear(tmp_path: Path) -> None:
+    """A huge file of ``[project]`` headers must not take quadratic time.
+
+    The old lazy multiline regex re-scanned the rest of the file from
+    every header, so a planted 1 MiB file above the package stalled the
+    import. The parser now reads a bounded prefix and scans it once.
+    """
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_text('[project]\n' * (1024 * 1024 // 10), encoding='utf-8')
+
+    started = time.perf_counter()
+    assert about._read_pyproject_version(path) is None
+    assert time.perf_counter() - started < 1.0
+
+
+def test_read_pyproject_version_ignores_other_tables(tmp_path: Path) -> None:
+    """A ``version`` under another table is not the project version."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_text(
+        "[tool.something]\nversion = '9.9.9'\n"
+        "[project]\nname = 'portalocker'\n",
+        encoding='utf-8',
+    )
+
+    assert about._read_pyproject_version(path) is None
+
+
+def test_read_pyproject_version_requires_the_portalocker_name(
+    tmp_path: Path,
+) -> None:
+    """Another project's ``pyproject.toml`` above the package is ignored."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_text(
+        "[project]\nname = 'somethingelse'\nversion = '9.9.9'\n",
+        encoding='utf-8',
+    )
+
+    assert about._read_pyproject_version(path) is None
+
+
+def test_read_pyproject_version_reads_the_real_pyproject() -> None:
+    """The repository's own file still resolves, name check included."""
+    import portalocker.__about__ as about
+
+    root = Path(about.__file__).resolve().parent.parent
+    assert about._read_pyproject_version(root / 'pyproject.toml') == (
+        portalocker.__version__
+    )
+
+
+def test_read_prefix_returns_none_for_a_directory(tmp_path: Path) -> None:
+    """A directory (not a regular file) reads as nothing."""
+    import portalocker.__about__ as about
+
+    assert about._read_prefix(tmp_path, 10) is None
+
+
+def test_read_prefix_returns_none_when_the_read_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read error after the open is swallowed like an open error."""
+    import os
+
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_text("[project]\nname = 'portalocker'\n", encoding='utf-8')
+
+    def failing_read(_fd: int, _limit: int) -> bytes:
+        raise OSError('read failed')
+
+    monkeypatch.setattr(os, 'read', failing_read)
+
+    assert about._read_prefix(path, 10) is None
+
+
+def test_read_pyproject_version_ignores_an_unquoted_version(
+    tmp_path: Path,
+) -> None:
+    """Only a quoted TOML string is a version."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_text(
+        "[project]\nname = 'portalocker'\nversion = 1.2\n",
+        encoding='utf-8',
+    )
+
+    assert about._read_pyproject_version(path) is None
+
+
+@pytest.mark.parametrize(
+    ('toml', 'expected'),
+    [
+        ("[project]\nname = 'portalocker'\nversion = '9.9.9' # c\n", '9.9.9'),
+        ('[project]\nname = "portalocker"\nversion = """9.9.9"""\n', None),
+        ("[project]\nname = 'portalocker'\nversion = ''\n", None),
+        ("[project]\nname = 'Portalocker'\nversion = '9.9.9'\n", '9.9.9'),
+        ("[project]\nname = 'porta_locker'\nversion = '9.9.9'\n", None),
+        ("[project]\nname = 'portalocker'\nversion = '9.9.9\n", None),
+        ("[project]\nversion = '9.9.9'\n", None),
+        ("[project]\nname = 'portalocker'\nversion = '9.9.9' x\n", None),
+    ],
+    ids=[
+        'trailing-comment',
+        'triple-quoted',
+        'empty',
+        'case-insensitive-name',
+        'other-normalised-name',
+        'mismatched-quotes',
+        'no-name',
+        'trailing-junk',
+    ],
+)
+def test_read_pyproject_version_toml_edge_cases(
+    tmp_path: Path, toml: str, expected: str | None
+) -> None:
+    """Valid TOML shapes read as TOML would, invalid ones as nothing."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_text(toml, encoding='utf-8')
+
+    assert about._read_pyproject_version(path) == expected
+
+
+def test_read_pyproject_version_follows_a_symlinked_file(
+    tmp_path: Path,
+) -> None:
+    """A symlinked pyproject.toml (monorepo layouts) still resolves."""
+    import portalocker.__about__ as about
+
+    real = tmp_path / 'real.toml'
+    real.write_text("[project]\nname = 'portalocker'\nversion = '9.9.9'\n")
+    link = tmp_path / 'pyproject.toml'
+    link.symlink_to(real)
+
+    assert about._read_pyproject_version(link) == '9.9.9'
+
+
+def test_read_pyproject_version_rejects_undecodable_bytes(
+    tmp_path: Path,
+) -> None:
+    """A file that is not UTF-8 reads as nothing, as before."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_bytes(b"[project]\nname = 'portalocker'\nversion = '9.\xff9'\n")
+
+    assert about._read_pyproject_version(path) is None
+
+
+def test_read_prefix_drops_a_multibyte_character_cut_by_the_limit(
+    tmp_path: Path,
+) -> None:
+    """A character straddling the bound is dropped, the rest is read."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    body = 'x' * 15 + 'é' + 'tail'
+    path.write_bytes(body.encode('utf-8'))
+
+    assert about._read_prefix(path, 16) == 'x' * 15
+
+
+def test_read_prefix_keeps_rejecting_undecodable_bytes(tmp_path: Path) -> None:
+    """An invalid byte inside the bound still reads as nothing."""
+    import portalocker.__about__ as about
+
+    path = tmp_path / 'pyproject.toml'
+    path.write_bytes(b'x' * 5 + b'\xff' + b'x' * 20)
+
+    assert about._read_prefix(path, 16) is None
+    truncated = tmp_path / 'short.toml'
+    truncated.write_bytes(b'x' * 5 + 'é'.encode()[:1])
+    assert about._read_prefix(truncated, 16) is None

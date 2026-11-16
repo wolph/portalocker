@@ -43,21 +43,6 @@ jobs:
               "fail after publishing. Reconcile master first." >&2
             exit 1
           fi
-      # An expired or rotated PAT used to surface only in sync-master,
-      # after the package was already on PyPI. This probes liveness and
-      # Contents write only: the Workflows-write grant cannot be checked
-      # in advance (the rejection happens server-side at push time), so
-      # keep that permission when rotating the token or sync-master
-      # still fails on any release whose diff touches workflow files.
-      - name: Verify the SYNC_MASTER_TOKEN can push
-        env:
-          GH_TOKEN: ${{ secrets.SYNC_MASTER_TOKEN }}
-        run: |
-          push="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.permissions.push')"
-          if [ "$push" != 'true' ]; then
-            echo "SYNC_MASTER_TOKEN is missing, expired or cannot push" >&2
-            exit 1
-          fi
 
   # Tag pushes do not trigger ci.yml on their own; run the full suite
   # here so nothing reaches PyPI without passing tests.
@@ -90,6 +75,27 @@ jobs:
     permissions:
       id-token: write
     steps:
+      # An expired or rotated PAT used to surface only in sync-master,
+      # after the package was already on PyPI. This probes liveness and
+      # Contents write only: the Workflows-write grant cannot be checked
+      # in advance (the rejection happens server-side at push time), so
+      # keep that permission when rotating the token or sync-master
+      # still fails on any release whose diff touches workflow files.
+      #
+      # The check runs here, inside the pypi environment, rather than in
+      # preflight: the token has the broadest write authority in this
+      # workflow, and preflight runs for any v* tag push before the
+      # environment's protection rules apply (security audit run-2,
+      # finding 16). It still runs before anything reaches PyPI.
+      - name: Verify the SYNC_MASTER_TOKEN can push
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_MASTER_TOKEN }}
+        run: |
+          push="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.permissions.push')"
+          if [ "$push" != 'true' ]; then
+            echo "SYNC_MASTER_TOKEN is missing, expired or cannot push" >&2
+            exit 1
+          fi
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dist
@@ -144,6 +150,9 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # The same environment gate as publish, so the token is only handed
+    # to jobs the environment's protection rules cover.
+    environment: pypi
     steps:
       # Only this job pushes. The token is removed by checkout's cleanup.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

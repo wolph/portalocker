@@ -36,10 +36,13 @@ description = 'windows tests with the pywin32 extra installed'
 extras = ['tests', 'win32']
 commands = [['pytest', { replace = 'posargs', extend = true }]]
 
+# Pinned: the ruff-fix output below is committed to pull request branches
+# by autofix.yml, so the fixer must be a known release rather than
+# whatever PyPI serves at run time. Bump both pins together.
 [env.ruff]
 labels = ['check']
 skip_install = true
-deps = ['ruff']
+deps = ['ruff==0.15.18']
 pass_env = ['RUFF_OUTPUT_FORMAT']
 commands = [['ruff', 'check'], ['ruff', 'format', '--check']]
 
@@ -49,7 +52,7 @@ commands = [['ruff', 'check'], ['ruff', 'format', '--check']]
 labels = ['fix']
 description = 'apply every fix ruff can make'
 skip_install = true
-deps = ['ruff']
+deps = ['ruff==0.15.18']
 commands = [['ruff', 'check', '--fix', '--exit-zero'], ['ruff', 'format']]
 
 [env.mypy]

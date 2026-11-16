@@ -17,6 +17,7 @@ from portalocker import redis
 class _DelayedReply:
     now: float = 0.0
     confirmation: bool = True
+    replied: bool = False
 
     def sleep(self, seconds: float) -> None:
         self.now += seconds
@@ -34,6 +35,12 @@ class _DelayedReply:
             self.now += timeout
             return None
         self.now = max(self.now, 9.5)
+        if self.replied:
+            # A real buffer hands a reply out once; the probe keeps
+            # reading past the count for a surplus, and must see the
+            # buffer empty rather than the same frame forever.
+            return None
+        self.replied = True
         return {
             'type': 'message',
             'pattern': None,

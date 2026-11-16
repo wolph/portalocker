@@ -305,3 +305,147 @@ def test_pidfilelock_interrupt_after_sidecar_lock_rolls_back(
     successor.acquire()
     assert successor.read_pid() == os.getpid()
     successor.release()
+
+
+def test_acquire_interrupt_at_publication_releases_lock(
+    tmpfile: str,
+) -> None:
+    """A ``KeyboardInterrupt`` on the publication of the locked handle
+    (the ``_state_lock`` entry right after preparation) must not strand
+    the OS lock on a descriptor the instance never recorded. Either the
+    lock is published and releasable, or it is unlocked and closed.
+    """
+    opened: list[typing.IO[typing.Any]] = []
+    real_get_fh = portalocker.Lock._get_fh
+
+    def recording_get_fh(self: portalocker.Lock) -> typing.IO[typing.Any]:
+        fh = real_get_fh(self)
+        opened.append(fh)
+        return fh
+
+    class InterruptingStateLock:
+        """A stand-in state lock whose first entry raises."""
+
+        def __init__(self) -> None:
+            self.entries: int = 0
+
+        def __enter__(self) -> None:
+            self.entries += 1
+            if self.entries == 1:
+                raise KeyboardInterrupt
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    waiter = portalocker.Lock(tmpfile, timeout=0)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(portalocker.Lock, '_get_fh', recording_get_fh)
+        patch.setattr(waiter, '_state_lock', InterruptingStateLock())
+        with pytest.raises(KeyboardInterrupt):
+            waiter.acquire()
+
+    assert len(opened) == 1
+    assert opened[0].closed, 'the interrupted acquire leaked its descriptor'
+    assert waiter.fh is None
+
+    probe = portalocker.Lock(tmpfile, timeout=0, fail_when_locked=True)
+    probe.acquire()
+    probe.release()
+
+
+def test_rlock_interrupt_at_publication_keeps_count_and_handle_in_sync(
+    tmpfile: str,
+) -> None:
+    """An interrupt between `Lock.acquire` publishing the handle and
+    `RLock.acquire` bumping its count must leave the instance either
+    fully acquired (count 1, handle held) or fully released, never with
+    a held handle the count does not know about.
+    """
+
+    class InterruptingStateLock:
+        def __init__(self, interrupt_on: int) -> None:
+            self.entries: int = 0
+            self.interrupt_on: int = interrupt_on
+
+        def __enter__(self) -> None:
+            self.entries += 1
+            if self.entries == self.interrupt_on:
+                raise KeyboardInterrupt
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    opened: list[typing.IO[typing.Any]] = []
+    real_get_fh = portalocker.Lock._get_fh
+
+    def recording_get_fh(self: portalocker.Lock) -> typing.IO[typing.Any]:
+        fh = real_get_fh(self)
+        opened.append(fh)
+        return fh
+
+    rlock = portalocker.RLock(tmpfile, timeout=0)
+    # Entry 1 is the fast-path check, entry 2 the publication.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(portalocker.Lock, '_get_fh', recording_get_fh)
+        patch.setattr(rlock, '_state_lock', InterruptingStateLock(2))
+        with pytest.raises(KeyboardInterrupt):
+            rlock.acquire()
+
+    assert len(opened) == 1
+    assert (rlock.fh is None) == (rlock._acquire_count == 0)
+    if rlock.fh is not None:
+        rlock.release()
+    assert rlock.fh is None
+    assert opened[0].closed, 'the interrupted acquire leaked its descriptor'
+
+    probe = portalocker.Lock(tmpfile, timeout=0, fail_when_locked=True)
+    probe.acquire()
+    probe.release()
+
+
+@pytest.mark.parametrize('lock_class', [portalocker.Lock, portalocker.RLock])
+def test_acquire_interrupt_after_publication_unpublishes(
+    tmpfile: str,
+    lock_class: type[portalocker.Lock],
+) -> None:
+    """An interrupt leaving the publication scope rolls the record back.
+
+    Staged on the state lock's ``__exit__``: the handle was recorded, so
+    the rollback must forget it again before unlocking and closing it,
+    or ``release`` would later operate on a closed handle.
+    """
+    opened: list[typing.IO[typing.Any]] = []
+    real_get_fh = portalocker.Lock._get_fh
+
+    def recording_get_fh(self: portalocker.Lock) -> typing.IO[typing.Any]:
+        fh = real_get_fh(self)
+        opened.append(fh)
+        return fh
+
+    class ExitInterruptingStateLock:
+        def __init__(self) -> None:
+            self.exits: int = 0
+
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *_exc: object) -> None:
+            self.exits += 1
+            if self.exits == 1 + (lock_class is portalocker.RLock):
+                raise KeyboardInterrupt
+
+    lock = lock_class(tmpfile, timeout=0)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(portalocker.Lock, '_get_fh', recording_get_fh)
+        patch.setattr(lock, '_state_lock', ExitInterruptingStateLock())
+        with pytest.raises(KeyboardInterrupt):
+            lock.acquire()
+
+    assert lock.fh is None
+    assert getattr(lock, '_acquire_count', 0) == 0
+    assert len(opened) == 1
+    assert opened[0].closed
+
+    probe = portalocker.Lock(tmpfile, timeout=0, fail_when_locked=True)
+    probe.acquire()
+    probe.release()

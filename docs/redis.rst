@@ -284,7 +284,11 @@ Connection settings and older holders need care:
   bypasses the retry policy. If you need RESP3 on the subscription,
   supply ``subscription_connection_factory`` and disable maintenance
   notifications yourself. The factory must yield a client whose
-  connections do not retry or reconnect.
+  connections do not retry or reconnect, and one that decodes with
+  ``encoding_errors='replace'``: with strict decoding, redis-py raises
+  inside the worker's read on the first non-UTF-8 frame anybody
+  publishes to the channel, and that read error is a loss. The client
+  the lock derives itself is configured that way.
 - A holder running portalocker 4.1 or older still resubscribes
   silently after a kill, so the loss guarantee covers a channel only
   once every participant on it runs 4.2 or later.
@@ -300,7 +304,16 @@ Connection settings and older holders need care:
   drops the child's local references. The network teardown is skipped
   outside the subscribing process, because an UNSUBSCRIBE over the
   inherited socket would silently revoke the parent's lock. A child
-  that needs the lock must build its own instance.
+  that needs the lock must build its own instance. The child's copy
+  also draws its own ``holder_id`` the moment the fork completes, so a
+  forked sibling that does subscribe is a distinct holder on the wire
+  instead of passing as the parent.
+- A held lock cannot be copied: ``copy.copy`` and ``copy.deepcopy``
+  raise ``TypeError`` while a lock is active, because a shallow twin
+  shared the subscription and its ``release`` or garbage collection
+  revoked the original's lock without a loss signal. An idle lock
+  copies into an independent idle lock with its own ``holder_id``.
+  Pickling raises ``TypeError`` in every state.
 
 After revocation, a new holder can acquire while the old holder still
 runs. Observing the loss and stopping application work are separate steps,
@@ -454,6 +467,22 @@ What the flag signs you up for, stated plainly:
   costs one attempt like any other blip, while a fence key of the
   wrong type raises immediately instead of burning the timeout. With
   fencing enabled the lock is never reported held without a token.
+- A token is only kept when the subscription outlived the ``INCR``.
+  The ``INCR`` runs on the command connection and says nothing about
+  the subscription that is the lock, so right after it the writer
+  publishes a liveness ping on that same connection and requires its
+  own echo back through the held subscription within
+  ``unavailable_timeout``. Redis runs one connection's commands in
+  order, so the echo proves the subscription existed when the token
+  was drawn, and a holder whose subscription died in the window
+  between the confirm probe and the ``INCR`` abandons the attempt
+  instead of out-tokening the writer that replaced it. One ping round
+  trip per fenced exclusive grant is the cost.
+- Every fencing writer on a channel must use the same logical Redis
+  database. Pub/sub is database-agnostic, so the channel (and the
+  lock) is shared across ``db`` numbers, while the counter key lives
+  in the database the command connection selected: writers on
+  different databases would share the lock but not the token order.
 
 Crashed holders
 -----------------
@@ -504,6 +533,22 @@ question and leave the reaping to `RedisLock.acquire`.
 `portalocker_tests/test_redis.py`. Against `fakeredis`, the internal
 cleanup helper is monkeypatched to a no-op so the rest of the contention
 logic can still be tested without it.
+
+Reaping only reaches subscribers that are named like holders. Any Redis
+client can ``SUBSCRIBE`` to the lock channel without ever answering a
+ping, and such a subscriber is counted by ``PUBSUB NUMSUB`` while no
+``CLIENT LIST`` entry can be attributed to it, so every exclusive
+acquire on that channel stays inconclusive until the subscriber leaves.
+The lock cannot repair that; it logs a warning once per acquire naming
+the channel and the number of unidentified subscribers, and the acquire
+ends in ``AlreadyLocked`` when its timeout runs out. Likewise, a client
+that publishes forged records on the response channels makes every
+probe inconclusive (a reply set with more distinct ids than counted
+subscribers, or two different records for one id, is never acted on).
+The fix is on the server: reserve the lock channel and its
+``<channel>-*`` response channels for portalocker clients with Redis ACL
+channel permissions, and treat anybody who may publish on them as a
+lock participant.
 
 Testing against fakeredis
 ----------------------------

@@ -306,6 +306,37 @@ def _reindent(
         yield f'{indent}{line}' if line.strip() else line
 
 
+#: The module-level probe line of ``__about__.py`` that `combine`
+#: replaces with a literal, so the vendored file never reads a
+#: ``pyproject.toml`` it does not own at import time.
+_VERSION_PROBE_LINE = '__version__ = get_version()\n'
+
+
+def _bake_version(parts: list[str]) -> None:
+    """Replace the version probe in ``parts`` with the resolved version.
+
+    ``__about__`` resolves ``__version__`` at import time from installed
+    metadata and, failing that, from the ``pyproject.toml`` above the
+    package. A single vendored file has neither, and the probe would
+    read a file belonging to whoever vendored it. The version this
+    process resolved is written as a literal instead.
+
+    Args:
+        parts: The assembled output lines, edited in place.
+
+    Raises:
+        ValueError: The probe line is missing, which means ``__about__``
+            changed shape and this function needs updating.
+    """
+    from . import __about__  # noqa: PLC0415
+
+    for index, part in enumerate(parts):
+        if part.rstrip('\r\n') == _VERSION_PROBE_LINE.rstrip('\n'):
+            parts[index] = f'__version__ = {__about__.__version__!r}\n'
+            return
+    raise ValueError('combine could not find the __version__ probe line')
+
+
 def combine(args: argparse.Namespace) -> None:
     """Bundle the package into a single vendorable ``portalocker.py`` file.
 
@@ -373,6 +404,7 @@ def combine(args: argparse.Namespace) -> None:
     ]
     seen_files: set[pathlib.Path] = set()
     parts.extend(_read_file(src_path / '__init__.py', seen_files))
+    _bake_version(parts)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(''.join(parts))

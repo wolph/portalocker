@@ -1661,7 +1661,10 @@ def test_redis_drain_probe_replies_grace_poll_collects_in_flight() -> None:
 
     assert sorted(holders) == ['holder-a', 'holder-b', 'holder-c']
     grace: float = redis._PROBE_REPLY_GRACE
-    assert pubsub.timeouts == [0.1, 0, grace, 0, grace]
+    # Reaching the expected count no longer ends the pass: the buffer
+    # is emptied and one grace poll spent so a surplus reply already in
+    # flight (a forged fill) is seen rather than left unread.
+    assert pubsub.timeouts == [0.1, 0, grace, 0, grace, 0, grace]
 
 
 def test_redis_drain_probe_replies_grace_poll_miss_ends_the_pass() -> None:
@@ -6979,13 +6982,17 @@ def test_redis_self_check_skips_other_holders_replies() -> None:
         ]
     )
     held: _ServicedHeldPubSub = _ServicedHeldPubSub()
+    # The handler's local record of the ping nonce is the other half of
+    # the proof; here the handler is scripted away, so it is set by hand.
+    with lock._state_lock:
+        lock._seen_ping_nonce = 'nonce-1'
 
     replied: bool = lock._await_self_check_frame(
         typing.cast('client.PubSub', response),
         typing.cast('client.PubSub', held),
         time.monotonic() + 5,
         0.001,
-        lock._is_own_probe_reply,
+        lambda frame: lock._is_own_probe_reply(frame, 'nonce-1'),
     )
 
     assert replied is True
